@@ -9,6 +9,18 @@ class Settings:
     SQUARE_ACCESS_TOKEN: str = os.environ.get("SQUARE_ACCESS_TOKEN", "")
     SQUARE_LOCATION_ID: str = os.environ.get("SQUARE_LOCATION_ID", "")
     SQUARE_ENVIRONMENT: str = os.environ.get("SQUARE_ENVIRONMENT", "production")
+    SQUARE_TERMINAL_DEVICE_ID: str = os.environ.get(
+        "SQUARE_TERMINAL_DEVICE_ID", ""
+    )
+    SQUARE_WEBHOOK_SIGNATURE_KEY: str = os.environ.get(
+        "SQUARE_WEBHOOK_SIGNATURE_KEY", ""
+    )
+    SQUARE_WEBHOOK_NOTIFICATION_URL: str = os.environ.get(
+        "SQUARE_WEBHOOK_NOTIFICATION_URL", ""
+    )
+    SQUARE_SANDBOX_TEST_SOURCE_ID: str = os.environ.get(
+        "SQUARE_SANDBOX_TEST_SOURCE_ID", "cnon:card-nonce-ok"
+    )
 
     # Twilio SMS
     TWILIO_ACCOUNT_SID: str = os.environ.get("TWILIO_ACCOUNT_SID", "")

@@ -1,0 +1,747 @@
+"""
+Clubhouse Autopilot v1.2 - Database Storage
+Database operations for all schema tables (Spec Section 6.1)
+
+Handles writing and reading from PostgreSQL using raw SQL via
+psycopg2 through SQLAlchemy's engine. All operations are
+site-scoped per the multi-site default principle.
+"""
+
+import json
+import logging
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+from config.database import engine
+from config.settings import settings
+
+logger = logging.getLogger("autopilot.storage")
+
+
+# ============================================================
+# Sites
+# ============================================================
+
+
+def get_site_by_location_id(square_location_id: str) -> Optional[dict]:
+    """Look up a site by its Square location ID."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT site_id, name, square_location_id, timezone "
+                "FROM sites WHERE square_location_id = :loc_id AND active = TRUE"
+            ),
+            {"loc_id": square_location_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+def get_site(site_id: str) -> Optional[dict]:
+    """Look up a site by its UUID."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT site_id, name, square_location_id, timezone "
+                "FROM sites WHERE site_id = :sid"
+            ),
+            {"sid": site_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+def create_site(name: str, square_location_id: str, timezone: str = None) -> str:
+    """Create a new site. Returns the site_id."""
+    tz = timezone or settings.SITE_TIMEZONE
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO sites (name, square_location_id, timezone) "
+                "VALUES (:name, :loc_id, :tz) RETURNING site_id"
+            ),
+            {"name": name, "loc_id": square_location_id, "tz": tz},
+        )
+        site_id = str(result.scalar())
+        conn.commit()
+        logger.info("Created site '%s' with id %s", name, site_id)
+        return site_id
+
+
+# ============================================================
+# Orders (Raw from Square)
+# ============================================================
+
+
+def store_orders_raw(site_id: str, parsed_orders: list[dict]) -> int:
+    """
+    Store raw parsed orders into orders_raw table.
+    Skips duplicates via ON CONFLICT DO NOTHING.
+    Returns count of newly inserted orders.
+    """
+    if not parsed_orders:
+        return 0
+
+    inserted = 0
+    with engine.connect() as conn:
+        for order in parsed_orders:
+            result = conn.execute(
+                _text(
+                    "INSERT INTO orders_raw "
+                    "(order_id, site_id, created_at, closed_at, total_money_cents, state, payload) "
+                    "VALUES (:oid, :sid, :created, :closed, :total, :state, :payload) "
+                    "ON CONFLICT (order_id) DO NOTHING"
+                ),
+                {
+                    "oid": order["order_id"],
+                    "sid": site_id,
+                    "created": order["created_at"],
+                    "closed": order["closed_at"],
+                    "total": order["total_money_cents"],
+                    "state": order["state"],
+                    "payload": json.dumps(order["payload"]),
+                },
+            )
+            inserted += result.rowcount
+
+        conn.commit()
+
+    logger.info("Stored %d/%d orders (skipped %d duplicates)",
+                inserted, len(parsed_orders), len(parsed_orders) - inserted)
+    return inserted
+
+
+# ============================================================
+# Order Items (with workload scores)
+# ============================================================
+
+
+def store_order_items(site_id: str, processed_orders: list[dict]) -> int:
+    """
+    Store processed order items with workload scores.
+    Each line item (expanded by quantity) gets its own row.
+    """
+    if not processed_orders:
+        return 0
+
+    inserted = 0
+    with engine.connect() as conn:
+        for order in processed_orders:
+            for li in order.get("line_items", []):
+                workload = li.get("workload", {})
+                conn.execute(
+                    _text(
+                        "INSERT INTO order_items "
+                        "(order_id, site_id, catalog_item_id, item_name, quantity, "
+                        "position_in_order, workload_units, modifiers, created_at, "
+                        "prep_time_seconds) "
+                        "VALUES (:oid, :sid, :cat_id, :name, :qty, :pos, :wu, "
+                        ":mods, :created, :prep)"
+                    ),
+                    {
+                        "oid": order["order_id"],
+                        "sid": site_id,
+                        "cat_id": li.get("catalog_item_id"),
+                        "name": li.get("item_name"),
+                        "qty": 1,  # Already expanded by quantity
+                        "pos": li.get("effective_position"),
+                        "wu": workload.get("workload_units", 0),
+                        "mods": json.dumps(workload.get("applied_modifiers", [])),
+                        "created": order.get("closed_at"),
+                        "prep": workload.get("prep_time_seconds"),
+                    },
+                )
+                inserted += 1
+
+        conn.commit()
+
+    logger.info("Stored %d order items", inserted)
+    return inserted
+
+
+# ============================================================
+# Workload Timeline (15-min aggregations)
+# ============================================================
+
+
+def store_timeline(site_id: str, timeline: list[dict]) -> int:
+    """
+    Store 15-minute workload timeline entries.
+    Uses ON CONFLICT to update existing intervals (re-processing safe).
+    """
+    if not timeline:
+        return 0
+
+    stored = 0
+    with engine.connect() as conn:
+        for entry in timeline:
+            conn.execute(
+                _text(
+                    "INSERT INTO workload_timeline "
+                    "(site_id, interval_start, workload_units, orders_count, "
+                    "items_count, avg_prep_seconds) "
+                    "VALUES (:sid, :start, :wu, :oc, :ic, :avg_prep) "
+                    "ON CONFLICT (site_id, interval_start) DO UPDATE SET "
+                    "workload_units = EXCLUDED.workload_units, "
+                    "orders_count = EXCLUDED.orders_count, "
+                    "items_count = EXCLUDED.items_count, "
+                    "avg_prep_seconds = EXCLUDED.avg_prep_seconds, "
+                    "calculated_at = NOW()"
+                ),
+                {
+                    "sid": site_id,
+                    "start": entry["interval_start"],
+                    "wu": entry["workload_units"],
+                    "oc": entry["orders_count"],
+                    "ic": entry["items_count"],
+                    "avg_prep": entry["avg_prep_seconds"],
+                },
+            )
+            stored += 1
+
+        conn.commit()
+
+    logger.info("Stored %d timeline intervals", stored)
+    return stored
+
+
+# ============================================================
+# Historical patterns (for prediction engine)
+# ============================================================
+
+
+def get_recent_pattern(
+    site_id: str,
+    day_of_week: int,
+    hour: int,
+    weeks_back: int = None,
+) -> list[float]:
+    """
+    Get recent workload values for same weekday + hour.
+
+    Spec Section 5.5 Layer 1:
+        Last 6-8 weeks, same day_of_week, same time window.
+
+    Args:
+        site_id: Site UUID
+        day_of_week: 0=Monday ... 6=Sunday (Python convention)
+        hour: Hour of day (0-23)
+        weeks_back: How many weeks to look back (default: from settings)
+
+    Returns:
+        List of workload_units values (one per matching interval)
+    """
+    if weeks_back is None:
+        weeks_back = settings.RECENT_PATTERN_WEEKS
+
+    cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT workload_units FROM workload_timeline "
+                "WHERE site_id = :sid "
+                "AND EXTRACT(DOW FROM interval_start) = :dow "
+                "AND EXTRACT(HOUR FROM interval_start) = :hr "
+                "AND interval_start >= :cutoff "
+                "ORDER BY interval_start"
+            ),
+            {
+                "sid": site_id,
+                "dow": day_of_week,
+                "hr": hour,
+                "cutoff": cutoff,
+            },
+        )
+        values = [float(row[0]) for row in result]
+
+    logger.debug(
+        "Recent pattern: dow=%d hour=%d -> %d values", day_of_week, hour, len(values)
+    )
+    return values
+
+
+def get_yoy_pattern(
+    site_id: str,
+    target_date: date,
+    years_back: int = None,
+) -> list[float]:
+    """
+    Get year-over-year workload values for same week number.
+
+    Spec Section 5.5 Layer 2:
+        Same date range from previous year(s).
+
+    Args:
+        site_id: Site UUID
+        target_date: The date we're predicting for
+        years_back: How many years to look back (default: from settings)
+
+    Returns:
+        List of workload_units values from matching historical weeks
+    """
+    if years_back is None:
+        years_back = settings.YOY_YEARS_BACK
+
+    week_number = target_date.isocalendar()[1]
+    target_year = target_date.year
+    past_years = [target_year - i for i in range(1, years_back + 1)]
+
+    if not past_years:
+        return []
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT workload_units FROM workload_timeline "
+                "WHERE site_id = :sid "
+                "AND EXTRACT(WEEK FROM interval_start) = :week "
+                "AND EXTRACT(YEAR FROM interval_start) = ANY(:years) "
+                "ORDER BY interval_start"
+            ),
+            {
+                "sid": site_id,
+                "week": week_number,
+                "years": past_years,
+            },
+        )
+        values = [float(row[0]) for row in result]
+
+    logger.debug("YoY pattern: week=%d years=%s -> %d values", week_number, past_years, len(values))
+    return values
+
+
+def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
+    """
+    Calculate day-of-week multipliers from recent data.
+
+    Spec Section 5.5 Layer 4:
+        Each weekday as % of weekly average.
+
+    Returns:
+        Dict mapping day name -> multiplier (e.g. {"Monday": 0.85, ...})
+    """
+    cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
+
+    day_names = ["Sunday", "Monday", "Tuesday", "Wednesday",
+                 "Thursday", "Friday", "Saturday"]
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT "
+                "EXTRACT(DOW FROM interval_start) as day_of_week, "
+                "AVG(workload_units) as avg_workload "
+                "FROM workload_timeline "
+                "WHERE site_id = :sid "
+                "AND interval_start >= :cutoff "
+                "GROUP BY EXTRACT(DOW FROM interval_start)"
+            ),
+            {"sid": site_id, "cutoff": cutoff},
+        )
+        rows = {int(row[0]): float(row[1]) for row in result}
+
+    if not rows:
+        logger.info("No DoW data, returning defaults")
+        from config.constants import DOW_PATTERN_DEFAULT
+        return DOW_PATTERN_DEFAULT
+
+    # Calculate weekly average across all days
+    weekly_avg = sum(rows.values()) / len(rows) if rows else 1.0
+
+    pattern = {}
+    for dow_num, day_name in enumerate(day_names):
+        if dow_num in rows and weekly_avg > 0:
+            pattern[day_name] = round(rows[dow_num] / weekly_avg, 2)
+        else:
+            from config.constants import DOW_PATTERN_DEFAULT
+            pattern[day_name] = DOW_PATTERN_DEFAULT.get(day_name, 1.0)
+
+    logger.debug("DoW pattern: %s", pattern)
+    return pattern
+
+
+def check_special_events(site_id: str, target_date: date) -> float:
+    """
+    Check if special events affect a given date.
+
+    Spec Section 5.5 Layer 3:
+        Returns event multiplier (1.0 = no impact, 1.18 = +18%).
+        If multiple events, multiplies them together.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT event_name, historical_impact "
+                "FROM special_events "
+                "WHERE site_id = :sid AND event_date = :d"
+            ),
+            {"sid": site_id, "d": target_date},
+        )
+        events = list(result.mappings())
+
+    if not events:
+        return 1.0
+
+    combined = 1.0
+    for event in events:
+        impact = event["historical_impact"] or 1.0
+        logger.info("Event '%s' on %s: %.2fx impact", event["event_name"], target_date, impact)
+        combined *= impact
+
+    return combined
+
+
+# ============================================================
+# Predictions
+# ============================================================
+
+
+def store_prediction(site_id: str, forecast_date: date, prediction: dict) -> str:
+    """
+    Store a prediction record with all pattern components.
+    Returns the prediction_id.
+    """
+    forecast_data = {
+        k: v for k, v in prediction.items()
+        if k not in ("recent_avg", "yoy_avg", "dow_factor", "event_multiplier",
+                      "base_prediction", "confidence")
+    }
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO predictions "
+                "(site_id, forecast_date, model_version, "
+                "recent_baseline, yoy_baseline, dow_factor, event_factor, "
+                "composite_baseline, forecast_data, confidence_score) "
+                "VALUES (:sid, :fd, :mv, :rb, :yb, :df, :ef, :cb, :fdata, :cs) "
+                "ON CONFLICT (site_id, forecast_date) DO UPDATE SET "
+                "model_version = EXCLUDED.model_version, "
+                "recent_baseline = EXCLUDED.recent_baseline, "
+                "yoy_baseline = EXCLUDED.yoy_baseline, "
+                "dow_factor = EXCLUDED.dow_factor, "
+                "event_factor = EXCLUDED.event_factor, "
+                "composite_baseline = EXCLUDED.composite_baseline, "
+                "forecast_data = EXCLUDED.forecast_data, "
+                "confidence_score = EXCLUDED.confidence_score, "
+                "generated_at = NOW() "
+                "RETURNING prediction_id"
+            ),
+            {
+                "sid": site_id,
+                "fd": forecast_date,
+                "mv": "v1.2",
+                "rb": prediction.get("recent_avg"),
+                "yb": prediction.get("yoy_avg"),
+                "df": prediction.get("dow_factor"),
+                "ef": prediction.get("event_multiplier"),
+                "cb": prediction.get("base_prediction"),
+                "fdata": json.dumps(forecast_data),
+                "cs": prediction.get("confidence"),
+            },
+        )
+        prediction_id = str(result.scalar())
+        conn.commit()
+
+    logger.info("Stored prediction %s for %s", prediction_id, forecast_date)
+    return prediction_id
+
+
+def get_prediction(site_id: str, forecast_date: date) -> Optional[dict]:
+    """Retrieve a prediction for a given site and date."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT prediction_id, forecast_date, generated_at, "
+                "recent_baseline, yoy_baseline, dow_factor, event_factor, "
+                "composite_baseline, forecast_data, rush_windows, "
+                "confidence_score, actual_accuracy "
+                "FROM predictions "
+                "WHERE site_id = :sid AND forecast_date = :fd"
+            ),
+            {"sid": site_id, "fd": forecast_date},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+# ============================================================
+# Recommendations
+# ============================================================
+
+
+def store_recommendation(
+    prediction_id: str,
+    site_id: str,
+    action_type: str,
+    action_timing: datetime,
+    owner_role: str,
+    action_details: dict,
+) -> str:
+    """Store a recommendation. Returns the rec_id."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO recommendations "
+                "(prediction_id, site_id, action_type, action_timing, "
+                "owner_role, action_details) "
+                "VALUES (:pid, :sid, :atype, :atiming, :role, :details) "
+                "RETURNING rec_id"
+            ),
+            {
+                "pid": prediction_id,
+                "sid": site_id,
+                "atype": action_type,
+                "atiming": action_timing,
+                "role": owner_role,
+                "details": json.dumps(action_details),
+            },
+        )
+        rec_id = str(result.scalar())
+        conn.commit()
+
+    return rec_id
+
+
+# ============================================================
+# Adoption Logs
+# ============================================================
+
+
+def store_adoption_log(
+    site_id: str,
+    log_date: date,
+    rec_id: str,
+    manager_name: str,
+    adopted: bool,
+    rush_timing_rating: int = None,
+    helpfulness_rating: int = None,
+    notes: str = None,
+) -> str:
+    """Store an adoption feedback log. Returns the log_id."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO adoption_logs "
+                "(site_id, log_date, rec_id, manager_name, adopted, "
+                "rush_timing_rating, helpfulness_rating, notes) "
+                "VALUES (:sid, :ld, :rid, :mn, :adopted, :rtr, :hr, :notes) "
+                "RETURNING log_id"
+            ),
+            {
+                "sid": site_id,
+                "ld": log_date,
+                "rid": rec_id,
+                "mn": manager_name,
+                "adopted": adopted,
+                "rtr": rush_timing_rating,
+                "hr": helpfulness_rating,
+                "notes": notes,
+            },
+        )
+        log_id = str(result.scalar())
+        conn.commit()
+
+    return log_id
+
+
+# ============================================================
+# Menu Items & Modifiers
+# ============================================================
+
+
+def upsert_menu_item(
+    site_id: str,
+    catalog_item_id: str,
+    item_name: str,
+    base_workload_score: float,
+    category: str = None,
+    avg_prep_seconds: int = None,
+) -> None:
+    """Insert or update a menu item's workload mapping."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO menu_items "
+                "(site_id, catalog_item_id, item_name, category, "
+                "base_workload_score, avg_prep_seconds) "
+                "VALUES (:sid, :cat_id, :name, :cat, :score, :prep) "
+                "ON CONFLICT (site_id, catalog_item_id) DO UPDATE SET "
+                "item_name = EXCLUDED.item_name, "
+                "category = EXCLUDED.category, "
+                "base_workload_score = EXCLUDED.base_workload_score, "
+                "avg_prep_seconds = EXCLUDED.avg_prep_seconds"
+            ),
+            {
+                "sid": site_id,
+                "cat_id": catalog_item_id,
+                "name": item_name,
+                "cat": category,
+                "score": base_workload_score,
+                "prep": avg_prep_seconds,
+            },
+        )
+        conn.commit()
+
+
+def upsert_modifier(
+    site_id: str,
+    catalog_modifier_id: str,
+    modifier_name: str,
+    workload_add: float,
+) -> None:
+    """Insert or update a modifier's workload adjustment."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO modifiers "
+                "(site_id, catalog_modifier_id, modifier_name, workload_add) "
+                "VALUES (:sid, :mod_id, :name, :add) "
+                "ON CONFLICT (site_id, catalog_modifier_id) DO UPDATE SET "
+                "modifier_name = EXCLUDED.modifier_name, "
+                "workload_add = EXCLUDED.workload_add"
+            ),
+            {
+                "sid": site_id,
+                "mod_id": catalog_modifier_id,
+                "name": modifier_name,
+                "add": workload_add,
+            },
+        )
+        conn.commit()
+
+
+# ============================================================
+# Contacts
+# ============================================================
+
+
+def get_contacts_by_role(site_id: str, role_label: str) -> list[dict]:
+    """Get active contacts for a site filtered by role (P1/P2/P3/MANAGER)."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT contact_id, full_name, phone_e164, role_label "
+                "FROM contacts "
+                "WHERE site_id = :sid AND role_label = :role AND is_active = TRUE"
+            ),
+            {"sid": site_id, "role": role_label},
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+# ============================================================
+# Manual Signals (fallback toggles)
+# ============================================================
+
+
+def store_manual_signal(site_id: str, signal_type: str, value: str = None) -> None:
+    """Store a manual signal (BAR2_OPEN, DELIVERY_STACKING, MILK_QUEUE_HIGH)."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO manual_signals (site_id, signal_type, value) "
+                "VALUES (:sid, :stype, :val)"
+            ),
+            {"sid": site_id, "stype": signal_type, "val": value},
+        )
+        conn.commit()
+
+
+# ============================================================
+# Weekly Reviews
+# ============================================================
+
+
+def get_weekly_stats(site_id: str, week_start: date, week_end: date) -> dict:
+    """
+    Compute weekly statistics for the review report.
+    Aggregates prediction accuracy and adoption rates.
+    """
+    with engine.connect() as conn:
+        # Prediction accuracy
+        acc_result = conn.execute(
+            _text(
+                "SELECT AVG(actual_accuracy), COUNT(*) "
+                "FROM predictions "
+                "WHERE site_id = :sid "
+                "AND forecast_date BETWEEN :ws AND :we "
+                "AND actual_accuracy IS NOT NULL"
+            ),
+            {"sid": site_id, "ws": week_start, "we": week_end},
+        )
+        acc_row = acc_result.first()
+        avg_accuracy = float(acc_row[0]) if acc_row and acc_row[0] else None
+        prediction_count = int(acc_row[1]) if acc_row else 0
+
+        # Adoption rate
+        adopt_result = conn.execute(
+            _text(
+                "SELECT "
+                "COUNT(*) FILTER (WHERE adopted = TRUE) as adopted_count, "
+                "COUNT(*) as total_count "
+                "FROM adoption_logs "
+                "WHERE site_id = :sid "
+                "AND log_date BETWEEN :ws AND :we"
+            ),
+            {"sid": site_id, "ws": week_start, "we": week_end},
+        )
+        adopt_row = adopt_result.first()
+        adopted = int(adopt_row[0]) if adopt_row else 0
+        total = int(adopt_row[1]) if adopt_row else 0
+        adoption_rate = adopted / total if total > 0 else None
+
+    return {
+        "avg_prediction_accuracy": round(avg_accuracy, 2) if avg_accuracy else None,
+        "prediction_days": prediction_count,
+        "adoption_rate": round(adoption_rate, 2) if adoption_rate else None,
+        "recommendations_total": total,
+        "recommendations_adopted": adopted,
+    }
+
+
+# ============================================================
+# Full daily pipeline storage
+# ============================================================
+
+
+def store_daily_pipeline(site_id: str, pipeline_result: dict) -> dict:
+    """
+    Store all outputs from a daily processing pipeline run.
+
+    Takes the output of processing.process_orders_batch() and writes:
+    1. Raw orders -> orders_raw
+    2. Order items with workload -> order_items
+    3. Timeline aggregation -> workload_timeline
+
+    Returns counts of stored records.
+    """
+    orders = pipeline_result.get("orders", [])
+    timeline = pipeline_result.get("timeline", [])
+
+    orders_stored = store_orders_raw(site_id, orders)
+    items_stored = store_order_items(site_id, orders)
+    timeline_stored = store_timeline(site_id, timeline)
+
+    result = {
+        "orders_stored": orders_stored,
+        "items_stored": items_stored,
+        "timeline_stored": timeline_stored,
+    }
+
+    logger.info(
+        "Daily pipeline storage complete: %d orders, %d items, %d intervals",
+        orders_stored, items_stored, timeline_stored,
+    )
+    return result
+
+
+# ============================================================
+# Helper
+# ============================================================
+
+def _text(sql: str):
+    """Create a SQLAlchemy text object for raw SQL execution."""
+    from sqlalchemy import text
+    return text(sql)

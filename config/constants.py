@@ -81,6 +81,9 @@ MILK_SPLIT_DEFAULT = {
 # Milk-based drink ratio (from spec example)
 MILK_DRINK_RATIO = 0.70
 
+# Drink keys that require milk steaming
+MILK_DRINK_KEYS = {"latte", "cappuccino", "flat_white", "mocha", "iced_latte"}
+
 # ------------------------------------------------------------
 # Transition Thresholds (Section 3.3)
 # ------------------------------------------------------------
