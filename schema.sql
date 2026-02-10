@@ -1,0 +1,242 @@
+-- ============================================================
+-- CLUBHOUSE AUTOPILOT v1.2 - Database Schema
+-- PostgreSQL (production) / SQLite (dev)
+-- ============================================================
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- ============================================================
+-- Sites table
+-- ============================================================
+CREATE TABLE sites (
+    site_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name TEXT NOT NULL,
+    square_location_id TEXT NOT NULL UNIQUE,
+    timezone TEXT NOT NULL DEFAULT 'Australia/Brisbane',
+    created_at TIMESTAMP DEFAULT NOW(),
+    active BOOLEAN DEFAULT TRUE
+);
+
+-- ============================================================
+-- Contacts (Staff phone numbers for SMS routing)
+-- ============================================================
+CREATE TABLE contacts (
+    contact_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    full_name TEXT NOT NULL,
+    phone_e164 TEXT NOT NULL,
+    role_label TEXT CHECK (role_label IN ('P1','P2','P3','MANAGER')),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_contacts_site_role ON contacts(site_id, role_label) WHERE is_active = TRUE;
+
+-- ============================================================
+-- Menu Items (Workload mapping)
+-- ============================================================
+CREATE TABLE menu_items (
+    item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    catalog_item_id TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    category TEXT,
+    base_workload_score REAL NOT NULL,
+    avg_prep_seconds INT,
+    active BOOLEAN DEFAULT TRUE,
+    UNIQUE(site_id, catalog_item_id)
+);
+
+-- ============================================================
+-- Modifiers
+-- ============================================================
+CREATE TABLE modifiers (
+    modifier_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    catalog_modifier_id TEXT NOT NULL,
+    modifier_name TEXT NOT NULL,
+    workload_add REAL NOT NULL,
+    UNIQUE(site_id, catalog_modifier_id)
+);
+
+-- ============================================================
+-- Orders (Raw from Square)
+-- ============================================================
+CREATE TABLE orders_raw (
+    order_id TEXT PRIMARY KEY,
+    site_id UUID REFERENCES sites(site_id),
+    created_at TIMESTAMP NOT NULL,
+    closed_at TIMESTAMP,
+    total_money_cents INT,
+    state TEXT,
+    payload JSONB NOT NULL,
+    ingested_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_orders_site_created ON orders_raw(site_id, created_at);
+CREATE INDEX idx_orders_site_closed ON orders_raw(site_id, closed_at);
+
+-- ============================================================
+-- Order Items
+-- ============================================================
+CREATE TABLE order_items (
+    item_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id TEXT REFERENCES orders_raw(order_id) ON DELETE CASCADE,
+    site_id UUID REFERENCES sites(site_id),
+    catalog_item_id TEXT,
+    item_name TEXT,
+    quantity INT DEFAULT 1,
+    position_in_order INT,
+    workload_units REAL NOT NULL,
+    modifiers JSONB,
+    created_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    prep_time_seconds INT
+);
+
+CREATE INDEX idx_items_site_created ON order_items(site_id, created_at);
+
+-- ============================================================
+-- Workload Timeline (15-min aggregations)
+-- ============================================================
+CREATE TABLE workload_timeline (
+    timeline_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    interval_start TIMESTAMP NOT NULL,
+    workload_units REAL NOT NULL,
+    orders_count INT NOT NULL,
+    items_count INT NOT NULL,
+    avg_prep_seconds REAL,
+    calculated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, interval_start)
+);
+
+CREATE INDEX idx_workload_site_interval ON workload_timeline(site_id, interval_start);
+
+-- ============================================================
+-- Historical Pattern Analysis (Year-over-Year)
+-- ============================================================
+CREATE TABLE historical_patterns (
+    pattern_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    pattern_type TEXT NOT NULL,  -- 'dow', 'yoy', 'event', 'seasonal'
+    pattern_key TEXT NOT NULL,   -- 'monday', '2025-02-07', 'nundah_markets'
+    avg_workload REAL NOT NULL,
+    sample_size INT NOT NULL,    -- How many data points
+    confidence REAL,             -- 0.0 to 1.0
+    last_updated TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, pattern_type, pattern_key)
+);
+
+CREATE INDEX idx_patterns_site_type ON historical_patterns(site_id, pattern_type);
+
+-- ============================================================
+-- Special Events Calendar
+-- ============================================================
+CREATE TABLE special_events (
+    event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    event_name TEXT NOT NULL,
+    event_date DATE NOT NULL,
+    event_type TEXT,        -- 'market', 'festival', 'holiday', 'school_holiday'
+    recurrence TEXT,        -- 'weekly', 'annual', 'one_time'
+    historical_impact REAL, -- Multiplier (1.0 = no impact, 1.18 = +18%)
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_events_site_date ON special_events(site_id, event_date);
+
+-- ============================================================
+-- Predictions (Updated with pattern breakdown)
+-- ============================================================
+CREATE TABLE predictions (
+    prediction_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    forecast_date DATE NOT NULL,
+    generated_at TIMESTAMP DEFAULT NOW(),
+    model_version TEXT,
+
+    -- Pattern components
+    recent_baseline REAL,      -- Last 6-8 weeks
+    yoy_baseline REAL,         -- Year-over-year
+    dow_factor REAL,           -- Day-of-week multiplier
+    event_factor REAL,         -- Special event multiplier
+
+    -- Final forecast
+    composite_baseline REAL,   -- Weighted combination
+    forecast_data JSONB NOT NULL,
+    rush_windows JSONB,
+    confidence_score REAL,
+    actual_accuracy REAL,
+    UNIQUE(site_id, forecast_date)
+);
+
+CREATE INDEX idx_predictions_site_date ON predictions(site_id, forecast_date);
+
+-- ============================================================
+-- Recommendations (Daily actions)
+-- ============================================================
+CREATE TABLE recommendations (
+    rec_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    prediction_id UUID REFERENCES predictions(prediction_id),
+    site_id UUID REFERENCES sites(site_id),
+    action_type TEXT NOT NULL,
+    action_timing TIMESTAMP NOT NULL,
+    owner_role TEXT CHECK (owner_role IN ('P1','P2','P3','MANAGER')),
+    action_details JSONB,
+    adopted BOOLEAN,
+    outcome_data JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_recs_site_timing ON recommendations(site_id, action_timing);
+
+-- ============================================================
+-- Adoption Logs (Daily feedback)
+-- ============================================================
+CREATE TABLE adoption_logs (
+    log_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    log_date DATE NOT NULL,
+    rec_id UUID REFERENCES recommendations(rec_id),
+    manager_name TEXT,
+    adopted BOOLEAN,
+    rush_timing_rating INT CHECK (rush_timing_rating BETWEEN 1 AND 5),
+    helpfulness_rating INT CHECK (helpfulness_rating BETWEEN 1 AND 5),
+    notes TEXT,
+    logged_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_adoption_site_date ON adoption_logs(site_id, log_date);
+
+-- ============================================================
+-- Manual Signals (Fallback toggles)
+-- ============================================================
+CREATE TABLE manual_signals (
+    signal_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    signal_type TEXT NOT NULL,
+    value TEXT,
+    occurred_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_signals_site_time ON manual_signals(site_id, occurred_at);
+
+-- ============================================================
+-- Weekly Reviews
+-- ============================================================
+CREATE TABLE weekly_reviews (
+    review_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    week_start DATE NOT NULL,
+    week_end DATE NOT NULL,
+    avg_prediction_accuracy REAL,
+    avg_adoption_rate REAL,
+    labour_pct_actual REAL,
+    labour_pct_target REAL,
+    insights JSONB,
+    actions_next_week JSONB,
+    generated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, week_start)
+);
