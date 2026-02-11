@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clubhouse Autopilot</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="dashboard">
+
+    <!-- 1. Site Header -->
+    <header class="site-header">
+      <div>
+        <h1 id="site-name">Clubhouse Autopilot</h1>
+        <p class="sub" id="site-sub">Loading...</p>
+      </div>
+      <div class="clock">
+        <div class="time" id="clock-time">--:--</div>
+        <div id="clock-date">--</div>
+      </div>
+    </header>
+
+    <div class="grid">
+
+      <!-- 2. Today's Forecast Card -->
+      <div class="panel" id="panel-forecast">
+        <h2>Today's Forecast</h2>
+        <div id="forecast-content" class="loading">Loading forecast...</div>
+      </div>
+
+      <!-- 4. Rush Windows Timeline -->
+      <div class="panel" id="panel-rush">
+        <h2>Rush Windows</h2>
+        <div id="rush-content" class="loading">Loading rush data...</div>
+      </div>
+
+      <!-- 3. Hourly Workload Chart -->
+      <div class="panel full-width" id="panel-chart">
+        <h2>Hourly Workload</h2>
+        <div id="chart-content" class="loading">Loading chart...</div>
+      </div>
+
+      <!-- 5. Accuracy & Adoption Strip -->
+      <div class="panel full-width" id="panel-accuracy">
+        <h2>Accuracy &amp; Adoption</h2>
+        <div id="accuracy-content" class="loading">Loading metrics...</div>
+      </div>
+
+      <!-- 6. Recent Recommendations Log -->
+      <div class="panel full-width" id="panel-recs">
+        <h2>Recent Recommendations</h2>
+        <div id="recs-content" class="loading">Loading recommendations...</div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

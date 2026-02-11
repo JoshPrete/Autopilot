@@ -9,6 +9,7 @@ site-scoped per the multi-site default principle.
 
 import json
 import logging
+import uuid as _uuid
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -437,7 +438,7 @@ def store_prediction(site_id: str, forecast_date: date, prediction: dict) -> str
                 "df": prediction.get("dow_factor"),
                 "ef": prediction.get("event_multiplier"),
                 "cb": prediction.get("base_prediction"),
-                "fdata": json.dumps(forecast_data),
+                "fdata": _json_dumps(forecast_data),
                 "cs": prediction.get("confidence"),
             },
         )
@@ -740,6 +741,20 @@ def store_daily_pipeline(site_id: str, pipeline_result: dict) -> dict:
 # ============================================================
 # Helper
 # ============================================================
+
+class _JSONEncoder(json.JSONEncoder):
+    """Handle UUID and date/datetime objects in JSON serialization."""
+    def default(self, o):
+        if isinstance(o, _uuid.UUID):
+            return str(o)
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        return super().default(o)
+
+
+def _json_dumps(obj):
+    return json.dumps(obj, cls=_JSONEncoder)
+
 
 def _text(sql: str):
     """Create a SQLAlchemy text object for raw SQL execution."""

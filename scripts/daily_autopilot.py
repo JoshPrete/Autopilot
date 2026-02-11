@@ -92,7 +92,10 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
 
     # 1. Fetch from Square
     ingestion = SquareIngestion()
-    raw_orders = ingestion.fetch_todays_orders()
+    if run_date == date.today():
+        raw_orders = ingestion.fetch_todays_orders()
+    else:
+        raw_orders = ingestion.fetch_date_range(datetime.combine(run_date, datetime.min.time()))
 
     if not raw_orders:
         logger.warning("No orders fetched for %s", run_date)
