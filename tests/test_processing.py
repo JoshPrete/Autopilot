@@ -14,7 +14,7 @@ Covers Spec Sections 5.1-5.5:
 import pytest
 
 from data.processing import (
-    DRINK_NAME_MAP,
+    ITEM_CATALOG,
     MODIFIER_NAME_MAP,
     aggregate_timeline,
     calculate_item_workload,
@@ -23,6 +23,7 @@ from data.processing import (
     predict_workload,
     process_orders_batch,
     resolve_drink_key,
+    resolve_item_key,
     resolve_modifier_key,
 )
 
@@ -32,38 +33,63 @@ from data.processing import (
 # ============================================================
 
 
-class TestResolveDrinkKey:
-    def test_exact_match(self):
-        assert resolve_drink_key("latte") == "latte"
-        assert resolve_drink_key("cappuccino") == "cappuccino"
-        assert resolve_drink_key("flat white") == "flat_white"
+class TestResolveItemKey:
+    """Test the new resolve_item_key that returns (score_key, category)."""
 
-    def test_case_insensitive(self):
-        assert resolve_drink_key("Latte") == "latte"
-        assert resolve_drink_key("FLAT WHITE") == "flat_white"
-        assert resolve_drink_key("Mocha") == "mocha"
+    def test_square_hot_drink_sizes(self):
+        assert resolve_item_key("12oz/Medium") == ("latte", "drink")
+        assert resolve_item_key("8oz/Small") == ("flat_white", "drink")
+        assert resolve_item_key("16oz/Large") == ("latte", "drink")
+        assert resolve_item_key("6oz") == ("espresso", "drink")
 
-    def test_substring_match(self):
-        assert resolve_drink_key("Oat Latte Large") == "latte"
-        assert resolve_drink_key("Iced Coffee Special") == "iced_latte"
-        assert resolve_drink_key("Double Espresso") == "espresso"
+    def test_square_iced_drink_sizes(self):
+        assert resolve_item_key("16oz/ICED MEDIUM") == ("iced_latte", "drink")
+        assert resolve_item_key("12oz/ICED SMALL") == ("iced_latte", "drink")
+        assert resolve_item_key("20oz\\ICED LARGE") == ("iced_latte", "drink")
 
-    def test_alias_match(self):
-        assert resolve_drink_key("cafe latte") == "latte"
-        assert resolve_drink_key("americano") == "long_black"
-        assert resolve_drink_key("flatwhite") == "flat_white"
-        assert resolve_drink_key("short black") == "espresso"
-        assert resolve_drink_key("hot chocolate") == "mocha"
+    def test_espresso_shots(self):
+        assert resolve_item_key("4oz/Pic, Esp, Dop") == ("espresso", "drink")
+
+    def test_babycino_pupacino(self):
+        assert resolve_item_key("Babycino") == ("babycino", "drink")
+        assert resolve_item_key("Pupacino") == ("babycino", "drink")
+
+    def test_food_items(self):
+        assert resolve_item_key("TOASTIE") == ("toastie", "food")
+        assert resolve_item_key("BUTTERBOY") == ("toastie", "food")
+        assert resolve_item_key("Breakfast Wrap") == ("wrap", "food")
+        assert resolve_item_key("Ham And Cheese Croissant") == ("croissant", "food")
+        assert resolve_item_key("A Sweet Muffin") == ("muffin", "food")
+        assert resolve_item_key("Sweet Pastry") == ("pastry", "food")
+        assert resolve_item_key("A Cookie") == ("cookie", "food")
+
+    def test_retail_items(self):
+        assert resolve_item_key("Fiji Water") == ("water", "retail")
+        assert resolve_item_key("Fruit Juice") == ("juice", "retail")
+        assert resolve_item_key("Kombucha") == ("kombucha", "retail")
+        assert resolve_item_key("500g Beans") == ("beans", "retail")
+        assert resolve_item_key("eGift Card") == ("gift_card", "retail")
+        assert resolve_item_key("Candle") == ("merchandise", "retail")
+
+    def test_legacy_drink_names(self):
+        assert resolve_item_key("latte") == ("latte", "drink")
+        assert resolve_item_key("cappuccino") == ("cappuccino", "drink")
+        assert resolve_item_key("flat white") == ("flat_white", "drink")
+        assert resolve_item_key("mocha") == ("mocha", "drink")
 
     def test_unknown_defaults_to_latte(self):
-        assert resolve_drink_key("Mystery Drink XYZ") == "latte"
-        assert resolve_drink_key("Banana Smoothie") == "latte"
+        assert resolve_item_key("Mystery Drink XYZ") == ("latte", "drink")
 
-    def test_longest_match_wins(self):
-        # "iced coffee" should match "iced_latte", not just "iced"
-        assert resolve_drink_key("iced coffee") == "iced_latte"
-        # "flat white" should match flat_white, not something shorter
-        assert resolve_drink_key("flat white") == "flat_white"
+    def test_case_insensitive(self):
+        assert resolve_item_key("TOASTIE") == ("toastie", "food")
+        assert resolve_item_key("toastie") == ("toastie", "food")
+        assert resolve_item_key("Babycino") == ("babycino", "drink")
+
+    def test_legacy_resolve_drink_key_still_works(self):
+        """Backwards-compatible wrapper."""
+        assert resolve_drink_key("latte") == "latte"
+        assert resolve_drink_key("12oz/Medium") == "latte"
+        assert resolve_drink_key("TOASTIE") == "toastie"
 
 
 class TestResolveModifierKey:
@@ -157,6 +183,48 @@ class TestCalculateItemWorkload:
         assert result["workload_units"] == 3.4
         assert "extra_shot" in result["applied_modifiers"]
         assert "syrup" in result["applied_modifiers"]
+
+    def test_food_item_no_position_penalty(self):
+        """Food items always get 1.0x multiplier regardless of position."""
+        result = calculate_item_workload("TOASTIE", [], position_in_order=3)
+        assert result["category"] == "food"
+        assert result["is_drink"] is False
+        assert result["is_milk_drink"] is False
+        assert result["position_multiplier"] == 1.0
+        assert result["workload_units"] == 1.8
+
+    def test_retail_item_minimal_score(self):
+        """Retail items have low workload scores."""
+        result = calculate_item_workload("Fiji Water", [], position_in_order=1)
+        assert result["category"] == "retail"
+        assert result["is_drink"] is False
+        assert result["workload_units"] == 0.2
+
+    def test_babycino_score(self):
+        """Babycino is a drink with low score."""
+        result = calculate_item_workload("Babycino", [], position_in_order=1)
+        assert result["category"] == "drink"
+        assert result["is_drink"] is True
+        assert result["workload_units"] == 0.5
+
+    def test_square_size_based_items(self):
+        """Square sends sizes, not drink names."""
+        result_med = calculate_item_workload("12oz/Medium", [], position_in_order=1)
+        assert result_med["drink_key"] == "latte"
+        assert result_med["category"] == "drink"
+
+        result_small = calculate_item_workload("8oz/Small", [], position_in_order=1)
+        assert result_small["drink_key"] == "flat_white"
+
+        result_iced = calculate_item_workload("16oz/ICED MEDIUM", [], position_in_order=1)
+        assert result_iced["drink_key"] == "iced_latte"
+
+    def test_large_size_auto_modifier(self):
+        """16oz/Large should auto-apply the 'large' modifier."""
+        result = calculate_item_workload("16oz/Large", [], position_in_order=1)
+        assert "large" in result["applied_modifiers"]
+        # latte (2.5) + large (0.2) = 2.7
+        assert result["workload_units"] == 2.7
 
 
 # ============================================================
@@ -420,9 +488,27 @@ class TestProcessOrdersBatch:
         assert result["summary"]["items_count"] == 3
         assert result["summary"]["total_workload_units"] == 11.38
         assert result["summary"]["milk_drink_count"] == 3
+        assert result["summary"]["drink_count"] == 3
+        assert result["summary"]["food_count"] == 0
         assert len(result["timeline"]) >= 1
 
     def test_empty_batch(self):
         result = process_orders_batch([])
         assert result["summary"]["orders_count"] == 0
         assert result["timeline"] == []
+
+    def test_mixed_order_batch(self):
+        """Order with drinks and food should separate counts."""
+        order = {
+            "order_id": "mixed-001",
+            "closed_at": "2026-02-07T09:00:00+10:00",
+            "line_items": [
+                {"item_name": "12oz/Medium", "quantity": 1, "modifiers": []},
+                {"item_name": "TOASTIE", "quantity": 1, "modifiers": []},
+                {"item_name": "Fiji Water", "quantity": 1, "modifiers": []},
+            ],
+        }
+        result = process_orders_batch([order])
+        assert result["summary"]["drink_count"] == 1
+        assert result["summary"]["food_count"] == 1
+        assert result["summary"]["items_count"] == 3

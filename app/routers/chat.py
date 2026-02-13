@@ -1,0 +1,40 @@
+"""
+Clubhouse Autopilot - Chat API Endpoint
+POST /api/sites/{site_id}/chat/message → SSE streaming response
+"""
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+
+from app.chat import stream_chat_response
+from app.dependencies import get_validated_site
+from app.schemas import ChatRequest
+
+router = APIRouter(prefix="/api/sites/{site_id}/chat", tags=["chat"])
+
+
+@router.post("/message")
+async def chat_message(
+    body: ChatRequest,
+    site: dict = Depends(get_validated_site),
+):
+    """
+    Send a chat message and receive a streaming response.
+
+    Accepts conversation history as a list of {role, content} messages.
+    Returns Server-Sent Events with partial text chunks.
+    """
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+
+    return StreamingResponse(
+        stream_chat_response(
+            site_id=site["site_id"],
+            site_name=site.get("name", "Clubhouse"),
+            messages=messages,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers import (
     analysis,
+    chat,
     delivery,
     pipeline,
     predictions,
@@ -30,6 +31,11 @@ def dashboard():
     return (_static_dir / "dashboard.html").read_text()
 
 
+@app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
+def chat_page():
+    return (_static_dir / "chat.html").read_text()
+
+
 @app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok"}
@@ -43,3 +49,4 @@ app.include_router(pipeline.router)
 app.include_router(delivery.router)
 app.include_router(analysis.router)
 app.include_router(tomorrow_plan.router)
+app.include_router(chat.router)

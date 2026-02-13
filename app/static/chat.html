@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clubhouse Autopilot - Chat</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/chat.css">
+</head>
+<body>
+  <div class="chat-page">
+
+    <!-- Site Header (consistent with dashboard) -->
+    <header class="site-header">
+      <div>
+        <h1 id="site-name">Clubhouse Autopilot</h1>
+        <p class="sub" id="site-sub">Chat Assistant</p>
+      </div>
+      <div class="clock">
+        <div class="time" id="clock-time">--:--</div>
+        <div id="clock-date">--</div>
+      </div>
+    </header>
+
+    <!-- Chat Body -->
+    <div class="chat-body">
+
+      <!-- Messages area -->
+      <div class="chat-messages">
+        <!-- Suggestions shown when empty -->
+        <div class="chat-suggestions">
+          <h3>Ask me anything about your cafe</h3>
+          <div class="suggestion-chips">
+            <button class="suggestion-chip">What's tomorrow's forecast?</button>
+            <button class="suggestion-chip">Staffing for next 2 weeks?</button>
+            <button class="suggestion-chip">How was last week's accuracy?</button>
+            <button class="suggestion-chip">Revenue trend this month?</button>
+            <button class="suggestion-chip">Any events coming up?</button>
+            <button class="suggestion-chip">What's the busiest day of the week?</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input bar -->
+      <div class="chat-input-bar">
+        <textarea class="chat-input" placeholder="Ask about forecasts, staffing, sales..." rows="1"></textarea>
+        <button class="chat-send-btn" aria-label="Send">&#10148;</button>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="/static/chat.js"></script>
+</body>
+</html>

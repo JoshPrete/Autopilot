@@ -9,6 +9,8 @@ import pytest
 
 from config.constants import (
     BASE_DRINK_SCORES,
+    BASE_FOOD_SCORES,
+    BASE_RETAIL_SCORES,
     DOW_PATTERN_DEFAULT,
     MILK_BUFFER_MULTIPLIER,
     MILK_DRINK_RATIO,
@@ -58,7 +60,8 @@ class TestStates:
 class TestBaseDrinkScores:
     def test_all_drinks_present(self):
         expected = ["espresso", "long_black", "latte", "cappuccino",
-                    "flat_white", "mocha", "iced_latte", "matcha_complex"]
+                    "flat_white", "mocha", "iced_latte", "matcha_complex",
+                    "babycino"]
         for drink in expected:
             assert drink in BASE_DRINK_SCORES
 
@@ -76,12 +79,53 @@ class TestBaseDrinkScores:
         assert BASE_DRINK_SCORES["flat_white"]["units"] == 2.8
         assert BASE_DRINK_SCORES["mocha"]["units"] == 3.5
         assert BASE_DRINK_SCORES["matcha_complex"]["units"] == 4.0
+        assert BASE_DRINK_SCORES["babycino"]["units"] == 0.5
 
     def test_complexity_ordering(self):
         """Espresso < latte < mocha < matcha."""
         assert BASE_DRINK_SCORES["espresso"]["units"] < BASE_DRINK_SCORES["latte"]["units"]
         assert BASE_DRINK_SCORES["latte"]["units"] < BASE_DRINK_SCORES["mocha"]["units"]
         assert BASE_DRINK_SCORES["mocha"]["units"] < BASE_DRINK_SCORES["matcha_complex"]["units"]
+
+
+class TestBaseFoodScores:
+    def test_all_food_present(self):
+        expected = ["toastie", "wrap", "croissant", "muffin", "pastry", "cookie", "tart"]
+        for item in expected:
+            assert item in BASE_FOOD_SCORES
+
+    def test_scores_have_units_and_time(self):
+        for item, info in BASE_FOOD_SCORES.items():
+            assert "units" in info
+            assert "avg_time_sec" in info
+            assert info["units"] > 0
+            assert info["avg_time_sec"] > 0
+
+    def test_hot_food_higher_than_grab(self):
+        """Toasties/wraps should score higher than grab-and-go items."""
+        assert BASE_FOOD_SCORES["toastie"]["units"] > BASE_FOOD_SCORES["croissant"]["units"]
+        assert BASE_FOOD_SCORES["wrap"]["units"] > BASE_FOOD_SCORES["muffin"]["units"]
+
+
+class TestBaseRetailScores:
+    def test_all_retail_present(self):
+        expected = ["water", "juice", "soda", "kombucha", "beans",
+                    "gift_card", "merchandise"]
+        for item in expected:
+            assert item in BASE_RETAIL_SCORES
+
+    def test_scores_have_units_and_time(self):
+        for item, info in BASE_RETAIL_SCORES.items():
+            assert "units" in info
+            assert "avg_time_sec" in info
+            assert info["units"] > 0
+            assert info["avg_time_sec"] > 0
+
+    def test_retail_lower_than_drinks(self):
+        """All retail items should score lower than any drink."""
+        max_retail = max(info["units"] for info in BASE_RETAIL_SCORES.values())
+        min_drink = min(info["units"] for info in BASE_DRINK_SCORES.values())
+        assert max_retail < min_drink
 
 
 class TestModifiers:

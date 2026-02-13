@@ -29,6 +29,7 @@ from data.processing import (
 )
 from data.storage import (
     check_special_events,
+    get_avg_workload_per_drink,
     get_recent_pattern,
     get_yoy_pattern,
 )
@@ -238,6 +239,9 @@ def generate_daily_forecast(
     rush_windows = detect_rush_windows(site_id, target_date, operating_hours)
 
     # Build hourly breakdown for the full day
+    # predict_workload returns the avg workload per 15-min interval;
+    # multiply by 4 to get the full hourly total.
+    INTERVALS_PER_HOUR = 4
     open_hour, close_hour = operating_hours
     hourly = []
     total_day_workload = 0.0
@@ -256,17 +260,19 @@ def generate_daily_forecast(
             event_multiplier=event_multiplier,
         )
 
-        total_day_workload += prediction["final_prediction"]
+        hourly_workload = prediction["final_prediction"] * INTERVALS_PER_HOUR
+        total_day_workload += hourly_workload
         hourly.append({
             "hour": hour,
             "hour_label": f"{hour}:00",
-            "predicted_workload": prediction["final_prediction"],
+            "predicted_workload": round(hourly_workload, 1),
             "is_rush": prediction["is_rush"],
             "confidence": prediction["confidence"],
         })
 
-    # Estimate total drinks (avg ~3 units per drink)
-    total_drinks = int(total_day_workload / 3.0)
+    # Estimate drinks using observed workload-per-drink ratio from recent data
+    wu_per_drink = get_avg_workload_per_drink(site_id)
+    total_drinks = int(total_day_workload / wu_per_drink)
 
     # Determine staffing mode from scheduled count
     if staff_scheduled:

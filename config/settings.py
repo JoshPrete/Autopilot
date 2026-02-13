@@ -51,6 +51,9 @@ class Settings:
     RECENT_PATTERN_WEEKS: int = int(os.environ.get("RECENT_PATTERN_WEEKS", "6"))
     YOY_YEARS_BACK: int = int(os.environ.get("YOY_YEARS_BACK", "2"))
 
+    # AI Chat (Claude API)
+    ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+
     # Prediction Weights
     WEIGHT_RECENT: float = 0.60
     WEIGHT_YOY: float = 0.25

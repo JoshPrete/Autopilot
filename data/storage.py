@@ -703,6 +703,67 @@ def get_weekly_stats(site_id: str, week_start: date, week_end: date) -> dict:
 
 
 # ============================================================
+# Daily Sales History (rolling storage)
+# ============================================================
+
+
+def store_daily_sales(site_id: str, sale_date: date, summary: dict, source: str = "api") -> None:
+    """
+    Store a daily sales summary row into daily_sales_history.
+
+    Called by the daily pipeline after ingestion to maintain rolling
+    continuity with the CSV-imported historical data.
+
+    Args:
+        site_id: Site UUID
+        sale_date: The business date
+        summary: Pipeline summary dict with keys like orders_count,
+                 items_count, total_revenue_cents, etc.
+        source: 'api' for daily pipeline, 'csv' for CSV imports
+    """
+    total_revenue = summary.get("total_revenue_cents", 0)
+    items_count = summary.get("items_count", 0)
+
+    with engine.connect() as conn:
+        conn.execute(
+            _text("""
+                INSERT INTO daily_sales_history
+                    (site_id, sale_date, gross_sales_cents, net_sales_cents,
+                     product_sales_cents, total_collected_cents,
+                     orders_estimated, items_estimated, source)
+                VALUES
+                    (:sid, :sale_date, :gross, :net, :product, :total,
+                     :orders_est, :items_est, :source)
+                ON CONFLICT (site_id, sale_date) DO UPDATE SET
+                    gross_sales_cents = EXCLUDED.gross_sales_cents,
+                    net_sales_cents = EXCLUDED.net_sales_cents,
+                    product_sales_cents = EXCLUDED.product_sales_cents,
+                    total_collected_cents = EXCLUDED.total_collected_cents,
+                    orders_estimated = EXCLUDED.orders_estimated,
+                    items_estimated = EXCLUDED.items_estimated,
+                    source = EXCLUDED.source,
+                    imported_at = NOW()
+            """),
+            {
+                "sid": site_id,
+                "sale_date": sale_date,
+                "gross": total_revenue,
+                "net": total_revenue,  # Approximate; API doesn't split net/gross easily
+                "product": total_revenue,
+                "total": total_revenue,
+                "orders_est": summary.get("orders_count", 0),
+                "items_est": items_count,
+                "source": source,
+            },
+        )
+        conn.commit()
+
+    logger.info("Stored daily sales for %s: $%.2f, %d items (source=%s)",
+                sale_date, total_revenue / 100 if total_revenue else 0,
+                items_count, source)
+
+
+# ============================================================
 # Full daily pipeline storage
 # ============================================================
 
@@ -750,6 +811,61 @@ class _JSONEncoder(json.JSONEncoder):
         if isinstance(o, (date, datetime)):
             return o.isoformat()
         return super().default(o)
+
+
+def get_avg_workload_per_drink(site_id: str, weeks_back: int = 6) -> float:
+    """
+    Compute average total workload per drink from recent data.
+
+    Returns the ratio: (total workload for all items) / (drink count).
+    Used by the forecast to convert predicted workload units to drink count.
+    Falls back to 3.5 if insufficient data.
+    """
+    cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text("""
+                SELECT
+                    SUM(wt.workload_units) AS total_wu,
+                    SUM(wt.items_count) AS total_items
+                FROM workload_timeline wt
+                WHERE wt.site_id = :sid
+                AND wt.interval_start >= :cutoff
+            """),
+            {"sid": site_id, "cutoff": cutoff},
+        ).mappings().first()
+
+        drink_result = conn.execute(
+            _text("""
+                SELECT COUNT(*) AS drink_count
+                FROM order_items oi
+                JOIN orders_raw o ON oi.order_id = o.order_id
+                WHERE oi.site_id = :sid
+                AND o.closed_at >= :cutoff
+                AND oi.item_name NOT IN (
+                    'Sweet Pastry', 'TOASTIE', 'A Sweet Muffin', 'A Savoury Muffin',
+                    'Breakfast Wrap', 'Ham And Cheese Croissant', 'Plain Croissant',
+                    'BUTTERBOY', 'A Cookie',
+                    'Portugese Tart/Friand/Caramel Slice',
+                    'Fiji Water', 'Fruit Juice', 'Kombucha', 'Famous Soda', 'Black Mass',
+                    '500g Beans', '1kg Beans', '250g Beans',
+                    'Candle', 'eGift Card', 'Mary Clothes'
+                )
+            """),
+            {"sid": site_id, "cutoff": cutoff},
+        ).mappings().first()
+
+    total_wu = float(result["total_wu"]) if result and result["total_wu"] else 0
+    drink_count = int(drink_result["drink_count"]) if drink_result else 0
+
+    if drink_count < 100:
+        logger.warning("Insufficient data for WU/drink ratio, using default 3.5")
+        return 3.5
+
+    ratio = total_wu / drink_count
+    logger.debug("WU per drink ratio: %.2f (from %d drinks, %.0f WU)", ratio, drink_count, total_wu)
+    return ratio
 
 
 def _json_dumps(obj):

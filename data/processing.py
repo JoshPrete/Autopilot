@@ -18,6 +18,8 @@ from typing import Optional
 
 from config.constants import (
     BASE_DRINK_SCORES,
+    BASE_FOOD_SCORES,
+    BASE_RETAIL_SCORES,
     DOW_PATTERN_DEFAULT,
     MILK_BUFFER_MULTIPLIER,
     MILK_DRINK_RATIO,
@@ -35,25 +37,99 @@ logger = logging.getLogger("autopilot.processing")
 # Name resolution: Square item names -> scoring keys
 # ============================================================
 
-DRINK_NAME_MAP = {
-    "espresso": "espresso",
-    "short black": "espresso",
-    "long black": "long_black",
-    "americano": "long_black",
-    "latte": "latte",
-    "cafe latte": "latte",
-    "caffe latte": "latte",
-    "cappuccino": "cappuccino",
-    "cap": "cappuccino",
-    "flat white": "flat_white",
-    "flatwhite": "flat_white",
-    "mocha": "mocha",
-    "mochaccino": "mocha",
-    "hot chocolate": "mocha",
-    "iced latte": "iced_latte",
-    "iced coffee": "iced_latte",
-    "matcha": "matcha_complex",
-    "chai": "matcha_complex",
+# ============================================================
+# Item Catalog: Square item names -> score keys
+# ============================================================
+
+ITEM_CATALOG = {
+    # --- Hot drinks (by size) ---
+    "6oz":                "espresso",        # piccolo/cortado size
+    "8oz/small":          "flat_white",      # small milk drink
+    "12oz/medium":        "latte",           # standard milk drink
+    "16oz/large":         "latte",           # large milk drink (+ large modifier)
+
+    # --- Iced drinks (by size) ---
+    "12oz/iced small":    "iced_latte",
+    "16oz/iced medium":   "iced_latte",
+    "20oz\\iced large":   "iced_latte",      # note backslash in Square data
+
+    # --- Espresso shots ---
+    "4oz/pic, esp, dop":  "espresso",
+
+    # --- Non-coffee drinks ---
+    "babycino":           "babycino",
+    "pupacino":           "babycino",
+
+    # --- Food ---
+    "toastie":            "toastie",
+    "butterboy":          "toastie",         # butterboy = grilled item
+    "breakfast wrap":     "wrap",
+    "ham and cheese croissant": "croissant",
+    "plain croissant":    "croissant",
+    "a sweet muffin":     "muffin",
+    "a savoury muffin":   "muffin",
+    "sweet pastry":       "pastry",
+    "portugese tart/friand/caramel slice": "tart",
+    "a cookie":           "cookie",
+
+    # --- Beverages (non-coffee) ---
+    "fiji water":         "water",
+    "fruit juice":        "juice",
+    "kombucha":           "kombucha",
+    "famous soda":        "soda",
+    "black mass":         "soda",
+
+    # --- Retail ---
+    "500g beans":         "beans",
+    "1kg beans":          "beans",
+    "250g beans":         "beans",
+    "candle":             "merchandise",
+    "egift card":         "gift_card",
+    "mary clothes":       "merchandise",
+
+    # --- Legacy drink names (from manual orders / other POS) ---
+    "espresso":           "espresso",
+    "short black":        "espresso",
+    "long black":         "long_black",
+    "americano":          "long_black",
+    "latte":              "latte",
+    "cafe latte":         "latte",
+    "caffe latte":        "latte",
+    "cappuccino":         "cappuccino",
+    "cap":                "cappuccino",
+    "flat white":         "flat_white",
+    "flatwhite":          "flat_white",
+    "mocha":              "mocha",
+    "mochaccino":         "mocha",
+    "hot chocolate":      "mocha",
+    "iced latte":         "iced_latte",
+    "iced coffee":        "iced_latte",
+    "matcha":             "matcha_complex",
+    "chai":               "matcha_complex",
+
+    # --- Fallback ---
+    "unknown item":       "latte",           # conservative default
+}
+
+ITEM_CATEGORIES = {
+    # Drinks
+    "espresso": "drink", "long_black": "drink", "latte": "drink",
+    "cappuccino": "drink", "flat_white": "drink", "mocha": "drink",
+    "iced_latte": "drink", "matcha_complex": "drink", "babycino": "drink",
+    # Food
+    "toastie": "food", "wrap": "food", "croissant": "food",
+    "muffin": "food", "pastry": "food", "cookie": "food", "tart": "food",
+    # Retail
+    "water": "retail", "juice": "retail", "soda": "retail",
+    "kombucha": "retail", "beans": "retail",
+    "gift_card": "retail", "merchandise": "retail",
+}
+
+# Score tables by category
+_SCORE_TABLES = {
+    "drink": BASE_DRINK_SCORES,
+    "food": BASE_FOOD_SCORES,
+    "retail": BASE_RETAIL_SCORES,
 }
 
 MODIFIER_NAME_MAP = {
@@ -82,32 +158,46 @@ MODIFIER_NAME_MAP = {
 
 MILK_DRINK_KEYS = {"latte", "cappuccino", "flat_white", "mocha", "iced_latte"}
 
+# Items that automatically get the 'large' modifier applied
+_LARGE_SIZE_ITEMS = {"16oz/large", "20oz\\iced large"}
 
-def resolve_drink_key(item_name: str) -> str:
+
+def resolve_item_key(item_name: str) -> tuple[str, str]:
     """
-    Map a Square item name to a BASE_DRINK_SCORES key.
+    Map a Square item name to a score key and category.
 
-    Uses case-insensitive substring matching. Longest match wins.
-    Falls back to 'latte' (2.5 units) for unknowns as a
-    conservative middle estimate.
+    Returns:
+        (score_key, category) where category is 'drink', 'food', or 'retail'.
+        Falls back to ('latte', 'drink') for unknowns as a conservative estimate.
     """
     name_lower = item_name.lower().strip()
 
-    if name_lower in DRINK_NAME_MAP:
-        return DRINK_NAME_MAP[name_lower]
+    # Exact match
+    if name_lower in ITEM_CATALOG:
+        score_key = ITEM_CATALOG[name_lower]
+        category = ITEM_CATEGORIES.get(score_key, "drink")
+        return score_key, category
 
+    # Substring match (longest wins)
     best_match = None
     best_len = 0
-    for pattern, key in DRINK_NAME_MAP.items():
+    for pattern, key in ITEM_CATALOG.items():
         if pattern in name_lower and len(pattern) > best_len:
             best_match = key
             best_len = len(pattern)
 
     if best_match:
-        return best_match
+        category = ITEM_CATEGORIES.get(best_match, "drink")
+        return best_match, category
 
-    logger.debug("Unknown drink '%s', defaulting to latte score", item_name)
-    return "latte"
+    logger.debug("Unknown item '%s', defaulting to latte score", item_name)
+    return "latte", "drink"
+
+
+def resolve_drink_key(item_name: str) -> str:
+    """Legacy wrapper: returns just the score key for backwards compatibility."""
+    score_key, _category = resolve_item_key(item_name)
+    return score_key
 
 
 def resolve_modifier_key(modifier_name: str) -> Optional[str]:
@@ -142,46 +232,65 @@ def calculate_item_workload(
     Calculate workload units for a single line item.
 
     Exact formula from Spec Section 5.4:
-      1. Look up base drink score (Section 5.1)
-      2. Add modifier adjustments (Section 5.2)
-      3. Apply position multiplier (Section 5.3)
+      1. Look up base score from appropriate table (drink/food/retail)
+      2. Add modifier adjustments (Section 5.2) — drinks only
+      3. Apply position multiplier (Section 5.3) — drinks only
          1st: 1.0x, 2nd: 1.3x, 3rd+: 1.6x
       4. Multiply by quantity
     """
-    drink_key = resolve_drink_key(item_name)
-    base = BASE_DRINK_SCORES.get(drink_key, BASE_DRINK_SCORES["latte"])
+    score_key, category = resolve_item_key(item_name)
+
+    # Look up score from the right table
+    score_table = _SCORE_TABLES.get(category, BASE_DRINK_SCORES)
+    base = score_table.get(score_key, BASE_DRINK_SCORES["latte"])
 
     base_units = base["units"]
     base_time = base["avg_time_sec"]
 
-    # Section 5.2: modifier adjustments
+    # Section 5.2: modifier adjustments (only for drinks)
     modifier_units = 0.0
     modifier_time = 0
     applied_mods = []
 
-    for mod in modifiers:
-        mod_key = resolve_modifier_key(mod.get("name", ""))
-        if mod_key and mod_key in MODIFIER_ADJUSTMENTS:
-            adj = MODIFIER_ADJUSTMENTS[mod_key]
+    if category == "drink":
+        for mod in modifiers:
+            mod_key = resolve_modifier_key(mod.get("name", ""))
+            if mod_key and mod_key in MODIFIER_ADJUSTMENTS:
+                adj = MODIFIER_ADJUSTMENTS[mod_key]
+                modifier_units += adj["units_add"]
+                modifier_time += adj["time_add_sec"]
+                applied_mods.append(mod_key)
+
+        # Auto-apply large modifier for 16oz/Large items
+        name_lower = item_name.lower().strip()
+        if name_lower in _LARGE_SIZE_ITEMS and "large" not in applied_mods:
+            adj = MODIFIER_ADJUSTMENTS["large"]
             modifier_units += adj["units_add"]
             modifier_time += adj["time_add_sec"]
-            applied_mods.append(mod_key)
+            applied_mods.append("large")
 
     subtotal_units = base_units + modifier_units
     subtotal_time = base_time + modifier_time
 
-    # Section 5.3: position multiplier
-    pos_key = min(max(position_in_order, 1), 3)
-    multiplier = POSITION_MULTIPLIERS.get(pos_key, 1.6)
+    # Section 5.3: position multiplier (only for drinks)
+    if category == "drink":
+        pos_key = min(max(position_in_order, 1), 3)
+        multiplier = POSITION_MULTIPLIERS.get(pos_key, 1.6)
+    else:
+        multiplier = 1.0
 
     total_units = subtotal_units * multiplier * quantity
     total_time = int(subtotal_time * multiplier) * quantity
 
+    is_drink = category == "drink"
+
     return {
         "workload_units": round(total_units, 2),
         "prep_time_seconds": total_time,
-        "drink_key": drink_key,
-        "is_milk_drink": drink_key in MILK_DRINK_KEYS,
+        "drink_key": score_key,
+        "category": category,
+        "is_drink": is_drink,
+        "is_milk_drink": is_drink and score_key in MILK_DRINK_KEYS,
         "applied_modifiers": applied_mods,
         "base_units": base_units,
         "modifier_units": modifier_units,
@@ -203,11 +312,17 @@ def calculate_order_workload(parsed_order: dict) -> dict:
 
     Each unit of quantity gets its own position in the order,
     so 2x Latte = position 1 + position 2.
+
+    Position multipliers only apply to drinks; food and retail
+    items are always at 1.0x regardless of order position.
     """
     items_with_workload = []
     total_units = 0.0
     total_time = 0
     milk_drink_count = 0
+    drink_count = 0
+    food_count = 0
+    drink_position = 0
     global_position = 0
 
     for li in parsed_order.get("line_items", []):
@@ -217,10 +332,18 @@ def calculate_order_workload(parsed_order: dict) -> dict:
         for q in range(qty):
             global_position += 1
 
+            # Peek at category to determine position for drinks only
+            _key, category = resolve_item_key(li["item_name"])
+            if category == "drink":
+                drink_position += 1
+                position = drink_position
+            else:
+                position = 1  # food/retail always 1.0x
+
             workload = calculate_item_workload(
                 item_name=li["item_name"],
                 modifiers=li.get("modifiers", []),
-                position_in_order=global_position,
+                position_in_order=position,
                 quantity=1,
             )
 
@@ -229,6 +352,10 @@ def calculate_order_workload(parsed_order: dict) -> dict:
 
             if workload["is_milk_drink"]:
                 milk_drink_count += 1
+            if workload.get("is_drink"):
+                drink_count += 1
+            if workload.get("category") == "food":
+                food_count += 1
 
             items_with_workload.append({
                 **li,
@@ -242,6 +369,8 @@ def calculate_order_workload(parsed_order: dict) -> dict:
         "total_workload_units": round(total_units, 2),
         "total_prep_time_seconds": total_time,
         "item_count": global_position,
+        "drink_count": drink_count,
+        "food_count": food_count,
         "milk_drink_count": milk_drink_count,
     }
 
@@ -510,6 +639,8 @@ def process_orders_batch(parsed_orders: list[dict]) -> dict:
     total_units = 0.0
     total_items = 0
     total_milk = 0
+    total_drinks = 0
+    total_food = 0
 
     for order in parsed_orders:
         result = calculate_order_workload(order)
@@ -517,12 +648,16 @@ def process_orders_batch(parsed_orders: list[dict]) -> dict:
         total_units += result["total_workload_units"]
         total_items += result["item_count"]
         total_milk += result["milk_drink_count"]
+        total_drinks += result.get("drink_count", 0)
+        total_food += result.get("food_count", 0)
 
     timeline = aggregate_timeline(processed)
 
     summary = {
         "orders_count": len(processed),
         "items_count": total_items,
+        "drink_count": total_drinks,
+        "food_count": total_food,
         "total_workload_units": round(total_units, 2),
         "milk_drink_count": total_milk,
         "milk_drink_pct": round(total_milk / max(total_items, 1) * 100, 1),

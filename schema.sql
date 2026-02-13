@@ -224,6 +224,54 @@ CREATE TABLE manual_signals (
 CREATE INDEX idx_signals_site_time ON manual_signals(site_id, occurred_at);
 
 -- ============================================================
+-- KDS Tickets (Kitchen Performance CSV imports)
+-- ============================================================
+CREATE TABLE kds_tickets (
+    ticket_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    device_name TEXT,
+    ticket_name TEXT,                     -- customer name from POS
+    order_source TEXT,                    -- 'Point of Sale', 'Square Online'
+    num_items INT NOT NULL,
+    items_description TEXT,               -- "1x 12oz/Medium; 1x 16oz/Large"
+    completion_time_sec INT NOT NULL,     -- actual prep time in seconds
+    time_created TIMESTAMP NOT NULL,
+    time_completed TIMESTAMP NOT NULL,
+    time_due TIMESTAMP,                   -- for online orders
+    time_recalled TIMESTAMP,
+    order_id TEXT REFERENCES orders_raw(order_id),  -- matched to orders_raw
+    imported_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, time_created, items_description)
+);
+
+CREATE INDEX idx_kds_site_created ON kds_tickets(site_id, time_created);
+CREATE INDEX idx_kds_order ON kds_tickets(order_id) WHERE order_id IS NOT NULL;
+CREATE INDEX idx_kds_completion ON kds_tickets(site_id, completion_time_sec);
+
+-- ============================================================
+-- Daily Sales History (CSV imports + rolling API data)
+-- ============================================================
+CREATE TABLE daily_sales_history (
+    history_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    sale_date DATE NOT NULL,
+    gross_sales_cents INT,
+    net_sales_cents INT,
+    product_sales_cents INT,
+    tax_cents INT,
+    discounts_cents INT,
+    tips_cents INT,
+    total_collected_cents INT,
+    orders_estimated INT,
+    items_estimated INT,
+    source TEXT DEFAULT 'csv',
+    imported_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, sale_date)
+);
+
+CREATE INDEX idx_daily_sales_site_date ON daily_sales_history(site_id, sale_date);
+
+-- ============================================================
 -- Weekly Reviews
 -- ============================================================
 CREATE TABLE weekly_reviews (

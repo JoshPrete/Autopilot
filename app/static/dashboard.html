@@ -56,6 +56,41 @@
     </div>
   </div>
 
+  <!-- Chat Widget -->
+  <button id="chat-widget-btn" class="chat-widget-btn" aria-label="Open chat">&#9993;</button>
+
+  <div id="chat-widget-panel" class="chat-widget-panel">
+    <div class="chat-widget-header">
+      <h3>Autopilot Chat</h3>
+      <button class="chat-widget-close" aria-label="Close chat">&times;</button>
+    </div>
+    <div class="chat-messages">
+      <div class="chat-suggestions">
+        <h3>Ask me anything</h3>
+        <div class="suggestion-chips">
+          <button class="suggestion-chip">What's tomorrow's forecast?</button>
+          <button class="suggestion-chip">Staffing for next 2 weeks?</button>
+          <button class="suggestion-chip">How was last week's accuracy?</button>
+          <button class="suggestion-chip">Any events coming up?</button>
+        </div>
+      </div>
+    </div>
+    <div class="chat-input-bar">
+      <textarea class="chat-input" placeholder="Ask about forecasts, staffing..." rows="1"></textarea>
+      <button class="chat-send-btn" aria-label="Send">&#10148;</button>
+    </div>
+  </div>
+
+  <link rel="stylesheet" href="/static/chat.css">
+  <script src="/static/chat.js"></script>
   <script src="/static/dashboard.js"></script>
+  <script>
+    // Init chat widget after dashboard loads
+    document.addEventListener("DOMContentLoaded", function() {
+      const params = new URLSearchParams(window.location.search);
+      const siteId = params.get("site_id") || "";
+      if (siteId) initChatWidget(siteId);
+    });
+  </script>
 </body>
 </html>

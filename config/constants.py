@@ -27,16 +27,52 @@ STATES = {
 # ------------------------------------------------------------
 # Base Drink Scores (Section 5.1)
 # ------------------------------------------------------------
+# Calibrated from 6,000+ KDS tickets (Jan-Feb 2026)
+# avg_time_sec = P25 of single-item peak-hour tickets (pure prep proxy)
 BASE_DRINK_SCORES = {
-    "espresso": {"units": 1.0, "avg_time_sec": 30},
-    "long_black": {"units": 1.2, "avg_time_sec": 35},
-    "latte": {"units": 2.5, "avg_time_sec": 65},
-    "cappuccino": {"units": 2.5, "avg_time_sec": 65},
-    "flat_white": {"units": 2.8, "avg_time_sec": 70},
-    "mocha": {"units": 3.5, "avg_time_sec": 85},
-    "iced_latte": {"units": 3.2, "avg_time_sec": 75},
-    "matcha_complex": {"units": 4.0, "avg_time_sec": 95},
+    "espresso": {"units": 1.0, "avg_time_sec": 90},     # 4oz P25=98s
+    "long_black": {"units": 1.2, "avg_time_sec": 95},   # similar to espresso + water
+    "latte": {"units": 2.5, "avg_time_sec": 115},       # 12oz P25=116s
+    "cappuccino": {"units": 2.5, "avg_time_sec": 115},   # same as latte
+    "flat_white": {"units": 2.8, "avg_time_sec": 100},  # 8oz P25=104s
+    "mocha": {"units": 3.5, "avg_time_sec": 130},       # latte + chocolate prep
+    "iced_latte": {"units": 3.2, "avg_time_sec": 110},  # 12oz iced P25=109s, 16oz P25=118s
+    "matcha_complex": {"units": 4.0, "avg_time_sec": 140},  # complex prep
+    "babycino": {"units": 0.5, "avg_time_sec": 30},     # froth + serve
 }
+
+# ------------------------------------------------------------
+# Base Food Scores (calibrated from KDS data)
+# ------------------------------------------------------------
+BASE_FOOD_SCORES = {
+    "toastie":       {"units": 1.8, "avg_time_sec": 190},  # KDS P25=190s, press + serve
+    "wrap":          {"units": 1.5, "avg_time_sec": 60},   # KDS P25=57s
+    "croissant":     {"units": 0.5, "avg_time_sec": 35},   # grab from case, KDS varies
+    "muffin":        {"units": 0.5, "avg_time_sec": 30},   # grab + plate
+    "pastry":        {"units": 0.5, "avg_time_sec": 35},   # KDS P25=36s
+    "cookie":        {"units": 0.3, "avg_time_sec": 15},
+    "tart":          {"units": 0.5, "avg_time_sec": 35},
+}
+
+# ------------------------------------------------------------
+# Base Retail Scores (calibrated from KDS data)
+# ------------------------------------------------------------
+BASE_RETAIL_SCORES = {
+    "water":         {"units": 0.2, "avg_time_sec": 30},   # KDS P25=30s
+    "juice":         {"units": 0.2, "avg_time_sec": 15},   # KDS P25=14s
+    "soda":          {"units": 0.2, "avg_time_sec": 15},   # similar to juice
+    "kombucha":      {"units": 0.2, "avg_time_sec": 16},   # KDS P25=16s
+    "beans":         {"units": 0.3, "avg_time_sec": 65},   # KDS P25=66s, weigh + bag
+    "gift_card":     {"units": 0.1, "avg_time_sec": 30},
+    "merchandise":   {"units": 0.1, "avg_time_sec": 15},
+}
+
+# ------------------------------------------------------------
+# KDS Rush Indicator (Section 3.2)
+# Median ticket completion > 5 min during peak (5am-11am)
+# signals queue backup / understaffing
+# ------------------------------------------------------------
+KDS_RUSH_THRESHOLD_SEC = 300  # 5 minutes
 
 # ------------------------------------------------------------
 # Modifier Adjustments (Section 5.2)

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice Order Sidecar</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div>
+          <h1>Voice Order Sidecar</h1>
+          <p class="sub">Listen → parse → confirm → Terminal checkout</p>
+        </div>
+        <div class="env" id="env"></div>
+      </header>
+
+      <section class="panel">
+        <h2>Transcript</h2>
+        <textarea id="transcript" rows="3" placeholder="One 12oz oat latte, extra shot"></textarea>
+        <div class="actions">
+          <button id="parseBtn">Parse</button>
+          <button id="clearBtn" class="ghost">Clear</button>
+        </div>
+        <div id="warnings" class="warnings"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Proposed Cart</h2>
+        <div id="items"></div>
+        <div class="actions">
+          <button id="confirmBtn" class="primary">Confirm (Create Order)</button>
+        </div>
+        <div id="orderStatus" class="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Terminal Checkout</h2>
+        <div class="grid">
+          <label>
+            Device ID
+            <input id="deviceId" placeholder="device:xxxxxxxx" />
+          </label>
+          <label>
+            Amount (cents)
+            <input id="amount" type="number" value="650" />
+          </label>
+          <label>
+            Currency
+            <input id="currency" value="AUD" />
+          </label>
+          <label>
+            Sandbox Source ID
+            <input id="sourceId" value="cnon:card-nonce-ok" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="checkoutBtn">Send to Terminal</button>
+          <button id="sandboxPayBtn" class="ghost">Sandbox Pay</button>
+          <button id="mockPayBtn" class="ghost">Mock Paid</button>
+        </div>
+        <div id="checkoutStatus" class="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Recent Webhooks</h2>
+        <div id="webhooks"></div>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

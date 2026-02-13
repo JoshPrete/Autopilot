@@ -50,6 +50,7 @@ from data.storage import (
     get_site,
     get_site_by_location_id,
     store_daily_pipeline,
+    store_daily_sales,
 )
 from delivery.sender import (
     send_feedback_request,
@@ -123,7 +124,19 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
         storage_result = {"dry_run": True}
         logger.info("DRY RUN: Skipping DB storage")
 
-    # 5. Update yesterday's accuracy (if we have actuals now)
+    # 5. Store daily sales summary for rolling history
+    if not dry_run:
+        total_revenue_cents = sum(
+            o.get("total_money_cents", 0) or 0
+            for o in pipeline_result.get("orders", [])
+        )
+        store_daily_sales(site_id, run_date, {
+            "total_revenue_cents": total_revenue_cents,
+            "orders_count": summary["orders_count"],
+            "items_count": summary["items_count"],
+        })
+
+    # 6. Update yesterday's accuracy (if we have actuals now)
     yesterday = run_date - timedelta(days=1)
     actual_drinks = summary["items_count"]
     actual_workload = summary["total_workload_units"]
