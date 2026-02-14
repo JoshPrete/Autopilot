@@ -7,11 +7,14 @@ and stores raw order data for workload processing.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from square.client import Client as SquareClient
 
 from config.settings import settings
+
+# Brisbane is always UTC+10 (Queensland has no DST)
+AEST = timezone(timedelta(hours=10))
 
 logger = logging.getLogger("autopilot.ingestion")
 
@@ -101,16 +104,22 @@ class SquareIngestion:
         return all_orders
 
     def fetch_todays_orders(self) -> list[dict]:
-        """Fetch all completed orders for today (midnight UTC to now)."""
-        now = datetime.utcnow()
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return self.fetch_completed_orders(start_of_day, now)
+        """Fetch all completed orders for today (AEST day boundaries)."""
+        now_aest = datetime.now(AEST)
+        start_of_day_aest = now_aest.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Convert AEST boundaries to UTC for Square API
+        start_utc = start_of_day_aest.astimezone(timezone.utc).replace(tzinfo=None)
+        now_utc = now_aest.astimezone(timezone.utc).replace(tzinfo=None)
+        return self.fetch_completed_orders(start_utc, now_utc)
 
     def fetch_date_range(self, date: datetime) -> list[dict]:
-        """Fetch all completed orders for a full calendar day (UTC)."""
-        start = date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-        return self.fetch_completed_orders(start, end)
+        """Fetch all completed orders for a full calendar day (AEST boundaries)."""
+        # Treat the date as AEST, convert to UTC for Square API
+        start_aest = date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=AEST)
+        end_aest = start_aest + timedelta(days=1)
+        start_utc = start_aest.astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc = end_aest.astimezone(timezone.utc).replace(tzinfo=None)
+        return self.fetch_completed_orders(start_utc, end_utc)
 
     def fetch_catalog(self) -> dict:
         """
@@ -174,12 +183,27 @@ class SquareIngestion:
         return {"items": items, "modifiers": modifiers}
 
 
+def _utc_to_aest(iso_str: str) -> str:
+    """Convert a UTC ISO timestamp string to AEST (UTC+10), return as ISO string."""
+    if not iso_str:
+        return iso_str
+    try:
+        # Square returns "2026-02-11T00:02:44.712Z" format
+        cleaned = iso_str.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(cleaned)
+        dt_aest = dt_utc.astimezone(AEST)
+        # Return naive datetime string (strip tzinfo) for DB storage
+        return dt_aest.replace(tzinfo=None).isoformat()
+    except (ValueError, TypeError):
+        return iso_str
+
+
 def parse_order(order: dict) -> dict:
     """
     Parse a raw Square order into normalized format.
 
-    Extracts order_id, timestamps, total, state, and line_items
-    with their catalog IDs, modifiers, and quantities.
+    Extracts order_id, timestamps (converted to AEST), total, state,
+    and line_items with their catalog IDs, modifiers, and quantities.
     """
     total_money = order.get("total_money", {})
 
@@ -203,8 +227,8 @@ def parse_order(order: dict) -> dict:
 
     return {
         "order_id": order.get("id"),
-        "created_at": order.get("created_at"),
-        "closed_at": order.get("closed_at"),
+        "created_at": _utc_to_aest(order.get("created_at")),
+        "closed_at": _utc_to_aest(order.get("closed_at")),
         "total_money_cents": total_money.get("amount", 0),
         "state": order.get("state"),
         "line_items": line_items,
