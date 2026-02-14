@@ -19,7 +19,10 @@ from config.settings import settings
 from data.storage import (
     get_dow_pattern,
     get_prediction,
+    get_rosters_for_date,
+    get_roster_summary,
     get_site,
+    get_staffing_vs_workload,
 )
 from analysis.accuracy import get_rolling_accuracy
 
@@ -446,6 +449,196 @@ def _get_hourly_averages(site_id: str, weeks_back: int = 4) -> list[dict]:
 
 
 # ============================================================
+# Roster & Staffing Helpers
+# ============================================================
+
+
+def _get_roster_for_date(site_id: str, target_date: date) -> list[dict]:
+    """Get formatted roster for a specific date."""
+    try:
+        rosters = get_rosters_for_date(site_id, target_date)
+        return [
+            {
+                "name": r.get("employee_name") or "TBC",
+                "start": str(r["start_time"]),
+                "end": str(r["end_time"]),
+                "hours": float(r["total_hours"]) if r.get("total_hours") else None,
+                "is_open": r.get("is_open", False),
+            }
+            for r in rosters
+        ]
+    except Exception:
+        return []
+
+
+def _has_roster_data(site_id: str) -> bool:
+    """Quick check if any roster data exists for this site."""
+    from sqlalchemy import text
+    try:
+        with engine.connect() as conn:
+            count = conn.execute(
+                text("SELECT COUNT(*) FROM deputy_rosters WHERE site_id = :sid LIMIT 1"),
+                {"sid": site_id},
+            ).scalar()
+            return (count or 0) > 0
+    except Exception:
+        return False
+
+
+# ============================================================
+# Knowledge Layer Helpers (derived from existing data)
+# ============================================================
+
+
+def _get_operational_benchmarks(site_id: str, weeks: int = 4) -> dict:
+    """
+    Operational benchmarks derived from historical data:
+    - Average drinks per hour at different times
+    - Peak hour per day-of-week
+    - Busiest/quietest days ranking
+    """
+    from sqlalchemy import text
+
+    cutoff = datetime.utcnow() - timedelta(weeks=weeks)
+
+    try:
+        with engine.connect() as conn:
+            # Avg items per hour by day-of-week
+            peak_hours = conn.execute(
+                text("""
+                    SELECT
+                        TRIM(TO_CHAR(interval_start, 'Day')) AS day_name,
+                        EXTRACT(HOUR FROM interval_start)::int AS hour,
+                        ROUND(AVG(items_count)::numeric, 1) AS avg_items,
+                        ROUND(AVG(workload_units)::numeric, 1) AS avg_wu
+                    FROM workload_timeline
+                    WHERE site_id = :sid AND interval_start >= :cutoff
+                    GROUP BY TRIM(TO_CHAR(interval_start, 'Day')),
+                             EXTRACT(HOUR FROM interval_start)
+                    ORDER BY avg_items DESC
+                    LIMIT 20
+                """),
+                {"sid": site_id, "cutoff": cutoff},
+            ).mappings().all()
+
+            # Daily volume ranking
+            daily_ranking = conn.execute(
+                text("""
+                    SELECT
+                        TRIM(TO_CHAR(interval_start, 'Day')) AS day_name,
+                        ROUND(AVG(daily_total)::numeric, 0) AS avg_daily_items
+                    FROM (
+                        SELECT DATE(interval_start) AS d,
+                               TRIM(TO_CHAR(interval_start, 'Day')) AS day_name_inner,
+                               SUM(items_count) AS daily_total
+                        FROM workload_timeline
+                        WHERE site_id = :sid AND interval_start >= :cutoff
+                        GROUP BY DATE(interval_start), TRIM(TO_CHAR(interval_start, 'Day'))
+                    ) sub
+                    CROSS JOIN LATERAL (SELECT sub.day_name_inner AS day_name) naming
+                    GROUP BY TRIM(TO_CHAR(interval_start, 'Day'))
+                    ORDER BY avg_daily_items DESC
+                """),
+                {"sid": site_id, "cutoff": cutoff},
+            ).mappings().all()
+
+        return {
+            "peak_hours": [
+                {"day": r["day_name"], "hour": f"{r['hour']}:00",
+                 "avg_items": float(r["avg_items"]), "avg_workload": float(r["avg_wu"])}
+                for r in peak_hours
+            ],
+            "daily_ranking": [
+                {"day": r["day_name"], "avg_items": float(r["avg_daily_items"])}
+                for r in daily_ranking
+            ],
+        }
+    except Exception:
+        return {}
+
+
+def _get_trending_items(site_id: str) -> list[dict]:
+    """
+    Compare item counts this week vs last week to identify trends.
+    Returns items with growth/decline percentages.
+    """
+    from sqlalchemy import text
+
+    today = date.today()
+    this_week_start = today - timedelta(days=7)
+    last_week_start = today - timedelta(days=14)
+
+    try:
+        with engine.connect() as conn:
+            this_week = conn.execute(
+                text("""
+                    SELECT item_name, COUNT(*) AS cnt
+                    FROM order_items
+                    WHERE site_id = :sid
+                    AND created_at >= :start AND created_at < :end
+                    GROUP BY item_name
+                """),
+                {"sid": site_id, "start": this_week_start, "end": today},
+            ).mappings().all()
+
+            last_week = conn.execute(
+                text("""
+                    SELECT item_name, COUNT(*) AS cnt
+                    FROM order_items
+                    WHERE site_id = :sid
+                    AND created_at >= :start AND created_at < :end
+                    GROUP BY item_name
+                """),
+                {"sid": site_id, "start": last_week_start, "end": this_week_start},
+            ).mappings().all()
+
+        this_counts = {r["item_name"]: int(r["cnt"]) for r in this_week}
+        last_counts = {r["item_name"]: int(r["cnt"]) for r in last_week}
+
+        trends = []
+        all_items = set(this_counts.keys()) | set(last_counts.keys())
+        for item in all_items:
+            this_cnt = this_counts.get(item, 0)
+            last_cnt = last_counts.get(item, 0)
+            if last_cnt == 0 and this_cnt > 0:
+                change_pct = 100.0
+            elif last_cnt > 0:
+                change_pct = round((this_cnt - last_cnt) / last_cnt * 100, 1)
+            else:
+                continue
+
+            if abs(change_pct) >= 10 and (this_cnt + last_cnt) >= 5:
+                trends.append({
+                    "item": item,
+                    "this_week": this_cnt,
+                    "last_week": last_cnt,
+                    "change_pct": change_pct,
+                    "direction": "up" if change_pct > 0 else "down",
+                })
+
+        trends.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+        return trends[:15]
+
+    except Exception:
+        return []
+
+
+def _get_weather_context(site_id: str) -> dict | None:
+    """Extract weather data from tomorrow's prediction if available."""
+    try:
+        tomorrow = date.today() + timedelta(days=1)
+        pred = get_prediction(site_id, tomorrow)
+        if pred:
+            fd = _safe_json(pred.get("forecast_data", {}))
+            weather = fd.get("weather")
+            if weather and isinstance(weather, dict):
+                return weather
+    except Exception:
+        pass
+    return None
+
+
+# ============================================================
 # Main Context Gatherer
 # ============================================================
 
@@ -492,6 +685,43 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         context["item_variations"] = _get_item_variations(site_id, days=90)
     except Exception:
         pass
+
+    # --- Always: today's roster (if data exists) ---
+    try:
+        today_roster = _get_roster_for_date(site_id, today)
+        if today_roster:
+            context["today_roster"] = today_roster
+    except Exception:
+        pass
+
+    # --- Conditional: staffing / roster / schedule ---
+    staffing_keywords = ["staff", "roster", "schedule", "shift", "deputy",
+                         "understaffed", "overstaffed", "working", "who's on",
+                         "whos on", "who is on", "who is working"]
+    if _keyword_match(question, staffing_keywords):
+        has_rosters = _has_roster_data(site_id)
+        if has_rosters:
+            try:
+                # Tomorrow's roster
+                tomorrow_roster = _get_roster_for_date(site_id, today + timedelta(days=1))
+                if tomorrow_roster:
+                    context["tomorrow_roster"] = tomorrow_roster
+
+                # Next 14 days summary
+                roster_summary = get_roster_summary(site_id, today, today + timedelta(days=14))
+                if roster_summary:
+                    context["roster_summary"] = roster_summary
+
+                # Historical staffing vs workload (last 30 days)
+                staffing_data = get_staffing_vs_workload(
+                    site_id, today - timedelta(days=30), today
+                )
+                if staffing_data:
+                    context["staffing_vs_workload"] = staffing_data
+            except Exception:
+                pass
+        else:
+            context["deputy_status"] = "not_connected"
 
     # --- Conditional: staffing / forecast range ---
     if _keyword_match(question, ["staff", "roster", "schedule", "next week",
@@ -593,6 +823,37 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             context["hourly_averages"] = _get_hourly_averages(site_id)
         except Exception:
             pass
+
+    # --- Conditional: trending items ---
+    if _keyword_match(question, ["trend", "trending", "growing", "declining",
+                                  "popular", "compared to last week",
+                                  "week over week", "change"]):
+        try:
+            trends = _get_trending_items(site_id)
+            if trends:
+                context["trending_items"] = trends
+        except Exception:
+            pass
+
+    # --- Conditional: operational benchmarks ---
+    if _keyword_match(question, ["benchmark", "average", "efficiency",
+                                  "drinks per hour", "peak", "busiest",
+                                  "quietest", "ranking", "best day",
+                                  "worst day", "compare days"]):
+        try:
+            benchmarks = _get_operational_benchmarks(site_id)
+            if benchmarks:
+                context["benchmarks"] = benchmarks
+        except Exception:
+            pass
+
+    # --- Always: weather (if available in tomorrow's prediction) ---
+    try:
+        weather = _get_weather_context(site_id)
+        if weather:
+            context["tomorrow_weather"] = weather
+    except Exception:
+        pass
 
     return context
 
@@ -710,6 +971,94 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append("- Day-by-day:")
             for r in rev[:14]:
                 sections.append(f"  {r['date']} ({r['day_name']}): ${r['revenue']:,.2f}, {r['orders']} orders")
+
+    # --- Staffing & Rosters ---
+    if "deputy_status" in context and context["deputy_status"] == "not_connected":
+        sections.append("\n## Staffing & Rosters")
+        sections.append("- Deputy roster integration is not connected yet. No shift data available.")
+        sections.append("- If asked about rosters/staffing, let the manager know Deputy isn't synced yet.")
+
+    if "today_roster" in context:
+        sections.append("\n## Today's Roster")
+        for shift in context["today_roster"]:
+            open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
+            hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
+            sections.append(f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}")
+
+    if "tomorrow_roster" in context:
+        sections.append("\n## Tomorrow's Roster")
+        for shift in context["tomorrow_roster"]:
+            open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
+            hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
+            sections.append(f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}")
+
+    if "roster_summary" in context:
+        sections.append(f"\n## Roster Summary (next {len(context['roster_summary'])} days)")
+        for day in context["roster_summary"]:
+            try:
+                day_name = date.fromisoformat(day["date"]).strftime("%a %d/%m")
+            except Exception:
+                day_name = day["date"]
+            open_note = f", {day['open_shifts']} OPEN" if day.get("open_shifts") else ""
+            sections.append(
+                f"- {day_name}: {day['staff_count']} staff, "
+                f"{day['total_hours']}h total, ${day['total_cost']:.0f} cost{open_note}"
+            )
+
+    if "staffing_vs_workload" in context:
+        data = context["staffing_vs_workload"]
+        sections.append(f"\n## Staffing vs Workload (last {len(data)} days)")
+        sections.append("Use this to assess if staffing matched demand:")
+        for d in data:
+            drinks = d["total_drinks"] or "N/A"
+            dps = d["drinks_per_staff"] or "N/A"
+            sections.append(
+                f"- {d['date']}: {d['staff_on']} staff, {drinks} drinks, "
+                f"drinks/staff={dps}, {d['staff_hours']}h, ${d['labour_cost']:.0f}"
+            )
+        # Calculate average drinks-per-staff for threshold insight
+        valid = [d for d in data if d.get("drinks_per_staff")]
+        if valid:
+            avg_dps = sum(d["drinks_per_staff"] for d in valid) / len(valid)
+            sections.append(f"- **Average drinks per staff member: {avg_dps:.1f}**")
+            sections.append(f"- Days above average suggest understaffing; below suggest overstaffing")
+
+    # --- Tomorrow's Weather ---
+    if "tomorrow_weather" in context:
+        w = context["tomorrow_weather"]
+        sections.append(f"\n## Tomorrow's Weather Forecast")
+        sections.append(f"- Temperature: {w.get('temp_c', '?')}°C")
+        sections.append(f"- Conditions: {w.get('description', '?')}")
+        rain_pct = round((w.get('rain_probability', 0)) * 100)
+        sections.append(f"- Rain probability: {rain_pct}%")
+        if rain_pct > 50:
+            sections.append("- **High rain chance — historically reduces foot traffic**")
+
+    # --- Trending Items ---
+    if "trending_items" in context:
+        sections.append("\n## Trending Items (this week vs last week)")
+        growers = [t for t in context["trending_items"] if t["direction"] == "up"]
+        decliners = [t for t in context["trending_items"] if t["direction"] == "down"]
+        if growers:
+            sections.append("**Growing:**")
+            for t in growers[:8]:
+                sections.append(f"- {t['item']}: {t['last_week']} → {t['this_week']} (+{t['change_pct']}%)")
+        if decliners:
+            sections.append("**Declining:**")
+            for t in decliners[:8]:
+                sections.append(f"- {t['item']}: {t['last_week']} → {t['this_week']} ({t['change_pct']}%)")
+
+    # --- Operational Benchmarks ---
+    if "benchmarks" in context:
+        bm = context["benchmarks"]
+        if bm.get("peak_hours"):
+            sections.append("\n## Peak Hours (busiest time slots by day)")
+            for ph in bm["peak_hours"][:10]:
+                sections.append(f"- {ph['day']} {ph['hour']}: avg {ph['avg_items']} items, {ph['avg_workload']} WU")
+        if bm.get("daily_ranking"):
+            sections.append("\n## Daily Volume Ranking")
+            for dr in bm["daily_ranking"]:
+                sections.append(f"- {dr['day']}: avg {dr['avg_items']} items/day")
 
     # --- Items summary ---
     if "items_summary" in context:

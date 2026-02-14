@@ -868,6 +868,162 @@ def get_avg_workload_per_drink(site_id: str, weeks_back: int = 6) -> float:
     return ratio
 
 
+# ============================================================
+# Deputy Rosters
+# ============================================================
+
+
+def store_deputy_rosters(site_id: str, rosters: list[dict]) -> int:
+    """
+    Store Deputy roster records with upsert on deputy_id.
+    Same idempotent pattern as store_orders_raw().
+    """
+    if not rosters:
+        return 0
+
+    stored = 0
+    with engine.connect() as conn:
+        for r in rosters:
+            conn.execute(
+                _text(
+                    "INSERT INTO deputy_rosters "
+                    "(site_id, shift_date, start_time, end_time, employee_id, "
+                    "employee_name, total_hours, cost_dollars, is_published, "
+                    "is_open, deputy_id) "
+                    "VALUES (:sid, :sd, :st, :et, :eid, :ename, :hours, "
+                    ":cost, :pub, :open, :did) "
+                    "ON CONFLICT (deputy_id) DO UPDATE SET "
+                    "shift_date = EXCLUDED.shift_date, "
+                    "start_time = EXCLUDED.start_time, "
+                    "end_time = EXCLUDED.end_time, "
+                    "employee_id = EXCLUDED.employee_id, "
+                    "employee_name = EXCLUDED.employee_name, "
+                    "total_hours = EXCLUDED.total_hours, "
+                    "cost_dollars = EXCLUDED.cost_dollars, "
+                    "is_published = EXCLUDED.is_published, "
+                    "is_open = EXCLUDED.is_open"
+                ),
+                {
+                    "sid": site_id,
+                    "sd": r["shift_date"],
+                    "st": r["start_time"],
+                    "et": r["end_time"],
+                    "eid": r.get("employee_id"),
+                    "ename": r.get("employee_name"),
+                    "hours": r.get("total_hours"),
+                    "cost": r.get("cost_dollars"),
+                    "pub": r.get("is_published", True),
+                    "open": r.get("is_open", False),
+                    "did": r["deputy_id"],
+                },
+            )
+            stored += 1
+
+        conn.commit()
+
+    logger.info("Stored %d deputy rosters", stored)
+    return stored
+
+
+def get_rosters_for_date(site_id: str, target_date: date) -> list[dict]:
+    """Get all shifts for a specific date, ordered by start time."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT shift_date, start_time, end_time, employee_name, "
+                "total_hours, cost_dollars, is_published, is_open "
+                "FROM deputy_rosters "
+                "WHERE site_id = :sid AND shift_date = :d "
+                "ORDER BY start_time"
+            ),
+            {"sid": site_id, "d": target_date},
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+def get_roster_summary(site_id: str, start_date: date, end_date: date) -> list[dict]:
+    """
+    Daily roster aggregation: staff count, total hours, total cost, open shifts.
+    Used by chat for multi-day staffing overview.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT shift_date, "
+                "COUNT(*) AS total_shifts, "
+                "COUNT(DISTINCT employee_name) FILTER (WHERE employee_name IS NOT NULL) AS staff_count, "
+                "COALESCE(SUM(total_hours), 0) AS total_hours, "
+                "COALESCE(SUM(cost_dollars), 0) AS total_cost, "
+                "COUNT(*) FILTER (WHERE is_open = TRUE) AS open_shifts "
+                "FROM deputy_rosters "
+                "WHERE site_id = :sid AND shift_date BETWEEN :s AND :e "
+                "GROUP BY shift_date "
+                "ORDER BY shift_date"
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        )
+        return [
+            {
+                "date": str(row["shift_date"]),
+                "staff_count": int(row["staff_count"]),
+                "total_shifts": int(row["total_shifts"]),
+                "total_hours": float(row["total_hours"]),
+                "total_cost": float(row["total_cost"]),
+                "open_shifts": int(row["open_shifts"]),
+            }
+            for row in result.mappings()
+        ]
+
+
+def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> list[dict]:
+    """
+    Join deputy_rosters with workload_timeline to correlate staffing vs demand.
+    Returns daily: date, staff_on, total_drinks, drinks_per_staff, total_workload.
+    This is the key correlation query for chat insights.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text("""
+                SELECT
+                    dr.shift_date AS the_date,
+                    COUNT(DISTINCT dr.employee_name) FILTER (WHERE dr.employee_name IS NOT NULL) AS staff_on,
+                    COALESCE(SUM(dr.total_hours), 0) AS staff_hours,
+                    COALESCE(SUM(dr.cost_dollars), 0) AS labour_cost,
+                    w.total_items,
+                    w.total_workload,
+                    CASE WHEN COUNT(DISTINCT dr.employee_name) > 0
+                         THEN ROUND(w.total_items::numeric / COUNT(DISTINCT dr.employee_name), 1)
+                         ELSE NULL END AS drinks_per_staff
+                FROM deputy_rosters dr
+                LEFT JOIN (
+                    SELECT DATE(interval_start) AS work_date,
+                           SUM(items_count) AS total_items,
+                           SUM(workload_units) AS total_workload
+                    FROM workload_timeline
+                    WHERE site_id = :sid
+                    GROUP BY DATE(interval_start)
+                ) w ON dr.shift_date = w.work_date
+                WHERE dr.site_id = :sid
+                AND dr.shift_date BETWEEN :s AND :e
+                GROUP BY dr.shift_date, w.total_items, w.total_workload
+                ORDER BY dr.shift_date
+            """),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        )
+        return [
+            {
+                "date": str(row["the_date"]),
+                "staff_on": int(row["staff_on"]),
+                "staff_hours": float(row["staff_hours"]),
+                "labour_cost": float(row["labour_cost"]),
+                "total_drinks": int(row["total_items"]) if row["total_items"] else None,
+                "total_workload": float(row["total_workload"]) if row["total_workload"] else None,
+                "drinks_per_staff": float(row["drinks_per_staff"]) if row["drinks_per_staff"] else None,
+            }
+            for row in result.mappings()
+        ]
+
+
 def _json_dumps(obj):
     return json.dumps(obj, cls=_JSONEncoder)
 

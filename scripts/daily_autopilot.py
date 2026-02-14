@@ -51,6 +51,7 @@ from data.storage import (
     get_site_by_location_id,
     store_daily_pipeline,
     store_daily_sales,
+    store_deputy_rosters,
 )
 from delivery.sender import (
     send_feedback_request,
@@ -160,6 +161,59 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
     }
 
 
+def step_deputy(site_id: str, run_date: date, dry_run: bool = False) -> dict:
+    """
+    Step 1.5: Sync roster data from Deputy.
+
+    Runs after ingest, before predict. Follows fail-quiet pattern —
+    skips silently if Deputy credentials are not configured.
+
+    Fetches rosters for today + next 14 days and employee names.
+    """
+    from data.deputy import DeputyClient, DeputyError, is_deputy_configured
+
+    if not is_deputy_configured():
+        logger.info("Deputy not configured — skipping roster sync")
+        return {"status": "skipped", "reason": "not_configured"}
+
+    logger.info("=== STEP: DEPUTY (date: %s) ===", run_date)
+
+    try:
+        client = DeputyClient()
+
+        # Fetch rosters: today + next 14 days
+        end_date = run_date + timedelta(days=14)
+        rosters = client.fetch_rosters(run_date, end_date)
+
+        if not rosters:
+            logger.info("No rosters returned from Deputy")
+            return {"status": "ok", "rosters": 0}
+
+        # Fetch employee names and enrich roster records
+        employees = client.fetch_employees()
+        for r in rosters:
+            emp_id = r.get("employee_id")
+            if emp_id and emp_id in employees:
+                r["employee_name"] = employees[emp_id]
+
+        # Store to DB
+        if not dry_run:
+            stored = store_deputy_rosters(site_id, rosters)
+            logger.info("Stored %d Deputy rosters", stored)
+        else:
+            stored = 0
+            logger.info("DRY RUN: Would store %d rosters", len(rosters))
+
+        return {"status": "ok", "rosters": len(rosters), "stored": stored}
+
+    except DeputyError as e:
+        logger.warning("Deputy sync failed (non-fatal): %s", e)
+        return {"status": "error", "error": str(e)}
+    except Exception as e:
+        logger.warning("Deputy sync unexpected error (non-fatal): %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 def step_predict(
     site_id: str,
     site_name: str,
@@ -266,7 +320,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "predict", "all"],
+        choices=["ingest", "deputy", "predict", "all"],
         default="all",
         help="Which pipeline step to run. Default: all.",
     )
@@ -360,6 +414,10 @@ def main(argv: list[str]) -> int:
         # Step 1: Ingest
         if args.step in ("ingest", "all"):
             results["ingest"] = step_ingest(site_id, run_date, args.dry_run)
+
+        # Step 1.5: Deputy roster sync (after ingest, before predict)
+        if args.step in ("deputy", "all"):
+            results["deputy"] = step_deputy(site_id, run_date, args.dry_run)
 
         # Step 2: Predict
         if args.step in ("predict", "all"):

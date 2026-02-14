@@ -51,6 +51,10 @@ class Settings:
     RECENT_PATTERN_WEEKS: int = int(os.environ.get("RECENT_PATTERN_WEEKS", "6"))
     YOY_YEARS_BACK: int = int(os.environ.get("YOY_YEARS_BACK", "2"))
 
+    # Deputy Workforce Management
+    DEPUTY_BASE_URL: str = os.environ.get("DEPUTY_BASE_URL", "")
+    DEPUTY_ACCESS_TOKEN: str = os.environ.get("DEPUTY_ACCESS_TOKEN", "")
+
     # AI Chat (Claude API)
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 

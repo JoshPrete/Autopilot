@@ -272,6 +272,27 @@ CREATE TABLE daily_sales_history (
 CREATE INDEX idx_daily_sales_site_date ON daily_sales_history(site_id, sale_date);
 
 -- ============================================================
+-- Deputy Rosters (Workforce/shift data from Deputy)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS deputy_rosters (
+    id            SERIAL PRIMARY KEY,
+    site_id       UUID NOT NULL REFERENCES sites(site_id),
+    shift_date    DATE NOT NULL,
+    start_time    TIMESTAMPTZ NOT NULL,
+    end_time      TIMESTAMPTZ NOT NULL,
+    employee_id   INTEGER,
+    employee_name TEXT,
+    total_hours   NUMERIC(5,2),
+    cost_dollars  NUMERIC(8,2),
+    is_published  BOOLEAN DEFAULT TRUE,
+    is_open       BOOLEAN DEFAULT FALSE,
+    deputy_id     INTEGER UNIQUE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deputy_rosters_site_date ON deputy_rosters(site_id, shift_date);
+
+-- ============================================================
 -- Weekly Reviews
 -- ============================================================
 CREATE TABLE weekly_reviews (
