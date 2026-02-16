@@ -92,6 +92,10 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
 
         labor_cost_dollars = float(labor_row["total_cost"])
         labor_cost_cents = round(labor_cost_dollars * 100)
+
+        # Add amortised owner salary ($100k/365 per day)
+        from config.constants import OWNER_DAILY_SALARY_CENTS
+        labor_cost_cents += OWNER_DAILY_SALARY_CENTS
         labor_hours = float(labor_row["total_hours"])
 
         # 3. Item counts and COGS from order_items

@@ -173,6 +173,12 @@ DOW_PATTERN_DEFAULT = {
 # Based on: beans ($45/kg, ~18g/shot), milk ($2.50/L), cups, lids,
 #           wholesale food costs from Brisbane suppliers.
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Owner Salary — amortised daily into labor costs
+# ------------------------------------------------------------
+OWNER_ANNUAL_SALARY_CENTS = 10_000_000  # $100,000 AUD
+OWNER_DAILY_SALARY_CENTS = round(OWNER_ANNUAL_SALARY_CENTS / 365)  # ~$273.97/day
+
 DEFAULT_ITEM_COSTS = {
     # Drinks — cost = beans + milk + cup + lid
     "espresso":        {"cost_cents": 80,  "category": "drink",  "description": "18g beans + 4oz cup"},
