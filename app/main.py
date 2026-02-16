@@ -13,6 +13,7 @@ from app.routers import (
     analysis,
     chat,
     delivery,
+    documents,
     pipeline,
     predictions,
     recommendations,
@@ -113,6 +114,12 @@ async def lifespan(app: FastAPI):
     # Startup: schedule daily jobs
     scheduler.add_job(
         scheduled_ingest,
+        CronTrigger(hour=9, minute=0),
+        id="morning_ingest",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_ingest,
         CronTrigger(hour=17, minute=0),
         id="daily_ingest",
         replace_existing=True,
@@ -137,7 +144,7 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     logger.info(
-        "Scheduler started: ingest@17:00, deputy@17:15, profitability@17:20, predict@18:00 AEST"
+        "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, predict@18:00 AEST"
     )
     yield
     # Shutdown
@@ -186,3 +193,4 @@ app.include_router(delivery.router)
 app.include_router(analysis.router)
 app.include_router(tomorrow_plan.router)
 app.include_router(chat.router)
+app.include_router(documents.router)

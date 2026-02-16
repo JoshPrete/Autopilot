@@ -107,3 +107,4 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    document_ids: list[str] = []

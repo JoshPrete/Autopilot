@@ -41,9 +41,14 @@
         </div>
       </div>
 
+      <!-- File preview bar (shows pending uploads) -->
+      <div class="file-preview-bar"></div>
+
       <!-- Input bar -->
       <div class="chat-input-bar">
-        <textarea class="chat-input" placeholder="Ask about forecasts, staffing, sales..." rows="1"></textarea>
+        <input type="file" class="chat-file-input" accept="image/jpeg,image/png,application/pdf,text/csv" multiple hidden>
+        <button class="chat-attach-btn" aria-label="Attach file" title="Attach invoice, receipt, or CSV">&#128206;</button>
+        <textarea class="chat-input" placeholder="Ask about forecasts, staffing, sales... or drop a file" rows="1"></textarea>
         <button class="chat-send-btn" aria-label="Send">&#10148;</button>
       </div>
 

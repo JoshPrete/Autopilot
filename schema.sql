@@ -302,6 +302,7 @@ CREATE TABLE item_costs (
     category TEXT NOT NULL,
     cost_cents INT NOT NULL,
     description TEXT,
+    source TEXT DEFAULT 'default',  -- 'default' = seeded estimate, 'document' = from uploaded invoice
     updated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(site_id, score_key)
 );
@@ -330,6 +331,26 @@ CREATE TABLE daily_profitability (
 );
 
 CREATE INDEX idx_profitability_site_date ON daily_profitability(site_id, profit_date);
+
+-- ============================================================
+-- Documents (uploaded invoices, receipts, CSVs)
+-- ============================================================
+CREATE TABLE documents (
+    document_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    filename TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    file_size_bytes INT NOT NULL,
+    storage_path TEXT NOT NULL,
+    document_type TEXT,              -- 'receipt', 'invoice', 'csv_pricelist', 'closure_note', 'other'
+    extracted_data JSONB,
+    extraction_summary TEXT,
+    items_updated JSONB,
+    uploaded_at TIMESTAMP DEFAULT NOW(),
+    processed_at TIMESTAMP
+);
+
+CREATE INDEX idx_documents_site ON documents(site_id, uploaded_at DESC);
 
 -- ============================================================
 -- Weekly Reviews

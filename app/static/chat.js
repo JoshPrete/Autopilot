@@ -2,20 +2,26 @@
 
 /**
  * ChatUI manages a single chat instance (standalone page or widget).
- * Handles conversation history, SSE streaming, and markdown rendering.
+ * Handles conversation history, SSE streaming, markdown rendering,
+ * and document uploads with extraction.
  */
 class ChatUI {
   constructor(container, siteId) {
     this.container = container;
     this.siteId = siteId;
     this.api = `/api/sites/${siteId}/chat/message`;
+    this.uploadApi = `/api/sites/${siteId}/documents/upload`;
     this.messages = []; // {role, content}
     this.streaming = false;
+    this.pendingFiles = [];
 
     this.messagesEl = container.querySelector(".chat-messages");
     this.inputEl = container.querySelector(".chat-input");
     this.sendBtn = container.querySelector(".chat-send-btn");
     this.suggestionsEl = container.querySelector(".chat-suggestions");
+    this.attachBtn = container.querySelector(".chat-attach-btn");
+    this.fileInput = container.querySelector(".chat-file-input");
+    this.filePreviewBar = container.querySelector(".file-preview-bar");
 
     this._bind();
   }
@@ -44,29 +50,156 @@ class ChatUI {
         });
       });
     }
+
+    // Attach button
+    if (this.attachBtn && this.fileInput) {
+      this.attachBtn.addEventListener("click", () => this.fileInput.click());
+      this.fileInput.addEventListener("change", () => {
+        for (const file of this.fileInput.files) {
+          this._addPendingFile(file);
+        }
+        this.fileInput.value = "";
+      });
+    }
+
+    // Drag & drop on messages area
+    if (this.messagesEl) {
+      this.messagesEl.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        this.messagesEl.classList.add("drag-over");
+      });
+      this.messagesEl.addEventListener("dragleave", () => {
+        this.messagesEl.classList.remove("drag-over");
+      });
+      this.messagesEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        this.messagesEl.classList.remove("drag-over");
+        for (const file of e.dataTransfer.files) {
+          this._addPendingFile(file);
+        }
+      });
+    }
+  }
+
+  _addPendingFile(file) {
+    const allowed = ["image/jpeg", "image/png", "application/pdf", "text/csv"];
+    if (!allowed.includes(file.type)) {
+      alert(`File type not supported: ${file.type}\nAccepted: JPEG, PNG, PDF, CSV`);
+      return;
+    }
+    const maxSize = 10 * 1024 * 1024;
+    if (file.size > maxSize) {
+      alert(`File too large: ${(file.size / 1024 / 1024).toFixed(1)}MB (max 10MB)`);
+      return;
+    }
+    this.pendingFiles.push(file);
+    this._renderFilePreview();
+  }
+
+  _renderFilePreview() {
+    if (!this.filePreviewBar) return;
+    if (this.pendingFiles.length === 0) {
+      this.filePreviewBar.innerHTML = "";
+      this.filePreviewBar.style.display = "none";
+      return;
+    }
+
+    this.filePreviewBar.style.display = "flex";
+    this.filePreviewBar.innerHTML = this.pendingFiles.map((file, i) => {
+      const icon = file.type.startsWith("image/") ? "🖼️" :
+                   file.type === "application/pdf" ? "📄" : "📊";
+      const size = (file.size / 1024).toFixed(0);
+      return `<div class="file-preview-chip">
+        <span>${icon} ${this._escapeHtml(file.name)} (${size}KB)</span>
+        <button class="file-preview-remove" data-idx="${i}">&times;</button>
+      </div>`;
+    }).join("");
+
+    this.filePreviewBar.querySelectorAll(".file-preview-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.dataset.idx);
+        this.pendingFiles.splice(idx, 1);
+        this._renderFilePreview();
+      });
+    });
+  }
+
+  async _uploadFile(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(this.uploadApi, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || "Upload failed");
+    }
+    return res.json();
   }
 
   async send() {
     const text = this.inputEl.value.trim();
-    if (!text || this.streaming) return;
+    const hasFiles = this.pendingFiles.length > 0;
+    if ((!text && !hasFiles) || this.streaming) return;
 
     // Hide suggestions
     if (this.suggestionsEl) {
       this.suggestionsEl.style.display = "none";
     }
 
-    // Add user message
-    this.messages.push({ role: "user", content: text });
-    this._renderMessage("user", text);
+    // Build user message text
+    const userText = text || (hasFiles ? "Please analyze the uploaded document(s)." : "");
+
+    // Add user message with file badges
+    this.messages.push({ role: "user", content: userText });
+    const userEl = this._renderMessage("user", userText);
+    if (hasFiles) {
+      const badgesHtml = this.pendingFiles.map((f) => {
+        const icon = f.type.startsWith("image/") ? "🖼️" :
+                     f.type === "application/pdf" ? "📄" : "📊";
+        return `<span class="msg-file-badge">${icon} ${this._escapeHtml(f.name)}</span>`;
+      }).join("");
+      const bubble = userEl.querySelector(".msg-bubble");
+      bubble.innerHTML += `<div class="msg-file-attachments">${badgesHtml}</div>`;
+    }
+
     this.inputEl.value = "";
     this.inputEl.style.height = "auto";
     this.sendBtn.disabled = true;
     this.streaming = true;
 
+    // Upload files first
+    const documentIds = [];
+    if (hasFiles) {
+      const filesToUpload = [...this.pendingFiles];
+      this.pendingFiles = [];
+      this._renderFilePreview();
+
+      const statusEl = this._renderMessage("assistant", "");
+      const statusBubble = statusEl.querySelector(".msg-bubble");
+
+      for (const file of filesToUpload) {
+        statusBubble.innerHTML = `<div class="upload-status">Uploading ${this._escapeHtml(file.name)}...</div>`;
+        try {
+          const result = await this._uploadFile(file);
+          documentIds.push(result.document_id);
+        } catch (err) {
+          statusBubble.innerHTML = `<div class="upload-status error">Upload failed: ${this._escapeHtml(err.message)}</div>`;
+          this.streaming = false;
+          this.sendBtn.disabled = false;
+          return;
+        }
+      }
+      // Remove status message, will be replaced by streaming response
+      statusEl.remove();
+    }
+
     // Add assistant placeholder with typing indicator
     const assistantEl = this._renderMessage("assistant", "");
     const bubbleEl = assistantEl.querySelector(".msg-bubble");
-    bubbleEl.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+    if (documentIds.length > 0) {
+      bubbleEl.innerHTML = '<div class="upload-status">Analyzing document...</div>';
+    } else {
+      bubbleEl.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+    }
 
     // Stream response
     let fullContent = "";
@@ -74,7 +207,10 @@ class ChatUI {
       const res = await fetch(this.api, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: this.messages }),
+        body: JSON.stringify({
+          messages: this.messages,
+          document_ids: documentIds,
+        }),
       });
 
       const reader = res.body.getReader();
@@ -98,6 +234,24 @@ class ChatUI {
             if (data.error) {
               fullContent += `\n\n*Error: ${data.error}*`;
               break;
+            }
+            // Handle extraction events
+            if (data.extraction) {
+              const ext = data.extraction;
+              this._showExtractionNotice(ext);
+              // Switch from "analyzing" to typing indicator
+              if (!fullContent) {
+                bubbleEl.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+              }
+              continue;
+            }
+            if (data.extraction_status) {
+              bubbleEl.innerHTML = '<div class="upload-status">Analyzing document...</div>';
+              continue;
+            }
+            if (data.extraction_error) {
+              fullContent += `\n\n*Document extraction error: ${data.extraction_error}*`;
+              continue;
             }
             if (data.content) {
               fullContent += data.content;
@@ -123,6 +277,25 @@ class ChatUI {
     this.sendBtn.disabled = false;
     this.inputEl.focus();
     this._scrollToBottom();
+  }
+
+  _showExtractionNotice(ext) {
+    const notice = document.createElement("div");
+    notice.className = "extraction-notice";
+    let text = `📋 ${ext.summary || "Document processed"}`;
+    if (ext.is_cogs_document && ext.items_count > 0) {
+      text += ` — ${ext.items_count} item cost(s) updated`;
+    }
+    if (ext.events_count > 0) {
+      text += ` — ${ext.events_count} event(s) added`;
+    }
+    notice.textContent = text;
+    document.body.appendChild(notice);
+    setTimeout(() => notice.classList.add("visible"), 10);
+    setTimeout(() => {
+      notice.classList.remove("visible");
+      setTimeout(() => notice.remove(), 300);
+    }, 5000);
   }
 
   _renderMessage(role, content) {

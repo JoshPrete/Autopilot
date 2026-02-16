@@ -18,13 +18,18 @@ from config.database import engine
 from config.settings import settings
 from data.storage import (
     get_daily_profitability,
+    get_data_freshness,
+    get_document,
     get_dow_pattern,
+    get_events_range,
     get_item_costs,
     get_prediction,
+    get_recent_documents,
     get_rosters_for_date,
     get_roster_summary,
     get_site,
     get_staffing_vs_workload,
+    has_real_cogs,
 )
 from analysis.accuracy import get_rolling_accuracy
 
@@ -668,6 +673,14 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     today = date.today()
     context = {}
 
+    # --- Always: data freshness ---
+    try:
+        freshness = get_data_freshness(site_id)
+        if freshness:
+            context["data_freshness"] = freshness
+    except Exception:
+        pass
+
     # --- Always: today's prediction ---
     today_pred = get_prediction(site_id, today)
     if today_pred:
@@ -707,13 +720,56 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
-    # --- Always: today's roster (if data exists) ---
+    # --- Always: rolling 7-day roster window (past 3 + today + future 3) ---
     try:
+        roster_summary = get_roster_summary(
+            site_id, today - timedelta(days=3), today + timedelta(days=4)
+        )
+        if roster_summary:
+            context["rolling_roster"] = roster_summary
+        # Detailed today + tomorrow rosters
         today_roster = _get_roster_for_date(site_id, today)
         if today_roster:
             context["today_roster"] = today_roster
+        tomorrow_roster = _get_roster_for_date(site_id, today + timedelta(days=1))
+        if tomorrow_roster:
+            context["tomorrow_roster"] = tomorrow_roster
     except Exception:
         pass
+
+    # --- Always: COGS source status ---
+    try:
+        context["has_real_cogs"] = has_real_cogs(site_id)
+    except Exception:
+        context["has_real_cogs"] = False
+
+    # --- Always: recent documents ---
+    try:
+        recent_docs = get_recent_documents(site_id, limit=5)
+        if recent_docs:
+            context["recent_documents"] = recent_docs
+    except Exception:
+        pass
+
+    # --- Conditional: events / closures / holidays ---
+    if _keyword_match(question, ["closed", "closure", "holiday", "event",
+                                  "public holiday", "market", "festival"]):
+        try:
+            past_events = get_events_range(
+                site_id, today - timedelta(days=30), today + timedelta(days=30)
+            )
+            if past_events:
+                context["events_calendar"] = [
+                    {
+                        "name": e["event_name"],
+                        "date": str(e["event_date"]),
+                        "type": e.get("event_type"),
+                        "impact": float(e["historical_impact"]) if e.get("historical_impact") else None,
+                    }
+                    for e in past_events
+                ]
+        except Exception:
+            pass
 
     # --- Conditional: staffing / roster / schedule ---
     staffing_keywords = ["staff", "roster", "schedule", "shift", "deputy",
@@ -723,11 +779,6 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         has_rosters = _has_roster_data(site_id)
         if has_rosters:
             try:
-                # Tomorrow's roster
-                tomorrow_roster = _get_roster_for_date(site_id, today + timedelta(days=1))
-                if tomorrow_roster:
-                    context["tomorrow_roster"] = tomorrow_roster
-
                 # Next 14 days summary
                 roster_summary = get_roster_summary(site_id, today, today + timedelta(days=14))
                 if roster_summary:
@@ -875,9 +926,11 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pnl = _get_profitability_context(site_id, days=14)
             if pnl:
                 context["daily_profitability"] = pnl
-            margins = _get_item_margins_context(site_id, days=14)
-            if margins:
-                context["item_margins"] = margins
+            # Only include item margins if real COGS data exists
+            if context.get("has_real_cogs"):
+                margins = _get_item_margins_context(site_id, days=14)
+                if margins:
+                    context["item_margins"] = margins
         except Exception:
             pass
 
@@ -909,11 +962,47 @@ def gather_chat_context(site_id: str, question: str) -> dict:
 
 
 def build_system_prompt(site_name: str, context: dict) -> str:
+    # --- Data freshness header ---
+    freshness = context.get("data_freshness")
+    today = date.today()
+    freshness_line = ""
+    stale_warning = ""
+    if freshness:
+        try:
+            fresh_date = date.fromisoformat(freshness)
+            days_old = (today - fresh_date).days
+            freshness_line = f"Data current through: {fresh_date.strftime('%d/%m/%Y')}"
+            if days_old == 0:
+                freshness_line += " (today)"
+            elif days_old == 1:
+                freshness_line += " (yesterday)"
+            else:
+                freshness_line += f" ({days_old} days ago)"
+                stale_warning = f"WARNING: Data is {days_old} days stale. Warn the user about this in your responses."
+        except Exception:
+            freshness_line = f"Data freshness: {freshness}"
+    else:
+        freshness_line = "Data freshness: unknown"
+        stale_warning = "WARNING: Could not determine data freshness. Note this uncertainty in responses."
+
     sections = [
         f"You are the Clubhouse Autopilot assistant for **{site_name}** — a specialty coffee cafe in Nundah, Brisbane.",
         "",
+        f"**{freshness_line}**",
+    ]
+    if stale_warning:
+        sections.append(f"**{stale_warning}**")
+
+    sections.extend([
+        "",
         "You're the cafe's AI analyst. You have access to real operational data: sales, predictions, workload patterns, "
         "rush windows, events, and menu analytics. Managers ask you questions to plan their day, week, and staffing.",
+        "",
+        "Response Format:",
+        "1. Lead with data freshness indicator: 'Data through: DD/MM' or similar",
+        "2. Then the key answer/number",
+        "3. Then supporting detail",
+        "4. Then caveats if data is stale (>1 day old)",
         "",
         "Personality & Style:",
         "- Friendly, sharp, and data-driven — like a really smart shift supervisor who knows the numbers",
@@ -926,8 +1015,17 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         "- If you don't have data for something, say so — don't guess",
         "- Keep responses focused. Don't pad with generic advice unless asked",
         "",
-        "=== LIVE DATA ===",
-    ]
+    ])
+
+    # --- COGS status ---
+    has_real = context.get("has_real_cogs", False)
+    if not has_real:
+        sections.append("**COGS STATUS:** No real cost data available. Only estimated/default COGS exist.")
+        sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
+        sections.append("Tell the user: 'Upload supplier invoices to enable full P&L analysis.'")
+        sections.append("")
+
+    sections.append("=== LIVE DATA ===")
 
     # --- Today/Tomorrow prediction ---
     for key, label in [("today_prediction", "Today"), ("tomorrow_prediction", "Tomorrow")]:
@@ -1023,15 +1121,31 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append("- Deputy roster integration is not connected yet. No shift data available.")
         sections.append("- If asked about rosters/staffing, let the manager know Deputy isn't synced yet.")
 
+    # --- Rolling Roster (7-day window) ---
+    if "rolling_roster" in context:
+        sections.append("\n## Rolling Roster (past 3 days + next 4 days)")
+        sections.append("| Day | Staff | Hours | Labor Cost | Open |")
+        sections.append("|-----|-------|-------|------------|------|")
+        for day in context["rolling_roster"]:
+            try:
+                day_name = date.fromisoformat(day["date"]).strftime("%a %d/%m")
+            except Exception:
+                day_name = day["date"]
+            open_note = f"{day['open_shifts']}" if day.get("open_shifts") else "0"
+            sections.append(
+                f"| {day_name} | {day['staff_count']} | {day['total_hours']:.1f}h | "
+                f"${day['total_cost']:.0f} | {open_note} |"
+            )
+
     if "today_roster" in context:
-        sections.append("\n## Today's Roster")
+        sections.append("\n## Today's Roster (detail)")
         for shift in context["today_roster"]:
             open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
             hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
             sections.append(f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}")
 
     if "tomorrow_roster" in context:
-        sections.append("\n## Tomorrow's Roster")
+        sections.append("\n## Tomorrow's Roster (detail)")
         for shift in context["tomorrow_roster"]:
             open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
             hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
@@ -1071,44 +1185,80 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     # --- Daily Profitability (P&L) ---
     if "daily_profitability" in context:
         pnl = context["daily_profitability"]
-        sections.append(f"\n## Daily P&L ({len(pnl)} days)")
-        sections.append("**Note:** COGS are estimated defaults — flag as 'estimated COGS' in responses.")
-        sections.append("Days with $0 labor may be missing Deputy data (not truly zero labor cost).")
-        sections.append("")
-        sections.append("| Date | Revenue | Labor | COGS (est.) | Net Profit | Labor % | Rev/Hr |")
-        sections.append("|------|---------|-------|-------------|------------|---------|--------|")
-        for d in pnl:
-            rev = d["revenue_cents"] / 100
-            labor = d["labor_cost_cents"] / 100
-            cogs = d["cogs_cents"] / 100 if d.get("cogs_cents") else 0
-            net = d["net_profit_cents"] / 100 if d.get("net_profit_cents") else 0
-            labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
-            rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
-            no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
-            try:
-                day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
-            except Exception:
-                day_name = d["date"]
-            sections.append(
-                f"| {day_name} | ${rev:,.0f} | ${labor:,.0f}{no_labor_flag} | "
-                f"${cogs:,.0f} | ${net:,.0f} | {labor_pct} | {rev_hr} |"
-            )
-        # Summary stats
-        total_rev = sum(d["revenue_cents"] for d in pnl)
-        total_labor = sum(d["labor_cost_cents"] for d in pnl)
-        total_cogs = sum(d.get("cogs_cents", 0) or 0 for d in pnl)
-        total_net = sum(d.get("net_profit_cents", 0) or 0 for d in pnl)
-        days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
-        avg_labor_pct = (
-            sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
-            / days_with_labor
-        ) if days_with_labor > 0 else 0
-        sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f} | "
-                       f"COGS ${total_cogs / 100:,.0f} | Net ${total_net / 100:,.0f}")
-        sections.append(f"**Avg labor % (days with data): {avg_labor_pct:.1f}%** "
-                       f"(industry benchmark: 25-35% for specialty cafes)")
-        if days_with_labor < len(pnl):
-            sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
+        real_cogs = context.get("has_real_cogs", False)
+
+        if real_cogs:
+            # Full P&L with real COGS
+            sections.append(f"\n## Daily P&L ({len(pnl)} days)")
+            sections.append("Days with $0 labor may be missing Deputy data.")
+            sections.append("")
+            sections.append("| Date | Revenue | Labor | COGS | Net Profit | Labor % | Rev/Hr |")
+            sections.append("|------|---------|-------|------|------------|---------|--------|")
+            for d in pnl:
+                rev = d["revenue_cents"] / 100
+                labor = d["labor_cost_cents"] / 100
+                cogs = d["cogs_cents"] / 100 if d.get("cogs_cents") else 0
+                net = d["net_profit_cents"] / 100 if d.get("net_profit_cents") else 0
+                labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
+                rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
+                no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
+                try:
+                    day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
+                except Exception:
+                    day_name = d["date"]
+                sections.append(
+                    f"| {day_name} | ${rev:,.0f} | ${labor:,.0f}{no_labor_flag} | "
+                    f"${cogs:,.0f} | ${net:,.0f} | {labor_pct} | {rev_hr} |"
+                )
+            total_rev = sum(d["revenue_cents"] for d in pnl)
+            total_labor = sum(d["labor_cost_cents"] for d in pnl)
+            total_cogs = sum(d.get("cogs_cents", 0) or 0 for d in pnl)
+            total_net = sum(d.get("net_profit_cents", 0) or 0 for d in pnl)
+            days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
+            avg_labor_pct = (
+                sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
+                / days_with_labor
+            ) if days_with_labor > 0 else 0
+            sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f} | "
+                           f"COGS ${total_cogs / 100:,.0f} | Net ${total_net / 100:,.0f}")
+            sections.append(f"**Avg labor % (days with data): {avg_labor_pct:.1f}%** "
+                           f"(industry benchmark: 25-35% for specialty cafes)")
+            if days_with_labor < len(pnl):
+                sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
+        else:
+            # Revenue + Labor only (no estimated COGS)
+            sections.append(f"\n## Revenue & Labor ({len(pnl)} days)")
+            sections.append("**COGS not available** — upload supplier invoices to enable full P&L.")
+            sections.append("Showing revenue and labor only (real data).")
+            sections.append("")
+            sections.append("| Date | Revenue | Orders | Labor | Labor % | Rev/Hr |")
+            sections.append("|------|---------|--------|-------|---------|--------|")
+            for d in pnl:
+                rev = d["revenue_cents"] / 100
+                labor = d["labor_cost_cents"] / 100
+                orders = d.get("order_count") or "—"
+                labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
+                rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
+                no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
+                try:
+                    day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
+                except Exception:
+                    day_name = d["date"]
+                sections.append(
+                    f"| {day_name} | ${rev:,.0f} | {orders} | "
+                    f"${labor:,.0f}{no_labor_flag} | {labor_pct} | {rev_hr} |"
+                )
+            total_rev = sum(d["revenue_cents"] for d in pnl)
+            total_labor = sum(d["labor_cost_cents"] for d in pnl)
+            days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
+            avg_labor_pct = (
+                sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
+                / days_with_labor
+            ) if days_with_labor > 0 else 0
+            sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f}")
+            sections.append(f"**Avg labor %: {avg_labor_pct:.1f}%** (benchmark: 25-35%)")
+            if days_with_labor < len(pnl):
+                sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
 
     # --- Item Margins ---
     if "item_margins" in context:
@@ -1267,6 +1417,32 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 impact_label = f" — expect **{round((impact - 1) * 100)}%** volume"
             sections.append(f"- {day_name}: **{ev['name']}**{impact_label}")
 
+    # --- Events Calendar (past + future) ---
+    if "events_calendar" in context:
+        sections.append(f"\n## Events & Closures Calendar")
+        for ev in context["events_calendar"]:
+            try:
+                day_name = date.fromisoformat(ev["date"]).strftime("%A %d/%m")
+            except Exception:
+                day_name = ev["date"]
+            impact_note = ""
+            if ev.get("impact") and ev["impact"] != 1.0:
+                if ev["impact"] < 1.0:
+                    impact_note = f" — {round((1 - ev['impact']) * 100)}% volume reduction"
+                else:
+                    impact_note = f" — +{round((ev['impact'] - 1) * 100)}% volume"
+            type_tag = f" [{ev['type']}]" if ev.get("type") else ""
+            sections.append(f"- {day_name}: **{ev['name']}**{type_tag}{impact_note}")
+        sections.append("Use this to flag anomalous days in historical data.")
+
+    # --- Recent Documents ---
+    if "recent_documents" in context:
+        docs = context["recent_documents"]
+        sections.append(f"\n## Recent Document Uploads")
+        for doc in docs:
+            summary = doc.get("extraction_summary") or "pending processing"
+            sections.append(f"- {doc['filename']} ({doc.get('document_type', 'unknown')}): {summary}")
+
     # --- DOW pattern ---
     if "dow_pattern" in context:
         sections.append(f"\n## Day-of-Week Pattern (workload vs weekly average)")
@@ -1322,6 +1498,7 @@ async def stream_chat_response(
     site_id: str,
     site_name: str,
     messages: list[dict],
+    document_ids: list[str] = None,
 ) -> AsyncGenerator[str, None]:
     if not settings.ANTHROPIC_API_KEY:
         yield 'data: {"error": "ANTHROPIC_API_KEY not configured"}\n\n'
@@ -1334,8 +1511,60 @@ async def stream_chat_response(
             last_user_msg = msg.get("content", "")
             break
 
+    # --- Process uploaded documents ---
+    extraction_results = []
+    if document_ids:
+        from app.extraction import extract_document, build_extraction_content_blocks
+
+        for doc_id in document_ids:
+            try:
+                yield f'data: {json.dumps({"extraction_status": "processing", "document_id": doc_id})}\n\n'
+                result = extract_document(doc_id, str(site_id))
+                extraction_results.append({"document_id": doc_id, "result": result})
+
+                # Send extraction event
+                event_data = {
+                    "extraction": {
+                        "document_id": doc_id,
+                        "document_type": result.get("document_type"),
+                        "summary": result.get("summary"),
+                        "items_count": len(result.get("items", [])),
+                        "events_count": len(result.get("events", [])),
+                        "is_cogs_document": result.get("is_cogs_document", False),
+                    }
+                }
+                yield f"data: {json.dumps(event_data)}\n\n"
+            except Exception as e:
+                logger.error("Document extraction failed for %s: %s", doc_id, e)
+                yield f'data: {json.dumps({"extraction_error": str(e), "document_id": doc_id})}\n\n'
+
     context = gather_chat_context(site_id, last_user_msg)
+
+    # Add extraction results to context
+    if extraction_results:
+        context["extraction_results"] = extraction_results
+
     system_prompt = build_system_prompt(site_name, context)
+
+    # Build API messages — include document content blocks for conversational response
+    api_messages = list(messages)
+    if extraction_results:
+        extraction_text_parts = []
+        for er in extraction_results:
+            r = er["result"]
+            extraction_text_parts.append(
+                f"Document extracted: {r.get('summary', 'Unknown document')}. "
+                f"Type: {r.get('document_type')}. "
+                f"Items found: {len(r.get('items', []))}. "
+                f"Events found: {len(r.get('events', []))}."
+            )
+        # Append extraction context to the last user message
+        if api_messages and api_messages[-1].get("role") == "user":
+            api_messages[-1] = {
+                "role": "user",
+                "content": api_messages[-1]["content"] + "\n\n[Document extraction results: "
+                + " | ".join(extraction_text_parts) + "]",
+            }
 
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
@@ -1344,7 +1573,7 @@ async def stream_chat_response(
             model=CLAUDE_MODEL,
             max_tokens=MAX_TOKENS,
             system=system_prompt,
-            messages=messages,
+            messages=api_messages,
         ) as stream:
             for text in stream.text_stream:
                 chunk = json.dumps({"content": text})

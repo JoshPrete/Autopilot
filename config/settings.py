@@ -58,6 +58,10 @@ class Settings:
     # AI Chat (Claude API)
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 
+    # Document Uploads
+    UPLOAD_DIR: str = os.environ.get("UPLOAD_DIR", "uploads")
+    MAX_UPLOAD_SIZE_MB: int = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "10"))
+
     # Prediction Weights
     WEIGHT_RECENT: float = 0.60
     WEIGHT_YOY: float = 0.25

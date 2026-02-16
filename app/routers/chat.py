@@ -22,6 +22,7 @@ async def chat_message(
     Send a chat message and receive a streaming response.
 
     Accepts conversation history as a list of {role, content} messages.
+    Optionally includes document_ids for uploaded files to extract.
     Returns Server-Sent Events with partial text chunks.
     """
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
@@ -31,6 +32,7 @@ async def chat_message(
             site_id=site["site_id"],
             site_name=site.get("name", "Clubhouse"),
             messages=messages,
+            document_ids=body.document_ids,
         ),
         media_type="text/event-stream",
         headers={

@@ -1181,3 +1181,218 @@ def _text(sql: str):
     """Create a SQLAlchemy text object for raw SQL execution."""
     from sqlalchemy import text
     return text(sql)
+
+
+# ============================================================
+# Documents
+# ============================================================
+
+
+def store_document(
+    site_id: str,
+    filename: str,
+    mime_type: str,
+    file_size_bytes: int,
+    storage_path: str,
+) -> str:
+    """Store document metadata. Returns the document_id."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO documents "
+                "(site_id, filename, mime_type, file_size_bytes, storage_path) "
+                "VALUES (:sid, :fn, :mt, :fs, :sp) "
+                "RETURNING document_id"
+            ),
+            {
+                "sid": site_id,
+                "fn": filename,
+                "mt": mime_type,
+                "fs": file_size_bytes,
+                "sp": storage_path,
+            },
+        )
+        doc_id = str(result.scalar())
+        conn.commit()
+
+    logger.info("Stored document %s: %s (%s)", doc_id, filename, mime_type)
+    return doc_id
+
+
+def get_document(document_id: str) -> Optional[dict]:
+    """Retrieve a document by its UUID."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT document_id, site_id, filename, mime_type, "
+                "file_size_bytes, storage_path, document_type, "
+                "extracted_data, extraction_summary, items_updated, "
+                "uploaded_at, processed_at "
+                "FROM documents WHERE document_id = :did"
+            ),
+            {"did": document_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+def update_document_extraction(
+    document_id: str,
+    document_type: str,
+    extracted_data: dict,
+    extraction_summary: str,
+    items_updated: list,
+) -> None:
+    """Update a document with extraction results."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "UPDATE documents SET "
+                "document_type = :dt, extracted_data = :ed, "
+                "extraction_summary = :es, items_updated = :iu, "
+                "processed_at = NOW() "
+                "WHERE document_id = :did"
+            ),
+            {
+                "did": document_id,
+                "dt": document_type,
+                "ed": _json_dumps(extracted_data),
+                "es": extraction_summary,
+                "iu": _json_dumps(items_updated),
+            },
+        )
+        conn.commit()
+
+
+def get_recent_documents(site_id: str, limit: int = 5) -> list[dict]:
+    """Get recent documents for a site."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT document_id, filename, mime_type, document_type, "
+                "extraction_summary, uploaded_at, processed_at "
+                "FROM documents "
+                "WHERE site_id = :sid "
+                "ORDER BY uploaded_at DESC LIMIT :lim"
+            ),
+            {"sid": site_id, "lim": limit},
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+# ============================================================
+# Special Events (store + query)
+# ============================================================
+
+
+def store_special_event(
+    site_id: str,
+    name: str,
+    event_date: date,
+    event_type: str = "one_time",
+    impact: float = None,
+) -> str:
+    """Store a special event / closure. Returns event_id."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "INSERT INTO special_events "
+                "(site_id, event_name, event_date, event_type, recurrence, historical_impact) "
+                "VALUES (:sid, :name, :ed, :et, 'one_time', :impact) "
+                "RETURNING event_id"
+            ),
+            {
+                "sid": site_id,
+                "name": name,
+                "ed": event_date,
+                "et": event_type,
+                "impact": impact,
+            },
+        )
+        event_id = str(result.scalar())
+        conn.commit()
+
+    logger.info("Stored special event %s: %s on %s", event_id, name, event_date)
+    return event_id
+
+
+def get_events_range(site_id: str, start: date, end: date) -> list[dict]:
+    """Get all events in a date range."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT event_id, event_name, event_date, event_type, "
+                "recurrence, historical_impact "
+                "FROM special_events "
+                "WHERE site_id = :sid AND event_date BETWEEN :s AND :e "
+                "ORDER BY event_date"
+            ),
+            {"sid": site_id, "s": start, "e": end},
+        )
+        return [dict(row) for row in result.mappings()]
+
+
+# ============================================================
+# Item Costs (COGS) — with source tracking
+# ============================================================
+
+
+def upsert_item_cost(
+    site_id: str,
+    score_key: str,
+    category: str,
+    cost_cents: int,
+    description: str = None,
+    source: str = "document",
+) -> None:
+    """Insert or update an item cost, tracking source."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO item_costs "
+                "(site_id, score_key, category, cost_cents, description, source, updated_at) "
+                "VALUES (:sid, :sk, :cat, :cost, :desc, :src, NOW()) "
+                "ON CONFLICT (site_id, score_key) DO UPDATE SET "
+                "cost_cents = EXCLUDED.cost_cents, "
+                "description = EXCLUDED.description, "
+                "source = EXCLUDED.source, "
+                "updated_at = NOW()"
+            ),
+            {
+                "sid": site_id,
+                "sk": score_key,
+                "cat": category,
+                "cost": cost_cents,
+                "desc": description,
+                "src": source,
+            },
+        )
+        conn.commit()
+
+    logger.info("Upserted item cost %s: %d cents (source=%s)", score_key, cost_cents, source)
+
+
+def has_real_cogs(site_id: str) -> bool:
+    """Check if any item costs have been updated from real documents (not defaults)."""
+    with engine.connect() as conn:
+        count = conn.execute(
+            _text(
+                "SELECT COUNT(*) FROM item_costs "
+                "WHERE site_id = :sid AND source = 'document'"
+            ),
+            {"sid": site_id},
+        ).scalar()
+        return (count or 0) > 0
+
+
+def get_data_freshness(site_id: str) -> Optional[str]:
+    """Get the most recent closed_at date from orders_raw."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT MAX(closed_at)::date AS latest "
+                "FROM orders_raw WHERE site_id = :sid"
+            ),
+            {"sid": site_id},
+        ).scalar()
+        return str(result) if result else None
