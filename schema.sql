@@ -293,6 +293,45 @@ CREATE TABLE IF NOT EXISTS deputy_rosters (
 CREATE INDEX IF NOT EXISTS idx_deputy_rosters_site_date ON deputy_rosters(site_id, shift_date);
 
 -- ============================================================
+-- Item Costs (COGS per menu item, keyed on score_key)
+-- ============================================================
+CREATE TABLE item_costs (
+    cost_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    score_key TEXT NOT NULL,
+    category TEXT NOT NULL,
+    cost_cents INT NOT NULL,
+    description TEXT,
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, score_key)
+);
+
+-- ============================================================
+-- Daily Profitability (pre-computed daily P&L)
+-- ============================================================
+CREATE TABLE daily_profitability (
+    profit_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    profit_date DATE NOT NULL,
+    revenue_cents INT NOT NULL,
+    labor_cost_cents INT NOT NULL,
+    cogs_cents INT,
+    gross_profit_cents INT,
+    net_profit_cents INT,
+    order_count INT,
+    item_count INT,
+    drink_count INT,
+    labor_hours NUMERIC(6,2),
+    revenue_per_labor_hour INT,
+    cost_per_drink INT,
+    labor_pct NUMERIC(5,2),
+    computed_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(site_id, profit_date)
+);
+
+CREATE INDEX idx_profitability_site_date ON daily_profitability(site_id, profit_date);
+
+-- ============================================================
 -- Weekly Reviews
 -- ============================================================
 CREATE TABLE weekly_reviews (

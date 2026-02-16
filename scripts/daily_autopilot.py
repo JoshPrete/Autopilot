@@ -214,6 +214,40 @@ def step_deputy(site_id: str, run_date: date, dry_run: bool = False) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+def step_profitability(site_id: str, run_date: date, dry_run: bool = False) -> dict:
+    """
+    Step 1.75: Compute daily P&L and item margins.
+
+    Runs after deputy (needs roster data for labor costs), before predict.
+    Follows fail-quiet pattern — logs warning and continues on error.
+    """
+    logger.info("=== STEP: PROFITABILITY (date: %s) ===", run_date)
+
+    try:
+        from analysis.profitability import compute_daily_profitability
+
+        if dry_run:
+            logger.info("DRY RUN: Would compute profitability for %s", run_date)
+            return {"status": "dry_run"}
+
+        metrics = compute_daily_profitability(site_id, run_date)
+        if metrics:
+            logger.info(
+                "Profitability computed: rev=$%.2f, net=$%.2f, labor%%=%.1f%%",
+                metrics["revenue_cents"] / 100,
+                metrics["net_profit_cents"] / 100,
+                metrics["labor_pct"],
+            )
+            return {"status": "ok", **metrics}
+        else:
+            logger.info("No data for profitability on %s", run_date)
+            return {"status": "no_data"}
+
+    except Exception as e:
+        logger.warning("Profitability computation failed (non-fatal): %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 def step_predict(
     site_id: str,
     site_name: str,
@@ -320,7 +354,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "deputy", "predict", "all"],
+        choices=["ingest", "deputy", "profitability", "predict", "all"],
         default="all",
         help="Which pipeline step to run. Default: all.",
     )
@@ -418,6 +452,10 @@ def main(argv: list[str]) -> int:
         # Step 1.5: Deputy roster sync (after ingest, before predict)
         if args.step in ("deputy", "all"):
             results["deputy"] = step_deputy(site_id, run_date, args.dry_run)
+
+        # Step 1.75: Profitability (after deputy, before predict)
+        if args.step in ("profitability", "all"):
+            results["profitability"] = step_profitability(site_id, run_date, args.dry_run)
 
         # Step 2: Predict
         if args.step in ("predict", "all"):

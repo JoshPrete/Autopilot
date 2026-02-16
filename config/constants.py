@@ -167,6 +167,41 @@ DOW_PATTERN_DEFAULT = {
 # ------------------------------------------------------------
 # Role Definitions (Section 2.2)
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# Default Item Costs (COGS) — Brisbane Specialty Cafe Estimates
+# Cost in cents per unit. Seeds item_costs table on first run.
+# Based on: beans ($45/kg, ~18g/shot), milk ($2.50/L), cups, lids,
+#           wholesale food costs from Brisbane suppliers.
+# ------------------------------------------------------------
+DEFAULT_ITEM_COSTS = {
+    # Drinks — cost = beans + milk + cup + lid
+    "espresso":        {"cost_cents": 80,  "category": "drink",  "description": "18g beans + 4oz cup"},
+    "long_black":      {"cost_cents": 90,  "category": "drink",  "description": "18g beans + 8oz cup + water"},
+    "latte":           {"cost_cents": 140, "category": "drink",  "description": "18g beans + 220ml milk + 12oz cup"},
+    "cappuccino":      {"cost_cents": 140, "category": "drink",  "description": "18g beans + 180ml milk + 12oz cup"},
+    "flat_white":      {"cost_cents": 120, "category": "drink",  "description": "18g beans + 160ml milk + 8oz cup"},
+    "mocha":           {"cost_cents": 170, "category": "drink",  "description": "18g beans + 200ml milk + chocolate + 12oz cup"},
+    "iced_latte":      {"cost_cents": 160, "category": "drink",  "description": "18g beans + 200ml milk + ice + 16oz cup"},
+    "matcha_complex":  {"cost_cents": 200, "category": "drink",  "description": "matcha powder + 220ml milk + 12oz cup"},
+    "babycino":        {"cost_cents": 30,  "category": "drink",  "description": "froth + small cup + marshmallow"},
+    # Food — wholesale cost estimates
+    "toastie":         {"cost_cents": 250, "category": "food",   "description": "bread + ham/cheese + packaging"},
+    "wrap":            {"cost_cents": 280, "category": "food",   "description": "tortilla + fillings + packaging"},
+    "croissant":       {"cost_cents": 180, "category": "food",   "description": "wholesale bakery + filling"},
+    "muffin":          {"cost_cents": 150, "category": "food",   "description": "wholesale bakery"},
+    "pastry":          {"cost_cents": 160, "category": "food",   "description": "wholesale bakery assorted"},
+    "cookie":          {"cost_cents": 100, "category": "food",   "description": "wholesale bakery"},
+    "tart":            {"cost_cents": 170, "category": "food",   "description": "wholesale bakery"},
+    # Retail — wholesale cost
+    "water":           {"cost_cents": 100, "category": "retail", "description": "wholesale bottled water"},
+    "juice":           {"cost_cents": 180, "category": "retail", "description": "wholesale fruit juice"},
+    "soda":            {"cost_cents": 120, "category": "retail", "description": "wholesale soda"},
+    "kombucha":        {"cost_cents": 220, "category": "retail", "description": "wholesale kombucha"},
+    "beans":           {"cost_cents": 1500, "category": "retail", "description": "250g retail beans (avg)"},
+    "gift_card":       {"cost_cents": 0,   "category": "retail", "description": "no COGS — stored value"},
+    "merchandise":     {"cost_cents": 800, "category": "retail", "description": "avg wholesale merch cost"},
+}
+
 ROLES = {
     "P1": {
         "primary": "Front / Orders / Customer Service",

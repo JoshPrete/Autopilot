@@ -72,6 +72,20 @@ def scheduled_deputy():
         logger.exception("Scheduled deputy sync failed")
 
 
+def scheduled_profitability():
+    """5:20pm AEST — Compute daily P&L (after deputy roster sync)."""
+    from scripts.daily_autopilot import step_profitability
+    site = _resolve_site_id()
+    if not site:
+        return
+    site_id, _ = site
+    try:
+        result = step_profitability(site_id, date.today())
+        logger.info("Scheduled profitability: %s", result)
+    except Exception:
+        logger.exception("Scheduled profitability failed")
+
+
 def scheduled_predict():
     """6:00pm AEST — Generate tomorrow's prediction and send SMS."""
     from scripts.daily_autopilot import step_predict
@@ -110,6 +124,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.add_job(
+        scheduled_profitability,
+        CronTrigger(hour=17, minute=20),
+        id="daily_profitability",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         scheduled_predict,
         CronTrigger(hour=18, minute=0),
         id="daily_predict",
@@ -117,7 +137,7 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     logger.info(
-        "Scheduler started: ingest@17:00, deputy@17:15, predict@18:00 AEST"
+        "Scheduler started: ingest@17:00, deputy@17:15, profitability@17:20, predict@18:00 AEST"
     )
     yield
     # Shutdown

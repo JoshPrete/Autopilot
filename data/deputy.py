@@ -7,7 +7,7 @@ Designed to fail quietly when credentials are not configured.
 """
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 
@@ -66,16 +66,14 @@ class DeputyClient:
         Fetch roster/shift records for a date range.
 
         Uses POST /api/v1/resource/Roster/QUERY with date filters.
+        Deputy Date field is ISO-8601 string, filtered via string comparison.
         Returns normalized roster records ready for storage.
         """
-        # Deputy dates are epoch timestamps at midnight
-        start_epoch = int(datetime.combine(start_date, datetime.min.time()).timestamp())
-        end_epoch = int(datetime.combine(end_date, datetime.max.time()).timestamp())
-
+        # Use [start_date, end_date + 1 day) so all timestamps on end_date are included.
         payload = {
             "search": {
-                "s1": {"field": "Date", "type": "ge", "data": start_epoch},
-                "s2": {"field": "Date", "type": "le", "data": end_epoch},
+                "s1": {"field": "Date", "type": "ge", "data": str(start_date)},
+                "s2": {"field": "Date", "type": "lt", "data": str(end_date + timedelta(days=1))},
             }
         }
 
@@ -97,10 +95,23 @@ class DeputyClient:
 
     def _normalize_roster(self, raw: dict) -> dict:
         """Convert a raw Deputy roster record to our storage format."""
-        # Deputy stores dates as epoch timestamps
-        shift_date = date.fromtimestamp(raw["Date"]) if raw.get("Date") else None
-        start_ts = datetime.fromtimestamp(raw["StartTime"]) if raw.get("StartTime") else None
-        end_ts = datetime.fromtimestamp(raw["EndTime"]) if raw.get("EndTime") else None
+        # Date is ISO string "2026-02-12T00:00:00+10:00"
+        shift_date = None
+        if raw.get("Date"):
+            shift_date = datetime.fromisoformat(raw["Date"]).date()
+
+        # StartTimeLocalized / EndTimeLocalized are ISO strings with timezone
+        start_ts = None
+        if raw.get("StartTimeLocalized"):
+            start_ts = datetime.fromisoformat(raw["StartTimeLocalized"])
+        elif raw.get("StartTime"):
+            start_ts = datetime.fromtimestamp(raw["StartTime"])
+
+        end_ts = None
+        if raw.get("EndTimeLocalized"):
+            end_ts = datetime.fromisoformat(raw["EndTimeLocalized"])
+        elif raw.get("EndTime"):
+            end_ts = datetime.fromtimestamp(raw["EndTime"])
 
         return {
             "deputy_id": raw["Id"],

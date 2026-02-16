@@ -1024,6 +1024,155 @@ def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> 
         ]
 
 
+# ============================================================
+# Item Costs (COGS)
+# ============================================================
+
+
+def seed_item_costs(site_id: str) -> int:
+    """
+    Seed default COGS into item_costs table.
+    Uses ON CONFLICT DO NOTHING so existing values are preserved.
+    Returns count of newly inserted rows.
+    """
+    from config.constants import DEFAULT_ITEM_COSTS
+
+    inserted = 0
+    with engine.connect() as conn:
+        for score_key, info in DEFAULT_ITEM_COSTS.items():
+            result = conn.execute(
+                _text(
+                    "INSERT INTO item_costs "
+                    "(site_id, score_key, category, cost_cents, description) "
+                    "VALUES (:sid, :sk, :cat, :cost, :desc) "
+                    "ON CONFLICT (site_id, score_key) DO NOTHING"
+                ),
+                {
+                    "sid": site_id,
+                    "sk": score_key,
+                    "cat": info["category"],
+                    "cost": info["cost_cents"],
+                    "desc": info.get("description"),
+                },
+            )
+            inserted += result.rowcount
+        conn.commit()
+
+    logger.info("Seeded %d item costs for site %s", inserted, site_id)
+    return inserted
+
+
+def get_item_costs(site_id: str) -> dict[str, int]:
+    """Return {score_key: cost_cents} for a site."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT score_key, cost_cents FROM item_costs "
+                "WHERE site_id = :sid"
+            ),
+            {"sid": site_id},
+        )
+        return {row[0]: int(row[1]) for row in result}
+
+
+# ============================================================
+# Daily Profitability
+# ============================================================
+
+
+def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) -> None:
+    """Upsert a daily profitability record."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text("""
+                INSERT INTO daily_profitability
+                    (site_id, profit_date, revenue_cents, labor_cost_cents,
+                     cogs_cents, gross_profit_cents, net_profit_cents,
+                     order_count, item_count, drink_count, labor_hours,
+                     revenue_per_labor_hour, cost_per_drink, labor_pct)
+                VALUES
+                    (:sid, :pd, :rev, :labor, :cogs, :gross, :net,
+                     :orders, :items, :drinks, :hours,
+                     :rev_hr, :cpd, :labor_pct)
+                ON CONFLICT (site_id, profit_date) DO UPDATE SET
+                    revenue_cents = EXCLUDED.revenue_cents,
+                    labor_cost_cents = EXCLUDED.labor_cost_cents,
+                    cogs_cents = EXCLUDED.cogs_cents,
+                    gross_profit_cents = EXCLUDED.gross_profit_cents,
+                    net_profit_cents = EXCLUDED.net_profit_cents,
+                    order_count = EXCLUDED.order_count,
+                    item_count = EXCLUDED.item_count,
+                    drink_count = EXCLUDED.drink_count,
+                    labor_hours = EXCLUDED.labor_hours,
+                    revenue_per_labor_hour = EXCLUDED.revenue_per_labor_hour,
+                    cost_per_drink = EXCLUDED.cost_per_drink,
+                    labor_pct = EXCLUDED.labor_pct,
+                    computed_at = NOW()
+            """),
+            {
+                "sid": site_id,
+                "pd": profit_date,
+                "rev": metrics["revenue_cents"],
+                "labor": metrics["labor_cost_cents"],
+                "cogs": metrics.get("cogs_cents"),
+                "gross": metrics.get("gross_profit_cents"),
+                "net": metrics.get("net_profit_cents"),
+                "orders": metrics.get("order_count"),
+                "items": metrics.get("item_count"),
+                "drinks": metrics.get("drink_count"),
+                "hours": metrics.get("labor_hours"),
+                "rev_hr": metrics.get("revenue_per_labor_hour"),
+                "cpd": metrics.get("cost_per_drink"),
+                "labor_pct": metrics.get("labor_pct"),
+            },
+        )
+        conn.commit()
+
+    logger.info(
+        "Stored daily profitability for %s: rev=$%.2f, net=$%.2f",
+        profit_date,
+        metrics["revenue_cents"] / 100,
+        (metrics.get("net_profit_cents") or 0) / 100,
+    )
+
+
+def get_daily_profitability(
+    site_id: str, start_date: date, end_date: date
+) -> list[dict]:
+    """Retrieve daily P&L records for a date range."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text("""
+                SELECT profit_date, revenue_cents, labor_cost_cents,
+                       cogs_cents, gross_profit_cents, net_profit_cents,
+                       order_count, item_count, drink_count, labor_hours,
+                       revenue_per_labor_hour, cost_per_drink, labor_pct
+                FROM daily_profitability
+                WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
+                ORDER BY profit_date
+            """),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        )
+        return [
+            {
+                "date": str(row[0]),
+                "revenue_cents": int(row[1]),
+                "labor_cost_cents": int(row[2]),
+                "cogs_cents": int(row[3]) if row[3] is not None else None,
+                "gross_profit_cents": int(row[4]) if row[4] is not None else None,
+                "net_profit_cents": int(row[5]) if row[5] is not None else None,
+                "order_count": int(row[6]) if row[6] is not None else None,
+                "item_count": int(row[7]) if row[7] is not None else None,
+                "drink_count": int(row[8]) if row[8] is not None else None,
+                "labor_hours": float(row[9]) if row[9] is not None else None,
+                "revenue_per_labor_hour": int(row[10]) if row[10] is not None else None,
+                "cost_per_drink": int(row[11]) if row[11] is not None else None,
+                "labor_pct": float(row[12]) if row[12] is not None else None,
+            }
+            for row in result
+        ]
+
+
 def _json_dumps(obj):
     return json.dumps(obj, cls=_JSONEncoder)
 

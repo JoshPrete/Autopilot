@@ -17,7 +17,9 @@ import anthropic
 from config.database import engine
 from config.settings import settings
 from data.storage import (
+    get_daily_profitability,
     get_dow_pattern,
+    get_item_costs,
     get_prediction,
     get_rosters_for_date,
     get_roster_summary,
@@ -390,6 +392,25 @@ def _get_modifier_stats(site_id: str, days: int = 7) -> dict:
         "daily": {d: _sorted_counts(mods) for d, mods in sorted(modifier_daily.items(), reverse=True)},
         "size_breakdown": size_breakdown,
     }
+
+
+def _get_profitability_context(site_id: str, days: int = 14) -> list[dict]:
+    """Fetch daily P&L records for the last N days."""
+    try:
+        today = date.today()
+        start = today - timedelta(days=days)
+        return get_daily_profitability(site_id, start, today)
+    except Exception:
+        return []
+
+
+def _get_item_margins_context(site_id: str, days: int = 14) -> list[dict]:
+    """Compute item-level margin analysis."""
+    try:
+        from analysis.profitability import compute_item_margins
+        return compute_item_margins(site_id, days=days)
+    except Exception:
+        return []
 
 
 def _get_workload_timeline_recent(site_id: str, limit: int = 48) -> list[dict]:
@@ -847,6 +868,30 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         except Exception:
             pass
 
+    # --- Conditional: profitability / P&L / margins ---
+    if _keyword_match(question, ["profit", "p&l", "margin", "cogs", "cost of goods",
+                                  "profitable", "bottom line"]):
+        try:
+            pnl = _get_profitability_context(site_id, days=14)
+            if pnl:
+                context["daily_profitability"] = pnl
+            margins = _get_item_margins_context(site_id, days=14)
+            if margins:
+                context["item_margins"] = margins
+        except Exception:
+            pass
+
+    # --- Conditional: labor efficiency ---
+    if _keyword_match(question, ["efficiency", "revenue per hour", "cost per drink",
+                                  "labor cost", "labour cost", "wage", "labor %",
+                                  "labour %"]):
+        try:
+            pnl = _get_profitability_context(site_id, days=14)
+            if pnl:
+                context["daily_profitability"] = pnl
+        except Exception:
+            pass
+
     # --- Always: weather (if available in tomorrow's prediction) ---
     try:
         weather = _get_weather_context(site_id)
@@ -1022,6 +1067,63 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             avg_dps = sum(d["drinks_per_staff"] for d in valid) / len(valid)
             sections.append(f"- **Average drinks per staff member: {avg_dps:.1f}**")
             sections.append(f"- Days above average suggest understaffing; below suggest overstaffing")
+
+    # --- Daily Profitability (P&L) ---
+    if "daily_profitability" in context:
+        pnl = context["daily_profitability"]
+        sections.append(f"\n## Daily P&L ({len(pnl)} days)")
+        sections.append("**Note:** COGS are estimated defaults — flag as 'estimated COGS' in responses.")
+        sections.append("Days with $0 labor may be missing Deputy data (not truly zero labor cost).")
+        sections.append("")
+        sections.append("| Date | Revenue | Labor | COGS (est.) | Net Profit | Labor % | Rev/Hr |")
+        sections.append("|------|---------|-------|-------------|------------|---------|--------|")
+        for d in pnl:
+            rev = d["revenue_cents"] / 100
+            labor = d["labor_cost_cents"] / 100
+            cogs = d["cogs_cents"] / 100 if d.get("cogs_cents") else 0
+            net = d["net_profit_cents"] / 100 if d.get("net_profit_cents") else 0
+            labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
+            rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
+            no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
+            try:
+                day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
+            except Exception:
+                day_name = d["date"]
+            sections.append(
+                f"| {day_name} | ${rev:,.0f} | ${labor:,.0f}{no_labor_flag} | "
+                f"${cogs:,.0f} | ${net:,.0f} | {labor_pct} | {rev_hr} |"
+            )
+        # Summary stats
+        total_rev = sum(d["revenue_cents"] for d in pnl)
+        total_labor = sum(d["labor_cost_cents"] for d in pnl)
+        total_cogs = sum(d.get("cogs_cents", 0) or 0 for d in pnl)
+        total_net = sum(d.get("net_profit_cents", 0) or 0 for d in pnl)
+        days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
+        avg_labor_pct = (
+            sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
+            / days_with_labor
+        ) if days_with_labor > 0 else 0
+        sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f} | "
+                       f"COGS ${total_cogs / 100:,.0f} | Net ${total_net / 100:,.0f}")
+        sections.append(f"**Avg labor % (days with data): {avg_labor_pct:.1f}%** "
+                       f"(industry benchmark: 25-35% for specialty cafes)")
+        if days_with_labor < len(pnl):
+            sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
+
+    # --- Item Margins ---
+    if "item_margins" in context:
+        margins = context["item_margins"]
+        sections.append(f"\n## Item Margin Analysis (last 14 days, estimated COGS)")
+        sections.append("| Item | Qty | Avg Price | COGS | Margin % | Total Profit |")
+        sections.append("|------|-----|-----------|------|----------|-------------|")
+        for m in margins[:20]:
+            sections.append(
+                f"| {m['item']} | {m['qty']} | ${m['avg_price_cents'] / 100:.2f} | "
+                f"${m['cogs_cents'] / 100:.2f} | {m['margin_pct']}% | "
+                f"${m['total_profit_cents'] / 100:,.0f} |"
+            )
+        total_profit = sum(m["total_profit_cents"] for m in margins)
+        sections.append(f"\n**Total estimated product profit: ${total_profit / 100:,.0f}**")
 
     # --- Tomorrow's Weather ---
     if "tomorrow_weather" in context:
