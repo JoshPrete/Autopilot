@@ -1,4 +1,6 @@
 import logging
+import csv
+import json
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from pathlib import Path
@@ -145,6 +147,56 @@ def scheduled_weekly_roi():
         logger.exception("Scheduled weekly ROI failed")
 
 
+def scheduled_weekly_kpi_snapshot():
+    """Monday 8:00am AEST — Persist weekly KPI snapshot artifact."""
+    from analysis.reporting import generate_pilot_kpi_snapshot
+
+    site = _resolve_site_id()
+    if not site:
+        logger.warning("Scheduled KPI snapshot skipped: no site configured")
+        return
+
+    site_id, site_name = site
+    try:
+        snapshot = generate_pilot_kpi_snapshot(site_id=site_id, site_name=site_name)
+
+        base_dir = Path.cwd() / "analysis_outputs" / "pilot_kpi" / site_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        week_end = snapshot["week_end"]
+        json_path = base_dir / f"{week_end}.json"
+        json_path.write_text(json.dumps(snapshot, indent=2))
+
+        csv_path = base_dir / "summary.csv"
+        row = {
+            "generated_at": snapshot.get("generated_at"),
+            "site_id": site_id,
+            "site_name": site_name,
+            "week_start": snapshot.get("week_start"),
+            "week_end": week_end,
+            "labor_pct_avg": snapshot["business_kpis"].get("labor_pct_avg"),
+            "revenue_per_labor_hour_avg_cents": snapshot["business_kpis"].get("revenue_per_labor_hour_avg_cents"),
+            "weekly_net_profit_cents": snapshot["business_kpis"].get("weekly_net_profit_cents"),
+            "weekly_revenue_cents": snapshot["business_kpis"].get("weekly_revenue_cents"),
+            "net_profit_wow_delta_cents": snapshot["business_kpis"].get("net_profit_wow_delta_cents"),
+            "labor_pct_wow_delta_pp": snapshot["business_kpis"].get("labor_pct_wow_delta_pp"),
+            "rev_per_labor_hour_wow_delta_pct": snapshot["business_kpis"].get("rev_per_labor_hour_wow_delta_pct"),
+            "avg_prediction_accuracy_pct": snapshot["ops_kpis"].get("avg_prediction_accuracy_pct"),
+            "adoption_rate": snapshot["ops_kpis"].get("adoption_rate"),
+            "pipeline_success_pct_estimate": snapshot["reliability"].get("pipeline_success_pct_estimate"),
+        }
+        write_header = not csv_path.exists()
+        with csv_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+        logger.info("Scheduled KPI snapshot written: %s", json_path)
+    except Exception:
+        logger.exception("Scheduled KPI snapshot failed")
+
+
 # ============================================================
 # App Lifecycle
 # ============================================================
@@ -190,6 +242,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.add_job(
+        scheduled_weekly_kpi_snapshot,
+        CronTrigger(day_of_week="mon", hour=8, minute=0),
+        id="weekly_kpi_snapshot",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         scheduled_weekly_roi,
         CronTrigger(day_of_week="mon", hour=8, minute=5),
         id="weekly_roi",
@@ -198,7 +256,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info(
         "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, "
-        "xero@17:25, predict@18:00, weekly_roi@Mon08:05 AEST"
+        "xero@17:25, predict@18:00, weekly_kpi@Mon08:00, weekly_roi@Mon08:05 AEST"
     )
     yield
     # Shutdown

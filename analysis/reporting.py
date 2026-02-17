@@ -12,7 +12,7 @@ Core Outputs (Section 1.2):
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from config.database import engine
@@ -227,6 +227,54 @@ def format_weekly_roi_sms(report: dict) -> str:
     return "\n".join(lines)
 
 
+def generate_pilot_kpi_snapshot(
+    site_id: str,
+    site_name: str,
+    week_end: date = None,
+) -> dict:
+    """
+    Build a weekly KPI snapshot for pilot tracking.
+
+    Primary business KPIs:
+      - labor %
+      - revenue per labor hour
+      - weekly net profit
+
+    Reliability KPIs:
+      - weekly data coverage across core pipeline tables
+    """
+    roi = generate_weekly_roi_report(site_id=site_id, site_name=site_name, week_end=week_end)
+    week_start = date.fromisoformat(roi["week_start"])
+    week_end_date = date.fromisoformat(roi["week_end"])
+    stats = get_weekly_stats(site_id, week_start, week_end_date)
+    coverage = _get_pipeline_coverage(site_id, week_start, week_end_date)
+
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "site_id": site_id,
+        "site_name": site_name,
+        "week_start": roi["week_start"],
+        "week_end": roi["week_end"],
+        "business_kpis": {
+            "labor_pct_avg": roi["current_week"].get("avg_labor_pct"),
+            "revenue_per_labor_hour_avg_cents": roi["current_week"].get("avg_revenue_per_labor_hour_cents"),
+            "weekly_net_profit_cents": roi["current_week"].get("total_net_profit_cents"),
+            "weekly_revenue_cents": roi["current_week"].get("total_revenue_cents"),
+            "net_profit_wow_delta_cents": roi["deltas"].get("net_profit_cents_delta"),
+            "labor_pct_wow_delta_pp": roi["deltas"].get("labor_pct_delta_pp"),
+            "rev_per_labor_hour_wow_delta_pct": roi["deltas"].get("revenue_per_labor_hour_delta_pct"),
+        },
+        "ops_kpis": {
+            "avg_prediction_accuracy_pct": stats.get("avg_prediction_accuracy"),
+            "adoption_rate": stats.get("adoption_rate"),
+            "recommendations_total": stats.get("recommendations_total"),
+            "recommendations_adopted": stats.get("recommendations_adopted"),
+        },
+        "reliability": coverage,
+        "headline": roi.get("headline"),
+    }
+
+
 # ============================================================
 # Daily Details
 # ============================================================
@@ -305,6 +353,61 @@ def _aggregate_profitability_rows(rows: list[dict]) -> dict:
         "total_net_profit_cents": total_net,
         "avg_labor_pct": avg_labor_pct,
         "avg_revenue_per_labor_hour_cents": avg_rev_per_hour,
+    }
+
+
+def _get_pipeline_coverage(site_id: str, week_start: date, week_end: date) -> dict:
+    """Compute weekly data coverage as a reliability proxy."""
+    from sqlalchemy import text
+
+    expected_days = 7
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    (SELECT COUNT(DISTINCT DATE(closed_at))
+                     FROM orders_raw
+                     WHERE site_id = :sid
+                       AND DATE(closed_at) BETWEEN :ws AND :we
+                       AND state = 'COMPLETED') AS orders_days,
+                    (SELECT COUNT(DISTINCT shift_date)
+                     FROM deputy_rosters
+                     WHERE site_id = :sid
+                       AND shift_date BETWEEN :ws AND :we) AS deputy_days,
+                    (SELECT COUNT(*)
+                     FROM daily_profitability
+                     WHERE site_id = :sid
+                       AND profit_date BETWEEN :ws AND :we) AS profitability_days,
+                    (SELECT COUNT(*)
+                     FROM predictions
+                     WHERE site_id = :sid
+                       AND forecast_date BETWEEN :ws AND :we) AS prediction_days
+                """
+            ),
+            {"sid": site_id, "ws": week_start, "we": week_end},
+        ).mappings().first()
+
+    orders_days = int(row["orders_days"] or 0)
+    deputy_days = int(row["deputy_days"] or 0)
+    profitability_days = int(row["profitability_days"] or 0)
+    prediction_days = int(row["prediction_days"] or 0)
+
+    components = [
+        orders_days / expected_days,
+        deputy_days / expected_days,
+        profitability_days / expected_days,
+        prediction_days / expected_days,
+    ]
+    success_pct = round((sum(components) / len(components)) * 100, 1)
+
+    return {
+        "expected_days": expected_days,
+        "orders_days": orders_days,
+        "deputy_days": deputy_days,
+        "profitability_days": profitability_days,
+        "prediction_days": prediction_days,
+        "pipeline_success_pct_estimate": success_pct,
     }
 
 
