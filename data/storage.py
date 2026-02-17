@@ -9,6 +9,7 @@ site-scoped per the multi-site default principle.
 
 import json
 import logging
+import math
 import uuid as _uuid
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -1022,6 +1023,123 @@ def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> 
             }
             for row in result.mappings()
         ]
+
+
+def get_staffing_variance_intervals(site_id: str, target_date: date) -> dict:
+    """
+    Compare active staff vs workload per 15-minute interval for a given day.
+
+    Returns intervals with staffing status and a day summary:
+      - understaffed windows
+      - overstaffed windows
+      - balanced windows
+      - no-staff windows while work exists
+    """
+    from config.constants import (
+        STAFFING_WU_PER_PERSON_HIGH,
+        STAFFING_WU_PER_PERSON_LOW,
+        STAFFING_WU_PER_PERSON_TARGET,
+    )
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                """
+                WITH intervals AS (
+                    SELECT interval_start, workload_units, items_count
+                    FROM workload_timeline
+                    WHERE site_id = :sid
+                      AND DATE(interval_start) = :d
+                )
+                SELECT
+                    i.interval_start,
+                    i.workload_units,
+                    i.items_count,
+                    (
+                        SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text))
+                        FROM deputy_rosters dr
+                        WHERE dr.site_id = :sid
+                          AND dr.shift_date = :d
+                          AND dr.start_time <= i.interval_start
+                          AND dr.end_time > i.interval_start
+                    ) AS staff_on
+                FROM intervals i
+                ORDER BY i.interval_start
+                """
+            ),
+            {"sid": site_id, "d": target_date},
+        )
+        rows = list(result.mappings())
+
+    intervals = []
+    summary = {
+        "date": target_date.isoformat(),
+        "interval_count": 0,
+        "understaffed_intervals": 0,
+        "overstaffed_intervals": 0,
+        "balanced_intervals": 0,
+        "no_staff_intervals": 0,
+        "peak_workload_units": 0.0,
+    }
+
+    for row in rows:
+        workload_units = float(row["workload_units"] or 0.0)
+        items_count = int(row["items_count"] or 0)
+        staff_on = int(row["staff_on"] or 0)
+        expected_staff = int(math.ceil(workload_units / STAFFING_WU_PER_PERSON_TARGET)) if workload_units > 0 else 0
+        workload_per_staff = round(workload_units / staff_on, 2) if staff_on > 0 else None
+
+        if staff_on == 0 and workload_units > 0:
+            status = "no_staff"
+            severity = "high"
+        elif workload_per_staff is None:
+            status = "no_workload"
+            severity = "low"
+        elif workload_per_staff > STAFFING_WU_PER_PERSON_HIGH:
+            status = "understaffed"
+            severity = "high"
+        elif workload_per_staff < STAFFING_WU_PER_PERSON_LOW:
+            status = "overstaffed"
+            severity = "medium"
+        else:
+            status = "balanced"
+            severity = "low"
+
+        intervals.append(
+            {
+                "interval_start": str(row["interval_start"]),
+                "workload_units": round(workload_units, 2),
+                "items_count": items_count,
+                "staff_on": staff_on,
+                "expected_staff": expected_staff,
+                "staff_delta": staff_on - expected_staff,
+                "workload_per_staff": workload_per_staff,
+                "status": status,
+                "severity": severity,
+            }
+        )
+
+        summary["interval_count"] += 1
+        summary["peak_workload_units"] = max(summary["peak_workload_units"], workload_units)
+        if status == "understaffed":
+            summary["understaffed_intervals"] += 1
+        elif status == "overstaffed":
+            summary["overstaffed_intervals"] += 1
+        elif status == "balanced":
+            summary["balanced_intervals"] += 1
+        elif status == "no_staff":
+            summary["no_staff_intervals"] += 1
+
+    return {
+        "date": target_date.isoformat(),
+        "thresholds": {
+            "target_wu_per_staff": STAFFING_WU_PER_PERSON_TARGET,
+            "high_wu_per_staff": STAFFING_WU_PER_PERSON_HIGH,
+            "low_wu_per_staff": STAFFING_WU_PER_PERSON_LOW,
+        },
+        "summary": summary,
+        "intervals": intervals,
+    }
 
 
 # ============================================================

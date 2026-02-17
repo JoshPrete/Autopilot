@@ -152,6 +152,14 @@ TRANSITION_RUSH_END = {
 }
 
 # ------------------------------------------------------------
+# Staffing Variance Heuristics (15-min intervals)
+# ------------------------------------------------------------
+# Workload units handled per staff member in a 15-minute window.
+STAFFING_WU_PER_PERSON_TARGET = 3.0
+STAFFING_WU_PER_PERSON_HIGH = 3.8
+STAFFING_WU_PER_PERSON_LOW = 1.8
+
+# ------------------------------------------------------------
 # Day-of-Week Pattern Defaults (Section 5.5)
 # ------------------------------------------------------------
 DOW_PATTERN_DEFAULT = {

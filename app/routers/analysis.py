@@ -5,6 +5,7 @@ from typing import Optional
 from app.dependencies import get_validated_site
 from analysis.accuracy import get_rolling_accuracy, get_adoption_metrics
 from analysis.reporting import generate_weekly_review, generate_weekly_roi_report
+from data.storage import get_staffing_variance_intervals
 
 router = APIRouter(prefix="/api/sites/{site_id}/analysis", tags=["analysis"])
 
@@ -56,4 +57,15 @@ def weekly_roi(
         site_id=site["site_id"],
         site_name=site["name"],
         week_end=week_end,
+    )
+
+
+@router.get("/staffing-variance")
+def staffing_variance(
+    site: dict = Depends(get_validated_site),
+    target_date: Optional[date] = Query(default=None),
+):
+    return get_staffing_variance_intervals(
+        site_id=site["site_id"],
+        target_date=target_date or date.today(),
     )

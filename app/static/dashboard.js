@@ -284,6 +284,67 @@ function renderROI(data) {
   el.innerHTML = html;
 }
 
+function renderStaffingVariance(data) {
+  const el = $("#staffing-variance-content");
+  if (!data || !Array.isArray(data.intervals) || data.intervals.length === 0) {
+    el.innerHTML = '<div class="no-data">No staffing variance data available for today.</div>';
+    return;
+  }
+
+  const summary = data.summary || {};
+  const intervals = data.intervals || [];
+  const displayRows = intervals.filter(i => i.status !== "no_workload").slice(0, 20);
+
+  const statusPill = (status) => {
+    const labelMap = {
+      understaffed: "Understaffed",
+      overstaffed: "Overstaffed",
+      balanced: "Balanced",
+      no_staff: "No Staff",
+      no_workload: "No Workload",
+    };
+    return `<span class="status-pill status-${status}">${labelMap[status] || status}</span>`;
+  };
+
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip under">Understaffed: ${summary.understaffed_intervals || 0}</span>
+      <span class="staffing-chip over">Overstaffed: ${summary.overstaffed_intervals || 0}</span>
+      <span class="staffing-chip balance">Balanced: ${summary.balanced_intervals || 0}</span>
+      <span class="staffing-chip">No Staff: ${summary.no_staff_intervals || 0}</span>
+      <span class="staffing-chip">Peak WU: ${(summary.peak_workload_units || 0).toFixed(1)}</span>
+    </div>
+    <table class="staffing-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Workload</th>
+          <th>Staff</th>
+          <th>Target</th>
+          <th>WU/Staff</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const row of displayRows) {
+    html += `
+      <tr>
+        <td>${fmtTime(row.interval_start)}</td>
+        <td>${(row.workload_units || 0).toFixed(1)}</td>
+        <td>${row.staff_on ?? "--"}</td>
+        <td>${row.expected_staff ?? "--"}</td>
+        <td>${row.workload_per_staff != null ? row.workload_per_staff.toFixed(2) : "--"}</td>
+        <td>${statusPill(row.status)}</td>
+      </tr>
+    `;
+  }
+
+  html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
 // --- Main Load ---
 
 async function loadDashboard() {
@@ -356,6 +417,11 @@ async function loadDashboard() {
   fetchJSON(`${API}/analysis/weekly-roi`)
     .then(renderROI)
     .catch(() => renderROI(null));
+
+  // Fetch staffing variance windows for today
+  fetchJSON(`${API}/analysis/staffing-variance`)
+    .then(renderStaffingVariance)
+    .catch(() => renderStaffingVariance(null));
 
   // Fetch delivery log
   fetchJSON(`${API}/delivery/log?limit=10`)
