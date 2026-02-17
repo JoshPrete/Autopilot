@@ -353,6 +353,34 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_site ON documents(site_id, uploaded_at DESC);
 
 -- ============================================================
+-- Xero OAuth2 Tokens (one row per site)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS xero_tokens (
+    id            SERIAL PRIMARY KEY,
+    site_id       UUID NOT NULL REFERENCES sites(site_id) UNIQUE,
+    tenant_id     TEXT NOT NULL,
+    access_token  TEXT NOT NULL,
+    refresh_token TEXT NOT NULL,
+    expires_at    TIMESTAMPTZ NOT NULL,
+    scope         TEXT,
+    connected_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- Xero Line Mappings (cached LLM description → score_key)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS xero_line_mappings (
+    id               SERIAL PRIMARY KEY,
+    site_id          UUID NOT NULL REFERENCES sites(site_id),
+    xero_description TEXT NOT NULL,
+    score_key        TEXT NOT NULL,
+    confidence       TEXT DEFAULT 'unconfirmed',
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(site_id, xero_description)
+);
+
+-- ============================================================
 -- Weekly Reviews
 -- ============================================================
 CREATE TABLE weekly_reviews (

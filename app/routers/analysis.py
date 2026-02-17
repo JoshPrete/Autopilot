@@ -4,7 +4,7 @@ from typing import Optional
 
 from app.dependencies import get_validated_site
 from analysis.accuracy import get_rolling_accuracy, get_adoption_metrics
-from analysis.reporting import generate_weekly_review
+from analysis.reporting import generate_weekly_review, generate_weekly_roi_report
 
 router = APIRouter(prefix="/api/sites/{site_id}/analysis", tags=["analysis"])
 
@@ -41,6 +41,18 @@ def weekly_review(
     week_end: Optional[date] = Query(default=None),
 ):
     return generate_weekly_review(
+        site_id=site["site_id"],
+        site_name=site["name"],
+        week_end=week_end,
+    )
+
+
+@router.get("/weekly-roi")
+def weekly_roi(
+    site: dict = Depends(get_validated_site),
+    week_end: Optional[date] = Query(default=None),
+):
+    return generate_weekly_roi_report(
         site_id=site["site_id"],
         site_name=site["name"],
         week_end=week_end,

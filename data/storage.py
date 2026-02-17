@@ -1373,16 +1373,157 @@ def upsert_item_cost(
 
 
 def has_real_cogs(site_id: str) -> bool:
-    """Check if any item costs have been updated from real documents (not defaults)."""
+    """Check if any item costs have been updated from real sources (not defaults)."""
     with engine.connect() as conn:
         count = conn.execute(
             _text(
                 "SELECT COUNT(*) FROM item_costs "
-                "WHERE site_id = :sid AND source = 'document'"
+                "WHERE site_id = :sid AND source IN ('document', 'xero')"
             ),
             {"sid": site_id},
         ).scalar()
         return (count or 0) > 0
+
+
+# ============================================================
+# Xero Tokens & Line Mappings
+# ============================================================
+
+
+def store_xero_tokens(
+    site_id: str,
+    tenant_id: str,
+    access_token: str,
+    refresh_token: str,
+    expires_at: datetime,
+    scope: str = None,
+) -> None:
+    """Upsert OAuth2 tokens for a Xero connection."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO xero_tokens "
+                "(site_id, tenant_id, access_token, refresh_token, expires_at, scope) "
+                "VALUES (:sid, :tid, :at, :rt, :ea, :sc) "
+                "ON CONFLICT (site_id) DO UPDATE SET "
+                "tenant_id = EXCLUDED.tenant_id, "
+                "access_token = EXCLUDED.access_token, "
+                "refresh_token = EXCLUDED.refresh_token, "
+                "expires_at = EXCLUDED.expires_at, "
+                "scope = EXCLUDED.scope, "
+                "updated_at = NOW()"
+            ),
+            {
+                "sid": site_id,
+                "tid": tenant_id,
+                "at": access_token,
+                "rt": refresh_token,
+                "ea": expires_at,
+                "sc": scope,
+            },
+        )
+        conn.commit()
+
+    logger.info("Stored Xero tokens for site %s (tenant %s)", site_id, tenant_id)
+
+
+def get_xero_tokens(site_id: str) -> Optional[dict]:
+    """Fetch current Xero OAuth2 tokens for a site."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT tenant_id, access_token, refresh_token, "
+                "expires_at, scope, connected_at, updated_at "
+                "FROM xero_tokens WHERE site_id = :sid"
+            ),
+            {"sid": site_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+def update_xero_tokens(
+    site_id: str,
+    access_token: str,
+    refresh_token: str,
+    expires_at: datetime,
+) -> None:
+    """Update tokens after a refresh (keeps tenant_id unchanged)."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "UPDATE xero_tokens SET "
+                "access_token = :at, refresh_token = :rt, "
+                "expires_at = :ea, updated_at = NOW() "
+                "WHERE site_id = :sid"
+            ),
+            {
+                "sid": site_id,
+                "at": access_token,
+                "rt": refresh_token,
+                "ea": expires_at,
+            },
+        )
+        conn.commit()
+
+    logger.info("Refreshed Xero tokens for site %s", site_id)
+
+
+def get_xero_line_mapping(site_id: str, description: str) -> Optional[str]:
+    """Check cached mapping: Xero line description → score_key."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT score_key FROM xero_line_mappings "
+                "WHERE site_id = :sid AND xero_description = :desc"
+            ),
+            {"sid": site_id, "desc": description},
+        ).scalar()
+        return result
+
+
+def store_xero_line_mapping(
+    site_id: str,
+    description: str,
+    score_key: str,
+    confidence: str = "unconfirmed",
+) -> None:
+    """Cache an LLM-generated mapping from Xero description to score_key."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "INSERT INTO xero_line_mappings "
+                "(site_id, xero_description, score_key, confidence) "
+                "VALUES (:sid, :desc, :sk, :conf) "
+                "ON CONFLICT (site_id, xero_description) DO UPDATE SET "
+                "score_key = EXCLUDED.score_key, "
+                "confidence = EXCLUDED.confidence"
+            ),
+            {
+                "sid": site_id,
+                "desc": description,
+                "sk": score_key,
+                "conf": confidence,
+            },
+        )
+        conn.commit()
+
+    logger.debug("Cached Xero mapping: '%s' → %s", description, score_key)
+
+
+def get_all_xero_mappings(site_id: str) -> list[dict]:
+    """Get all cached Xero line-item mappings for review/display."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT xero_description, score_key, confidence, created_at "
+                "FROM xero_line_mappings "
+                "WHERE site_id = :sid "
+                "ORDER BY created_at DESC"
+            ),
+            {"sid": site_id},
+        )
+        return [dict(row) for row in result.mappings()]
 
 
 def get_data_freshness(site_id: str) -> Optional[str]:

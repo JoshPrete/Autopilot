@@ -20,6 +20,7 @@ from app.routers import (
     sites,
     tomorrow_plan,
     workload,
+    xero,
 )
 from config.settings import settings
 
@@ -87,6 +88,25 @@ def scheduled_profitability():
         logger.exception("Scheduled profitability failed")
 
 
+def scheduled_xero_sync():
+    """5:25pm AEST — Sync Xero supplier bills into item COGS (if connected)."""
+    from data.xero import is_xero_configured, sync_xero_bills
+
+    site = _resolve_site_id()
+    if not site:
+        return
+    site_id, _ = site
+
+    try:
+        if not is_xero_configured(site_id):
+            logger.info("Scheduled Xero sync skipped: Xero not connected for site %s", site_id)
+            return
+        result = sync_xero_bills(site_id, days_back=7)
+        logger.info("Scheduled Xero sync: %s", result)
+    except Exception:
+        logger.exception("Scheduled Xero sync failed")
+
+
 def scheduled_predict():
     """6:00pm AEST — Generate tomorrow's prediction and send SMS."""
     from scripts.daily_autopilot import step_predict
@@ -137,6 +157,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.add_job(
+        scheduled_xero_sync,
+        CronTrigger(hour=17, minute=25),
+        id="daily_xero_sync",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         scheduled_predict,
         CronTrigger(hour=18, minute=0),
         id="daily_predict",
@@ -144,7 +170,8 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     logger.info(
-        "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, predict@18:00 AEST"
+        "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, "
+        "xero@17:25, predict@18:00 AEST"
     )
     yield
     # Shutdown
@@ -173,6 +200,11 @@ def chat_page():
     return (_static_dir / "chat.html").read_text()
 
 
+@app.get("/xero/setup", response_class=HTMLResponse, include_in_schema=False)
+def xero_setup_page():
+    return (_static_dir / "xero_setup.html").read_text()
+
+
 @app.get("/health", tags=["health"])
 def health_check():
     jobs = []
@@ -194,3 +226,4 @@ app.include_router(analysis.router)
 app.include_router(tomorrow_plan.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
+app.include_router(xero.router)

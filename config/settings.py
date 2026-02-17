@@ -55,6 +55,13 @@ class Settings:
     DEPUTY_BASE_URL: str = os.environ.get("DEPUTY_BASE_URL", "")
     DEPUTY_ACCESS_TOKEN: str = os.environ.get("DEPUTY_ACCESS_TOKEN", "")
 
+    # Xero Accounting
+    XERO_CLIENT_ID: str = os.environ.get("XERO_CLIENT_ID", "")
+    XERO_CLIENT_SECRET: str = os.environ.get("XERO_CLIENT_SECRET", "")
+    XERO_REDIRECT_URI: str = os.environ.get(
+        "XERO_REDIRECT_URI", "http://localhost:8000/api/xero/callback"
+    )
+
     # AI Chat (Claude API)
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 

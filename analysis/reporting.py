@@ -20,7 +20,7 @@ from analysis.accuracy import (
     get_adoption_metrics,
     get_rolling_accuracy,
 )
-from data.storage import get_weekly_stats
+from data.storage import get_daily_profitability, get_weekly_stats
 
 logger = logging.getLogger("autopilot.reporting")
 
@@ -111,6 +111,95 @@ def generate_weekly_review(
 
 
 # ============================================================
+# Weekly ROI Report
+# ============================================================
+
+
+def generate_weekly_roi_report(
+    site_id: str,
+    site_name: str,
+    week_end: date = None,
+) -> dict:
+    """
+    Generate a weekly ROI summary from daily_profitability.
+
+    Focus metrics:
+      - labour % (average)
+      - revenue per labour hour
+      - net profit trend (week-over-week)
+    """
+    if week_end is None:
+        today = date.today()
+        days_since_sunday = (today.weekday() + 1) % 7
+        week_end = today - timedelta(days=days_since_sunday)
+
+    week_start = week_end - timedelta(days=6)
+    prev_week_start = week_start - timedelta(days=7)
+    prev_week_end = week_end - timedelta(days=7)
+
+    current_rows = get_daily_profitability(site_id, week_start, week_end)
+    previous_rows = get_daily_profitability(site_id, prev_week_start, prev_week_end)
+
+    current = _aggregate_profitability_rows(current_rows)
+    previous = _aggregate_profitability_rows(previous_rows)
+
+    deltas = {
+        "revenue_cents_delta": (
+            current["total_revenue_cents"] - previous["total_revenue_cents"]
+            if previous["days"] > 0 else None
+        ),
+        "net_profit_cents_delta": (
+            current["total_net_profit_cents"] - previous["total_net_profit_cents"]
+            if previous["days"] > 0 else None
+        ),
+        "labor_pct_delta_pp": _pp_change(
+            current["avg_labor_pct"],
+            previous["avg_labor_pct"],
+        ),
+        "revenue_per_labor_hour_delta_pct": _pct_change(
+            current["avg_revenue_per_labor_hour_cents"],
+            previous["avg_revenue_per_labor_hour_cents"],
+        ),
+    }
+
+    headline = "Insufficient profitability data."
+    if current["days"] > 0:
+        net_delta = deltas["net_profit_cents_delta"]
+        if net_delta is None:
+            headline = "Current week profitability baseline generated."
+        elif net_delta >= 0:
+            headline = (
+                f"Net profit improved by ${net_delta / 100:,.0f} week-over-week."
+            )
+        else:
+            headline = (
+                f"Net profit down by ${abs(net_delta) / 100:,.0f} week-over-week."
+            )
+
+    report_text = _format_weekly_roi_report(
+        site_name=site_name,
+        week_start=week_start,
+        week_end=week_end,
+        current=current,
+        previous=previous,
+        deltas=deltas,
+        headline=headline,
+    )
+
+    return {
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "previous_week_start": prev_week_start.isoformat(),
+        "previous_week_end": prev_week_end.isoformat(),
+        "headline": headline,
+        "current_week": current,
+        "previous_week": previous,
+        "deltas": deltas,
+        "report_text": report_text,
+    }
+
+
+# ============================================================
 # Daily Details
 # ============================================================
 
@@ -153,6 +242,54 @@ def _get_daily_details(
         })
 
     return details
+
+
+def _aggregate_profitability_rows(rows: list[dict]) -> dict:
+    """Aggregate daily profitability rows into weekly metrics."""
+    days = len(rows)
+
+    total_revenue = sum(r.get("revenue_cents", 0) or 0 for r in rows)
+    total_labor = sum(r.get("labor_cost_cents", 0) or 0 for r in rows)
+    total_cogs = sum(r.get("cogs_cents", 0) or 0 for r in rows)
+    total_net = sum(r.get("net_profit_cents", 0) or 0 for r in rows)
+
+    labor_pct_values = [r["labor_pct"] for r in rows if r.get("labor_pct") is not None]
+    rev_per_hour_values = [
+        r["revenue_per_labor_hour"]
+        for r in rows
+        if r.get("revenue_per_labor_hour") is not None
+    ]
+
+    avg_labor_pct = (
+        round(sum(labor_pct_values) / len(labor_pct_values), 2)
+        if labor_pct_values else None
+    )
+    avg_rev_per_hour = (
+        int(round(sum(rev_per_hour_values) / len(rev_per_hour_values)))
+        if rev_per_hour_values else None
+    )
+
+    return {
+        "days": days,
+        "total_revenue_cents": total_revenue,
+        "total_labor_cost_cents": total_labor,
+        "total_cogs_cents": total_cogs,
+        "total_net_profit_cents": total_net,
+        "avg_labor_pct": avg_labor_pct,
+        "avg_revenue_per_labor_hour_cents": avg_rev_per_hour,
+    }
+
+
+def _pct_change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous in (None, 0):
+        return None
+    return round(((current - previous) / previous) * 100, 2)
+
+
+def _pp_change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous is None:
+        return None
+    return round(current - previous, 2)
 
 
 # ============================================================
@@ -401,6 +538,67 @@ def _format_weekly_sms(
     if accuracy.get("alert"):
         lines.append("⚠ Accuracy alert - review needed")
 
+    return "\n".join(lines)
+
+
+def _format_weekly_roi_report(
+    site_name: str,
+    week_start: date,
+    week_end: date,
+    current: dict,
+    previous: dict,
+    deltas: dict,
+    headline: str,
+) -> str:
+    """Format weekly ROI report as plain text."""
+    def _money(cents: Optional[int]) -> str:
+        if cents is None:
+            return "N/A"
+        return f"${cents / 100:,.0f}"
+
+    def _labor_pct(v: Optional[float]) -> str:
+        return f"{v:.1f}%" if v is not None else "N/A"
+
+    def _rev_hour(v: Optional[int]) -> str:
+        return f"${v / 100:,.0f}" if v is not None else "N/A"
+
+    lines = [
+        f"{'═' * REPORT_WIDTH}",
+        f"{'CLUBHOUSE AUTOPILOT - WEEKLY ROI':^{REPORT_WIDTH}}",
+        f"{'═' * REPORT_WIDTH}",
+        f"LOCATION: {site_name}",
+        f"WEEK: {week_start.strftime('%-d %b')} - {week_end.strftime('%-d %b %Y')}",
+        f"HEADLINE: {headline}",
+        "",
+        f"{'Current Week':<18} {'Previous Week':<18} {'Delta':<18}",
+        f"{'─' * REPORT_WIDTH}",
+        (
+            f"Revenue {_money(current['total_revenue_cents']):<10} "
+            f"{_money(previous['total_revenue_cents']):<15} "
+            f"{_money(deltas['revenue_cents_delta']) if deltas['revenue_cents_delta'] is not None else 'N/A'}"
+        ),
+        (
+            f"Net Profit {_money(current['total_net_profit_cents']):<7} "
+            f"{_money(previous['total_net_profit_cents']):<15} "
+            f"{_money(deltas['net_profit_cents_delta']) if deltas['net_profit_cents_delta'] is not None else 'N/A'}"
+        ),
+        (
+            f"Labor % {_labor_pct(current['avg_labor_pct']):<10} "
+            f"{_labor_pct(previous['avg_labor_pct']):<15} "
+            f"{str(deltas['labor_pct_delta_pp']) + 'pp' if deltas['labor_pct_delta_pp'] is not None else 'N/A'}"
+        ),
+        (
+            f"Rev/LaborHr {_rev_hour(current['avg_revenue_per_labor_hour_cents']):<6} "
+            f"{_rev_hour(previous['avg_revenue_per_labor_hour_cents']):<15} "
+            f"{str(deltas['revenue_per_labor_hour_delta_pct']) + '%' if deltas['revenue_per_labor_hour_delta_pct'] is not None else 'N/A'}"
+        ),
+        "",
+        (
+            "Data days: "
+            f"{current['days']} current, {previous['days']} previous"
+        ),
+        f"{'═' * REPORT_WIDTH}",
+    ]
     return "\n".join(lines)
 
 

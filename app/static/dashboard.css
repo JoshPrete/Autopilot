@@ -64,6 +64,28 @@ body {
   color: var(--text);
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.header-link {
+  display: inline-block;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(226, 177, 74, 0.35);
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(226, 177, 74, 0.08);
+}
+
+.header-link:hover {
+  background: rgba(226, 177, 74, 0.16);
+}
+
 /* --- Grid --- */
 .grid {
   display: grid;
@@ -336,6 +358,50 @@ body {
   font-weight: 600;
 }
 
+/* --- Weekly ROI --- */
+.roi-headline {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(119, 217, 196, 0.1);
+  color: var(--accent-2);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.roi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px 14px;
+}
+
+.roi-item {
+  background: var(--panel-alt);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.roi-label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.roi-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.roi-delta {
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.roi-delta.up { color: var(--success); }
+.roi-delta.down { color: var(--danger); }
+.roi-delta.flat { color: var(--muted); }
+
 /* --- Recommendations Log --- */
 .rec-table {
   width: 100%;
@@ -425,6 +491,11 @@ body {
     text-align: left;
   }
 
+  .header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
   .forecast-stats {
     gap: 16px;
   }
@@ -432,6 +503,10 @@ body {
   .accuracy-strip {
     flex-direction: column;
     gap: 16px;
+  }
+
+  .roi-grid {
+    grid-template-columns: 1fr;
   }
 
   .rec-table {

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Xero Integration — Clubhouse Autopilot</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f7; color: #1d1d1f; padding: 2rem; }
+    .container { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin-bottom: 0.5rem; }
+    .subtitle { color: #6e6e73; margin-bottom: 2rem; }
+    .card { background: #fff; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .card h2 { font-size: 1.1rem; margin-bottom: 1rem; }
+    .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; }
+    .status-connected { background: #d4edda; color: #155724; }
+    .status-disconnected { background: #f8d7da; color: #721c24; }
+    .btn { display: inline-block; padding: 10px 24px; border-radius: 8px; font-size: 0.95rem; font-weight: 600; text-decoration: none; cursor: pointer; border: none; }
+    .btn-primary { background: #0066cc; color: #fff; }
+    .btn-primary:hover { background: #0055aa; }
+    .btn-secondary { background: #e8e8ed; color: #1d1d1f; }
+    .btn-secondary:hover { background: #d2d2d7; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f2; }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #6e6e73; }
+    .info-value { font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th { text-align: left; padding: 8px 12px; background: #f5f5f7; font-size: 0.85rem; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.5px; }
+    td { padding: 8px 12px; border-bottom: 1px solid #f0f0f2; font-size: 0.9rem; }
+    .confidence-high { color: #155724; }
+    .confidence-medium { color: #856404; }
+    .confidence-low, .confidence-unconfirmed { color: #721c24; }
+    .sync-result { margin-top: 1rem; padding: 12px; border-radius: 8px; font-size: 0.9rem; display: none; }
+    .sync-ok { background: #d4edda; color: #155724; }
+    .sync-error { background: #f8d7da; color: #721c24; }
+    .loading { color: #6e6e73; font-style: italic; }
+    .empty { color: #6e6e73; text-align: center; padding: 2rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Xero Integration</h1>
+    <p class="subtitle">Connect Xero to automatically pull supplier costs into COGS</p>
+
+    <!-- Connection Status -->
+    <div class="card" id="connection-card">
+      <h2>Connection</h2>
+      <div id="connection-loading" class="loading">Checking connection status...</div>
+      <div id="connection-content" style="display:none">
+        <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1rem;">
+          <span id="status-badge" class="status-badge"></span>
+          <span id="tenant-name"></span>
+        </div>
+        <div id="connection-details"></div>
+        <div style="margin-top:1.5rem; display:flex; gap:0.75rem;">
+          <a id="connect-btn" class="btn btn-primary" href="#">Connect Xero</a>
+          <button id="sync-btn" class="btn btn-secondary" style="display:none" onclick="syncNow()">Sync Now</button>
+        </div>
+        <div id="sync-result" class="sync-result"></div>
+      </div>
+    </div>
+
+    <!-- Mappings Table -->
+    <div class="card" id="mappings-card" style="display:none">
+      <h2>Line Item Mappings</h2>
+      <p style="color:#6e6e73; font-size:0.85rem; margin-bottom:0.5rem;">
+        Xero invoice descriptions mapped to menu score_keys by AI
+      </p>
+      <div id="mappings-content"></div>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const siteId = params.get('site_id') || '';
+    const justConnected = params.get('connected') === 'true';
+
+    if (!siteId) {
+      document.getElementById('connection-loading').textContent = 'Error: site_id parameter required';
+    } else {
+      loadStatus();
+    }
+
+    async function loadStatus() {
+      try {
+        const resp = await fetch(`/api/xero/status?site_id=${siteId}`);
+        const data = await resp.json();
+
+        document.getElementById('connection-loading').style.display = 'none';
+        document.getElementById('connection-content').style.display = 'block';
+
+        const badge = document.getElementById('status-badge');
+        const connectBtn = document.getElementById('connect-btn');
+        const syncBtn = document.getElementById('sync-btn');
+        const details = document.getElementById('connection-details');
+
+        if (data.connected) {
+          badge.textContent = 'Connected';
+          badge.className = 'status-badge status-connected';
+          connectBtn.textContent = 'Reconnect Xero';
+          connectBtn.href = `/api/xero/connect?site_id=${siteId}`;
+          syncBtn.style.display = 'inline-block';
+
+          let html = '';
+          if (data.tenant_id) html += infoRow('Tenant ID', data.tenant_id);
+          if (data.connected_at) html += infoRow('Connected', formatDate(data.connected_at));
+          if (data.last_refreshed) html += infoRow('Last Token Refresh', formatDate(data.last_refreshed));
+          html += infoRow('Mapped Items', `${data.mappings_total || 0} (${data.mappings_confirmed || 0} confirmed)`);
+          details.innerHTML = html;
+
+          loadMappings();
+
+          if (justConnected) {
+            showSyncResult('Successfully connected to Xero! Click "Sync Now" to pull your first bills.', false);
+          }
+        } else {
+          badge.textContent = 'Not Connected';
+          badge.className = 'status-badge status-disconnected';
+          connectBtn.textContent = 'Connect Xero';
+          connectBtn.href = `/api/xero/connect?site_id=${siteId}`;
+          details.innerHTML = '<p style="color:#6e6e73">Connect your Xero account to automatically import supplier bills and keep COGS up to date.</p>';
+        }
+      } catch (e) {
+        document.getElementById('connection-loading').textContent = 'Failed to load status: ' + e.message;
+      }
+    }
+
+    async function syncNow() {
+      const btn = document.getElementById('sync-btn');
+      btn.disabled = true;
+      btn.textContent = 'Syncing...';
+
+      try {
+        const resp = await fetch(`/api/xero/sync?site_id=${siteId}`, { method: 'POST' });
+        const data = await resp.json();
+
+        if (resp.ok) {
+          showSyncResult(
+            `Sync complete: ${data.bills_fetched} bills fetched, ${data.items_mapped} items mapped, ${data.costs_updated} costs updated.`,
+            false
+          );
+          loadMappings();
+        } else {
+          showSyncResult(`Sync failed: ${data.detail || 'Unknown error'}`, true);
+        }
+      } catch (e) {
+        showSyncResult('Sync failed: ' + e.message, true);
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Sync Now';
+    }
+
+    async function loadMappings() {
+      try {
+        const resp = await fetch(`/api/xero/mappings?site_id=${siteId}`);
+        const data = await resp.json();
+        const card = document.getElementById('mappings-card');
+        const content = document.getElementById('mappings-content');
+
+        if (!data.mappings || data.mappings.length === 0) {
+          card.style.display = 'block';
+          content.innerHTML = '<p class="empty">No mappings yet. Run a sync to import supplier bills.</p>';
+          return;
+        }
+
+        card.style.display = 'block';
+        let html = '<table><thead><tr><th>Xero Description</th><th>Score Key</th><th>Confidence</th></tr></thead><tbody>';
+        for (const m of data.mappings) {
+          const conf = m.confidence || 'unconfirmed';
+          html += `<tr>
+            <td>${esc(m.xero_description)}</td>
+            <td><code>${esc(m.score_key)}</code></td>
+            <td><span class="confidence-${conf}">${conf}</span></td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        content.innerHTML = html;
+      } catch (e) {
+        console.error('Failed to load mappings:', e);
+      }
+    }
+
+    function showSyncResult(message, isError) {
+      const el = document.getElementById('sync-result');
+      el.textContent = message;
+      el.className = 'sync-result ' + (isError ? 'sync-error' : 'sync-ok');
+      el.style.display = 'block';
+    }
+
+    function infoRow(label, value) {
+      return `<div class="info-row"><span class="info-label">${label}</span><span class="info-value">${value}</span></div>`;
+    }
+
+    function formatDate(d) {
+      try { return new Date(d).toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' }); }
+      catch { return d; }
+    }
+
+    function esc(s) {
+      const el = document.createElement('span');
+      el.textContent = s || '';
+      return el.innerHTML;
+    }
+  </script>
+</body>
+</html>

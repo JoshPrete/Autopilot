@@ -227,9 +227,71 @@ function renderRecs(records) {
   el.innerHTML = html;
 }
 
+function renderROI(data) {
+  const el = $("#roi-content");
+  if (!data || !data.current_week) {
+    el.innerHTML = '<div class="no-data">No weekly ROI data available.</div>';
+    return;
+  }
+
+  const c = data.current_week || {};
+  const d = data.deltas || {};
+
+  const money = (cents) => (cents == null ? "--" : `$${Math.round(cents / 100).toLocaleString()}`);
+  const pct = (n) => (n == null ? "--" : `${n.toFixed(1)}%`);
+  const revHr = (cents) => (cents == null ? "--" : `$${Math.round(cents / 100).toLocaleString()}`);
+  const deltaCls = (n) => (n == null || n === 0 ? "flat" : n > 0 ? "up" : "down");
+  const deltaFmt = (n, suffix = "") => (n == null ? "N/A" : `${n > 0 ? "+" : ""}${n}${suffix}`);
+
+  const html = `
+    <div class="roi-headline">${data.headline || "Weekly ROI summary"}</div>
+    <div class="roi-grid">
+      <div class="roi-item">
+        <div class="roi-label">Net Profit (Week)</div>
+        <div class="roi-value">
+          ${money(c.total_net_profit_cents)}
+          <span class="roi-delta ${deltaCls(d.net_profit_cents_delta)}">${money(d.net_profit_cents_delta)}</span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Revenue (Week)</div>
+        <div class="roi-value">
+          ${money(c.total_revenue_cents)}
+          <span class="roi-delta ${deltaCls(d.revenue_cents_delta)}">${money(d.revenue_cents_delta)}</span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Average Labor %</div>
+        <div class="roi-value">
+          ${pct(c.avg_labor_pct)}
+          <span class="roi-delta ${deltaCls((d.labor_pct_delta_pp != null ? -d.labor_pct_delta_pp : null))}">
+            ${deltaFmt(d.labor_pct_delta_pp, "pp")}
+          </span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Revenue per Labor Hour</div>
+        <div class="roi-value">
+          ${revHr(c.avg_revenue_per_labor_hour_cents)}
+          <span class="roi-delta ${deltaCls(d.revenue_per_labor_hour_delta_pct)}">
+            ${deltaFmt(d.revenue_per_labor_hour_delta_pct, "%")}
+          </span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  el.innerHTML = html;
+}
+
 // --- Main Load ---
 
 async function loadDashboard() {
+  const xeroLink = $("#xero-setup-link");
+  if (xeroLink) {
+    xeroLink.href = SITE_ID ? `/xero/setup?site_id=${encodeURIComponent(SITE_ID)}` : "/xero/setup";
+  }
+
   if (!SITE_ID) {
     $(".dashboard").innerHTML = `<div class="panel"><h2>No Site Selected</h2>
       <p>Add <code>?site_id=YOUR_SITE_ID</code> to the URL to load a dashboard.</p></div>`;
@@ -289,6 +351,11 @@ async function loadDashboard() {
         .catch(() => renderAccuracy(acc, null));
     })
     .catch(() => renderAccuracy(null, null));
+
+  // Fetch weekly ROI summary
+  fetchJSON(`${API}/analysis/weekly-roi`)
+    .then(renderROI)
+    .catch(() => renderROI(null));
 
   // Fetch delivery log
   fetchJSON(`${API}/delivery/log?limit=10`)
