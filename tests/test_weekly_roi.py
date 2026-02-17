@@ -1,6 +1,6 @@
 from datetime import date
 
-from analysis.reporting import generate_weekly_roi_report
+from analysis.reporting import format_weekly_roi_sms, generate_weekly_roi_report
 
 
 class TestWeeklyROIReport:
@@ -97,3 +97,25 @@ class TestWeeklyROIReport:
         assert result["previous_week"]["days"] == 0
         assert result["deltas"]["net_profit_cents_delta"] is None
         assert result["headline"] == "Current week profitability baseline generated."
+
+
+class TestWeeklyROISMS:
+    def test_formats_sms_with_deltas(self):
+        report = {
+            "week_start": "2026-02-09",
+            "week_end": "2026-02-15",
+            "headline": "Net profit improved by $240 week-over-week.",
+            "deltas": {
+                "net_profit_cents_delta": 24_000,
+                "labor_pct_delta_pp": -2.5,
+                "revenue_per_labor_hour_delta_pct": 10.87,
+            },
+        }
+
+        sms = format_weekly_roi_sms(report)
+
+        assert "Weekly ROI" in sms
+        assert "2026-02-09 to 2026-02-15" in sms
+        assert "Net profit WoW: +$240" in sms
+        assert "Labor % delta: -2.5pp" in sms
+        assert "Rev/labor hr delta: +10.9%" in sms

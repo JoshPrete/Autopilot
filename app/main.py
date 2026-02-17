@@ -124,6 +124,27 @@ def scheduled_predict():
         logger.exception("Scheduled predict failed")
 
 
+def scheduled_weekly_roi():
+    """Monday 8:05am AEST — Send weekly ROI summary to manager."""
+    from analysis.reporting import format_weekly_roi_sms, generate_weekly_roi_report
+    from delivery.sender import send_to_manager
+
+    site = _resolve_site_id()
+    if not site:
+        logger.warning("Scheduled weekly ROI skipped: no site configured")
+        return
+
+    site_id, site_name = site
+    try:
+        report = generate_weekly_roi_report(site_id=site_id, site_name=site_name)
+        sms_text = format_weekly_roi_sms(report)
+        sms_results = send_to_manager(site_id, sms_text)
+        delivered = sum(1 for r in sms_results if r.get("delivered"))
+        logger.info("Scheduled weekly ROI SMS: %d/%d delivered", delivered, len(sms_results))
+    except Exception:
+        logger.exception("Scheduled weekly ROI failed")
+
+
 # ============================================================
 # App Lifecycle
 # ============================================================
@@ -168,10 +189,16 @@ async def lifespan(app: FastAPI):
         id="daily_predict",
         replace_existing=True,
     )
+    scheduler.add_job(
+        scheduled_weekly_roi,
+        CronTrigger(day_of_week="mon", hour=8, minute=5),
+        id="weekly_roi",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(
         "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, "
-        "xero@17:25, predict@18:00 AEST"
+        "xero@17:25, predict@18:00, weekly_roi@Mon08:05 AEST"
     )
     yield
     # Shutdown

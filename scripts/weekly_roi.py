@@ -25,9 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from analysis.reporting import generate_weekly_roi_report
+from analysis.reporting import format_weekly_roi_sms, generate_weekly_roi_report
 from config.settings import settings
 from data.storage import get_site, get_site_by_location_id
+from delivery.sender import send_to_manager
 
 logger = logging.getLogger("autopilot.weekly_roi")
 
@@ -40,6 +41,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--site-id", help="Site UUID. Falls back to SQUARE_LOCATION_ID lookup.")
     p.add_argument("--week-end", help="Week ending date (YYYY-MM-DD).")
     p.add_argument("--json", action="store_true", help="Output JSON instead of text.")
+    p.add_argument("--send-sms", action="store_true", help="Send weekly ROI summary SMS to manager.")
     p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
     return p.parse_args(argv)
 
@@ -81,6 +83,12 @@ def main(argv: list[str]) -> int:
         print(json.dumps(report, indent=2))
     else:
         print("\n" + report["report_text"] + "\n")
+
+    if args.send_sms:
+        sms_text = format_weekly_roi_sms(report)
+        results = send_to_manager(site_id, sms_text)
+        delivered = sum(1 for r in results if r.get("delivered"))
+        logger.info("Weekly ROI SMS sent: %d/%d delivered", delivered, len(results))
 
     return 0
 

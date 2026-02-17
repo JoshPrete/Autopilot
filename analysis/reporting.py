@@ -199,6 +199,34 @@ def generate_weekly_roi_report(
     }
 
 
+def format_weekly_roi_sms(report: dict) -> str:
+    """Build a concise manager SMS from a weekly ROI report payload."""
+    deltas = report.get("deltas", {})
+    week_start = report.get("week_start", "")
+    week_end = report.get("week_end", "")
+    headline = report.get("headline", "Weekly ROI update available.")
+
+    lines = [
+        "Weekly ROI",
+        f"{week_start} to {week_end}",
+        headline,
+    ]
+
+    net_delta = deltas.get("net_profit_cents_delta")
+    labor_delta = deltas.get("labor_pct_delta_pp")
+    rev_hour_delta = deltas.get("revenue_per_labor_hour_delta_pct")
+
+    if net_delta is not None:
+        sign = "+" if net_delta >= 0 else "-"
+        lines.append(f"Net profit WoW: {sign}${abs(net_delta) / 100:,.0f}")
+    if labor_delta is not None:
+        lines.append(f"Labor % delta: {labor_delta:+.1f}pp")
+    if rev_hour_delta is not None:
+        lines.append(f"Rev/labor hr delta: {rev_hour_delta:+.1f}%")
+
+    return "\n".join(lines)
+
+
 # ============================================================
 # Daily Details
 # ============================================================
