@@ -1142,6 +1142,139 @@ def get_staffing_variance_intervals(site_id: str, target_date: date) -> dict:
     }
 
 
+def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
+    """
+    Daily efficiency view aligned to 15-minute intervals.
+
+    Combines:
+      - staffing/workload status from Deputy + workload_timeline
+      - trade intensity from orders_raw (orders + revenue per 15-min bucket)
+      - daily staffing totals from Deputy
+    """
+    variance = get_staffing_variance_intervals(site_id, target_date)
+    base_intervals = variance.get("intervals", [])
+
+    def _bucket_iso(ts) -> str:
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            dt = datetime.fromisoformat(str(ts))
+        minute = (dt.minute // 15) * 15
+        dt = dt.replace(minute=minute, second=0, microsecond=0)
+        return dt.isoformat()
+
+    with engine.connect() as conn:
+        trade_rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    date_trunc('hour', closed_at)
+                    + (floor(extract(minute from closed_at) / 15) * interval '15 minutes')
+                    AS interval_start,
+                    COUNT(*) AS orders_count,
+                    COALESCE(SUM(total_money_cents), 0) AS revenue_cents
+                FROM orders_raw
+                WHERE site_id = :sid
+                  AND closed_at IS NOT NULL
+                  AND DATE(closed_at) = :d
+                GROUP BY 1
+                """
+            ),
+            {"sid": site_id, "d": target_date},
+        ).mappings()
+
+        deputy_totals = conn.execute(
+            _text(
+                """
+                SELECT
+                    COUNT(*) AS shifts_count,
+                    COALESCE(SUM(total_hours), 0) AS total_hours,
+                    COALESCE(SUM(cost_dollars), 0) AS total_cost_dollars
+                FROM deputy_rosters
+                WHERE site_id = :sid
+                  AND shift_date = :d
+                """
+            ),
+            {"sid": site_id, "d": target_date},
+        ).mappings().first()
+
+    trade_by_bucket = {}
+    for row in trade_rows:
+        key = _bucket_iso(row["interval_start"])
+        trade_by_bucket[key] = {
+            "orders_count": int(row["orders_count"] or 0),
+            "revenue_cents": int(row["revenue_cents"] or 0),
+        }
+
+    enriched = []
+    for row in base_intervals:
+        bucket_key = _bucket_iso(row["interval_start"])
+        trade = trade_by_bucket.get(bucket_key, {})
+        orders_count = int(trade.get("orders_count", 0))
+        revenue_cents = int(trade.get("revenue_cents", 0))
+        staff_on = int(row.get("staff_on") or 0)
+        rev_per_staff_hour = None
+        if staff_on > 0:
+            rev_per_staff_hour = round(revenue_cents / (staff_on * 0.25))
+
+        enriched.append(
+            {
+                **row,
+                "orders_count": orders_count,
+                "revenue_cents": revenue_cents,
+                "revenue_per_staff_hour_cents": rev_per_staff_hour,
+            }
+        )
+
+    trade_intervals = sorted(
+        [r for r in enriched if (r.get("orders_count", 0) > 0 or r.get("revenue_cents", 0) > 0)],
+        key=lambda x: (x.get("revenue_cents", 0), x.get("orders_count", 0)),
+        reverse=True,
+    )
+    staffing_intervals = sorted(
+        enriched,
+        key=lambda x: (x.get("staff_on", 0), x.get("workload_units", 0)),
+        reverse=True,
+    )
+    mismatch_intervals = sorted(
+        [r for r in enriched if r.get("status") in ("understaffed", "overstaffed", "no_staff")],
+        key=lambda x: (x.get("revenue_cents", 0), x.get("workload_units", 0)),
+        reverse=True,
+    )
+
+    total_revenue = sum(r.get("revenue_cents", 0) or 0 for r in enriched)
+    total_orders = sum(r.get("orders_count", 0) or 0 for r in enriched)
+    total_items = sum(r.get("items_count", 0) or 0 for r in enriched)
+    total_workload = round(sum(r.get("workload_units", 0.0) or 0.0 for r in enriched), 2)
+    total_staff_hours = float((deputy_totals or {}).get("total_hours") or 0.0)
+    total_labor_cost_cents = round(float((deputy_totals or {}).get("total_cost_dollars") or 0.0) * 100)
+    labor_pct = round((total_labor_cost_cents / total_revenue) * 100, 2) if total_revenue > 0 else None
+    rev_per_labor_hour = round(total_revenue / total_staff_hours) if total_staff_hours > 0 else None
+
+    return {
+        "date": target_date.isoformat(),
+        "summary": {
+            "intervals_analyzed": len(enriched),
+            "total_revenue_cents": total_revenue,
+            "total_orders": total_orders,
+            "total_items": total_items,
+            "total_workload_units": total_workload,
+            "deputy_shift_count": int((deputy_totals or {}).get("shifts_count") or 0),
+            "deputy_staff_hours": round(total_staff_hours, 2),
+            "deputy_labor_cost_cents": total_labor_cost_cents,
+            "labor_pct": labor_pct,
+            "revenue_per_labor_hour_cents": rev_per_labor_hour,
+        },
+        "peaks": {
+            "trade": trade_intervals[:5],
+            "staffing": staffing_intervals[:5],
+            "mismatch": mismatch_intervals[:8],
+        },
+        "variance_summary": variance.get("summary", {}),
+        "intervals": enriched,
+    }
+
+
 # ============================================================
 # Item Costs (COGS)
 # ============================================================
@@ -1587,17 +1720,19 @@ def update_xero_tokens(
     logger.info("Refreshed Xero tokens for site %s", site_id)
 
 
-def get_xero_line_mapping(site_id: str, description: str) -> Optional[str]:
-    """Check cached mapping: Xero line description → score_key."""
+def get_xero_line_mapping(site_id: str, description: str) -> Optional[dict]:
+    """Check cached mapping: Xero line description → {score_key, units_per_pack}."""
     with engine.connect() as conn:
-        result = conn.execute(
+        row = conn.execute(
             _text(
-                "SELECT score_key FROM xero_line_mappings "
+                "SELECT score_key, units_per_pack FROM xero_line_mappings "
                 "WHERE site_id = :sid AND xero_description = :desc"
             ),
             {"sid": site_id, "desc": description},
-        ).scalar()
-        return result
+        ).first()
+        if row:
+            return {"score_key": row[0], "units_per_pack": row[1] or 1}
+        return None
 
 
 def store_xero_line_mapping(
@@ -1605,23 +1740,26 @@ def store_xero_line_mapping(
     description: str,
     score_key: str,
     confidence: str = "unconfirmed",
+    units_per_pack: int = 1,
 ) -> None:
     """Cache an LLM-generated mapping from Xero description to score_key."""
     with engine.connect() as conn:
         conn.execute(
             _text(
                 "INSERT INTO xero_line_mappings "
-                "(site_id, xero_description, score_key, confidence) "
-                "VALUES (:sid, :desc, :sk, :conf) "
+                "(site_id, xero_description, score_key, confidence, units_per_pack) "
+                "VALUES (:sid, :desc, :sk, :conf, :upp) "
                 "ON CONFLICT (site_id, xero_description) DO UPDATE SET "
                 "score_key = EXCLUDED.score_key, "
-                "confidence = EXCLUDED.confidence"
+                "confidence = EXCLUDED.confidence, "
+                "units_per_pack = EXCLUDED.units_per_pack"
             ),
             {
                 "sid": site_id,
                 "desc": description,
                 "sk": score_key,
                 "conf": confidence,
+                "upp": units_per_pack,
             },
         )
         conn.commit()
@@ -1634,7 +1772,7 @@ def get_all_xero_mappings(site_id: str) -> list[dict]:
     with engine.connect() as conn:
         result = conn.execute(
             _text(
-                "SELECT xero_description, score_key, confidence, created_at "
+                "SELECT xero_description, score_key, confidence, units_per_pack, created_at "
                 "FROM xero_line_mappings "
                 "WHERE site_id = :sid "
                 "ORDER BY created_at DESC"

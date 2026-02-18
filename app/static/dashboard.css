@@ -472,6 +472,22 @@ body {
   color: var(--muted);
 }
 
+/* --- Daily Efficiency --- */
+.efficiency-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.efficiency-subhead {
+  margin: 12px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 /* --- Recommendations Log --- */
 .rec-table {
   width: 100%;

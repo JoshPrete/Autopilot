@@ -51,6 +51,7 @@ BASE_FOOD_SCORES = {
     "muffin":        {"units": 0.5, "avg_time_sec": 30},   # grab + plate
     "pastry":        {"units": 0.5, "avg_time_sec": 35},   # KDS P25=36s
     "cookie":        {"units": 0.3, "avg_time_sec": 15},
+    "butterboy":     {"units": 0.3, "avg_time_sec": 15},
     "tart":          {"units": 0.5, "avg_time_sec": 35},
 }
 

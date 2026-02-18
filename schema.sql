@@ -376,6 +376,7 @@ CREATE TABLE IF NOT EXISTS xero_line_mappings (
     xero_description TEXT NOT NULL,
     score_key        TEXT NOT NULL,
     confidence       TEXT DEFAULT 'unconfirmed',
+    units_per_pack   INTEGER DEFAULT 1 NOT NULL,
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(site_id, xero_description)
 );

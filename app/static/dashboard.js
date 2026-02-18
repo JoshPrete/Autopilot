@@ -345,6 +345,98 @@ function renderStaffingVariance(data) {
   el.innerHTML = html;
 }
 
+function fmtMoney(cents) {
+  if (cents == null) return "--";
+  return `$${Math.round(cents / 100).toLocaleString()}`;
+}
+
+function renderDailyEfficiency(data) {
+  const el = $("#daily-efficiency-content");
+  if (!data || !data.summary) {
+    el.innerHTML = '<div class="no-data">No daily efficiency data available for today.</div>';
+    return;
+  }
+
+  const s = data.summary || {};
+  const peaks = data.peaks || {};
+  const trade = peaks.trade || [];
+  const staffing = peaks.staffing || [];
+  const mismatch = peaks.mismatch || [];
+
+  const row = (r) => `
+    <tr>
+      <td>${fmtTime(r.interval_start)}</td>
+      <td>${r.orders_count ?? "--"}</td>
+      <td>${fmtMoney(r.revenue_cents)}</td>
+      <td>${(r.workload_units || 0).toFixed(1)}</td>
+      <td>${r.staff_on ?? "--"}</td>
+      <td>${r.workload_per_staff != null ? r.workload_per_staff.toFixed(2) : "--"}</td>
+      <td>${r.status || "--"}</td>
+    </tr>
+  `;
+
+  let html = `
+    <div class="efficiency-summary">
+      <span class="staffing-chip">Revenue: ${fmtMoney(s.total_revenue_cents)}</span>
+      <span class="staffing-chip">Orders: ${s.total_orders ?? 0}</span>
+      <span class="staffing-chip">Labor %: ${s.labor_pct != null ? s.labor_pct.toFixed(1) + "%" : "--"}</span>
+      <span class="staffing-chip">Rev/Labor Hr: ${fmtMoney(s.revenue_per_labor_hour_cents)}</span>
+      <span class="staffing-chip">Staff Hrs: ${s.deputy_staff_hours ?? 0}</span>
+      <span class="staffing-chip">Labor Cost: ${fmtMoney(s.deputy_labor_cost_cents)}</span>
+    </div>
+  `;
+
+  html += `<h3 class="efficiency-subhead">Top Trade Windows</h3>`;
+  if (trade.length === 0) {
+    html += '<div class="no-data">No trade windows detected.</div>';
+  } else {
+    html += `
+      <table class="staffing-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Orders</th><th>Revenue</th><th>Workload</th><th>Staff</th><th>WU/Staff</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${trade.map(row).join("")}</tbody>
+      </table>
+    `;
+  }
+
+  html += `<h3 class="efficiency-subhead">Top Staffing Windows</h3>`;
+  if (staffing.length === 0) {
+    html += '<div class="no-data">No staffing windows detected.</div>';
+  } else {
+    html += `
+      <table class="staffing-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Orders</th><th>Revenue</th><th>Workload</th><th>Staff</th><th>WU/Staff</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${staffing.map(row).join("")}</tbody>
+      </table>
+    `;
+  }
+
+  html += `<h3 class="efficiency-subhead">Mismatch Windows</h3>`;
+  if (mismatch.length === 0) {
+    html += '<div class="no-data">No mismatch windows detected.</div>';
+  } else {
+    html += `
+      <table class="staffing-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Orders</th><th>Revenue</th><th>Workload</th><th>Staff</th><th>WU/Staff</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>${mismatch.map(row).join("")}</tbody>
+      </table>
+    `;
+  }
+
+  el.innerHTML = html;
+}
+
 // --- Main Load ---
 
 async function loadDashboard() {
@@ -422,6 +514,11 @@ async function loadDashboard() {
   fetchJSON(`${API}/analysis/staffing-variance`)
     .then(renderStaffingVariance)
     .catch(() => renderStaffingVariance(null));
+
+  // Fetch daily efficiency summary (trade vs staffing)
+  fetchJSON(`${API}/analysis/daily-efficiency`)
+    .then(renderDailyEfficiency)
+    .catch(() => renderDailyEfficiency(null));
 
   // Fetch delivery log
   fetchJSON(`${API}/delivery/log?limit=10`)

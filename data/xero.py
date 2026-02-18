@@ -272,9 +272,9 @@ def map_xero_lines_to_score_keys(
     cached = {}
     uncached = []
     for desc in unique_descriptions:
-        score_key = get_xero_line_mapping(site_id, desc)
-        if score_key:
-            cached[desc] = score_key
+        mapping = get_xero_line_mapping(site_id, desc)
+        if mapping:
+            cached[desc] = mapping  # {score_key, units_per_pack}
         else:
             uncached.append(desc)
 
@@ -295,28 +295,35 @@ def map_xero_lines_to_score_keys(
         for desc, mapping in llm_mapped.items():
             store_xero_line_mapping(
                 site_id, desc, mapping["score_key"], mapping.get("confidence", "unconfirmed"),
+                units_per_pack=mapping.get("units_per_pack", 1),
             )
 
     # Build result list — join back to line items
     results = []
     for li in line_items:
         desc = li["description"]
-        score_key = cached.get(desc)
+        score_key = None
         category = "drink"  # default
-        confidence = "confirmed" if score_key else "unconfirmed"
+        units_per_pack = 1
 
-        if not score_key and desc in llm_mapped:
+        if desc in cached:
+            score_key = cached[desc]["score_key"]
+            units_per_pack = cached[desc].get("units_per_pack", 1)
+            confidence = "confirmed"
+        elif desc in llm_mapped:
             mapping = llm_mapped[desc]
             score_key = mapping["score_key"]
             category = mapping.get("category", "drink")
             confidence = mapping.get("confidence", "unconfirmed")
+            units_per_pack = mapping.get("units_per_pack", 1)
 
         if not score_key:
             # Skip items that couldn't be mapped
             logger.debug("Could not map Xero line: '%s'", desc)
             continue
 
-        unit_cost_cents = int(round(float(li.get("unit_amount", 0)) * 100))
+        raw_cost_cents = int(round(float(li.get("unit_amount", 0)) * 100))
+        unit_cost_cents = raw_cost_cents // max(1, units_per_pack)
 
         results.append({
             "description": desc,
@@ -349,13 +356,17 @@ Map each supplier line description to the most appropriate score_key.
 - If it's a new ingredient, create a snake_case key (e.g. "oat_milk", "vanilla_syrup")
 - Category should be one of: "drink", "food", "retail", "ingredient"
 - Confidence: "high" if clear match, "medium" if reasonable guess, "low" if uncertain
+- units_per_pack: how many individual sellable units are in this line item.
+  Examples: "12 Pack- Milk Choc Chip" → 12, "12x 1L Oat Barista" → 12,
+  "6x 1L Soy Milk" → 6, "100 Peppermint Tea Bags" → 100,
+  "24x 600ml Spring Water" → 24, "1kg Matcha" → 1, "Plain Croissant" → 1
 - Skip items that are clearly not menu-related (e.g. "cleaning supplies", "rent")
 
 Supplier line descriptions to map:
 {json.dumps(descriptions, indent=2)}
 
 Respond with ONLY valid JSON — an array of objects:
-[{{"description": "...", "score_key": "...", "category": "...", "confidence": "..."}}]
+[{{"description": "...", "score_key": "...", "category": "...", "confidence": "...", "units_per_pack": 1}}]
 
 If an item should be skipped (not food/drink related), omit it from the response."""
 
@@ -392,6 +403,7 @@ If an item should be skipped (not food/drink related), omit it from the response
                     "score_key": m["score_key"],
                     "category": m.get("category", "ingredient"),
                     "confidence": m.get("confidence", "medium"),
+                    "units_per_pack": max(1, int(m.get("units_per_pack", 1))),
                 }
 
         logger.info("LLM mapped %d/%d Xero descriptions", len(result), len(descriptions))

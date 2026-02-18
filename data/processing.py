@@ -62,7 +62,7 @@ ITEM_CATALOG = {
 
     # --- Food ---
     "toastie":            "toastie",
-    "butterboy":          "toastie",         # butterboy = grilled item
+    "butterboy":          "butterboy",
     "breakfast wrap":     "wrap",
     "ham and cheese croissant": "croissant",
     "plain croissant":    "croissant",
@@ -117,7 +117,7 @@ ITEM_CATEGORIES = {
     "cappuccino": "drink", "flat_white": "drink", "mocha": "drink",
     "iced_latte": "drink", "matcha_complex": "drink", "babycino": "drink",
     # Food
-    "toastie": "food", "wrap": "food", "croissant": "food",
+    "toastie": "food", "wrap": "food", "croissant": "food", "butterboy": "food",
     "muffin": "food", "pastry": "food", "cookie": "food", "tart": "food",
     # Retail
     "water": "retail", "juice": "retail", "soda": "retail",

@@ -28,7 +28,11 @@ XERO_AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize"
 XERO_TOKEN_URL = "https://identity.xero.com/connect/token"
 XERO_CONNECTIONS_URL = "https://api.xero.com/connections"
 
-XERO_SCOPES = "openid offline_access accounting.transactions.read"
+XERO_SCOPES = (
+    "openid offline_access accounting.transactions.read "
+    "payroll.employees.read payroll.payruns.read "
+    "payroll.payslip.read payroll.settings.read payroll.timesheets.read"
+)
 
 # In-memory state store for CSRF protection (maps state → site_id).
 # In production, use a short-lived DB/cache table instead.
@@ -153,6 +157,7 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
         "connected": True,
         "site_id": site_id,
         "tenant_id": tokens["tenant_id"],
+        "scope": tokens.get("scope", ""),
         "connected_at": str(tokens.get("connected_at", "")),
         "last_refreshed": str(tokens.get("updated_at", "")),
         "mappings_total": len(mappings),
