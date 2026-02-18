@@ -248,6 +248,38 @@ def step_profitability(site_id: str, run_date: date, dry_run: bool = False) -> d
         return {"status": "error", "error": str(e)}
 
 
+def step_xero(site_id: str, run_date: date, dry_run: bool = False) -> dict:
+    """
+    Step 1.8: Sync supplier bills from Xero into item_costs.
+
+    Runs after deputy, before profitability. Follows fail-quiet pattern —
+    skips silently if Xero is not connected for this site.
+    """
+    from data.xero import XeroError, is_xero_configured, sync_xero_bills
+
+    if not is_xero_configured(site_id):
+        logger.info("Xero not configured — skipping bill sync")
+        return {"status": "skipped", "reason": "not_configured"}
+
+    logger.info("=== STEP: XERO (date: %s) ===", run_date)
+
+    if dry_run:
+        logger.info("DRY RUN: Would sync Xero bills")
+        return {"status": "dry_run"}
+
+    try:
+        result = sync_xero_bills(site_id, days_back=7)
+        logger.info("Xero sync complete: %s", result)
+        return {"status": "ok", **result}
+
+    except XeroError as e:
+        logger.warning("Xero sync failed (non-fatal): %s", e)
+        return {"status": "error", "error": str(e)}
+    except Exception as e:
+        logger.warning("Xero sync unexpected error (non-fatal): %s", e)
+        return {"status": "error", "error": str(e)}
+
+
 def step_predict(
     site_id: str,
     site_name: str,
@@ -354,7 +386,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "deputy", "profitability", "predict", "all"],
+        choices=["ingest", "deputy", "xero", "profitability", "predict", "all"],
         default="all",
         help="Which pipeline step to run. Default: all.",
     )
@@ -452,6 +484,10 @@ def main(argv: list[str]) -> int:
         # Step 1.5: Deputy roster sync (after ingest, before predict)
         if args.step in ("deputy", "all"):
             results["deputy"] = step_deputy(site_id, run_date, args.dry_run)
+
+        # Step 1.8: Xero bill sync (after deputy, before profitability)
+        if args.step in ("xero", "all"):
+            results["xero"] = step_xero(site_id, run_date, args.dry_run)
 
         # Step 1.75: Profitability (after deputy, before predict)
         if args.step in ("profitability", "all"):

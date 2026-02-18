@@ -743,6 +743,13 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         context["has_real_cogs"] = False
 
+    # --- Always: Xero connection status ---
+    try:
+        from data.xero import is_xero_configured
+        context["xero_connected"] = is_xero_configured(site_id)
+    except Exception:
+        context["xero_connected"] = False
+
     # --- Always: recent documents ---
     try:
         recent_docs = get_recent_documents(site_id, limit=5)
@@ -1019,10 +1026,23 @@ def build_system_prompt(site_name: str, context: dict) -> str:
 
     # --- COGS status ---
     has_real = context.get("has_real_cogs", False)
-    if not has_real:
+    xero_connected = context.get("xero_connected", False)
+    if has_real and xero_connected:
+        sections.append("**COGS STATUS:** Real cost data available (source: Xero, auto-synced daily).")
+        sections.append("Full P&L analysis is available with real COGS.")
+        sections.append("")
+    elif has_real:
+        sections.append("**COGS STATUS:** Real cost data available (source: uploaded documents).")
+        sections.append("Full P&L analysis is available. Consider connecting Xero at /xero/setup for automatic updates.")
+        sections.append("")
+    elif xero_connected:
+        sections.append("**COGS STATUS:** Xero is connected but no costs have synced yet. A sync will run automatically at 5:25pm AEST, or the user can trigger one at /xero/setup.")
+        sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS sync is pending.")
+        sections.append("")
+    else:
         sections.append("**COGS STATUS:** No real cost data available. Only estimated/default COGS exist.")
         sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
-        sections.append("Tell the user: 'Upload supplier invoices to enable full P&L analysis.'")
+        sections.append("Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'")
         sections.append("")
 
     sections.append("=== LIVE DATA ===")
