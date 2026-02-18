@@ -474,7 +474,7 @@ def get_prediction(site_id: str, forecast_date: date) -> Optional[dict]:
 
 
 def store_recommendation(
-    prediction_id: str,
+    prediction_id: str | None,
     site_id: str,
     action_type: str,
     action_timing: datetime,
@@ -504,6 +504,281 @@ def store_recommendation(
         conn.commit()
 
     return rec_id
+
+
+def get_recommendation(site_id: str, rec_id: str) -> Optional[dict]:
+    """Get a recommendation by rec_id scoped to site."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            _text(
+                "SELECT rec_id, prediction_id, site_id, action_type, action_timing, "
+                "owner_role, action_details, adopted, outcome_data, created_at "
+                "FROM recommendations "
+                "WHERE site_id = :sid AND rec_id = :rid"
+            ),
+            {"sid": site_id, "rid": rec_id},
+        ).mappings().first()
+        return dict(row) if row else None
+
+
+def _profitability_window_metrics(site_id: str, start_date: date, end_date: date) -> dict:
+    """Aggregate KPI metrics from daily_profitability for a date window."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            _text(
+                """
+                SELECT
+                    COUNT(*) AS days_count,
+                    AVG(labor_pct) AS avg_labor_pct,
+                    AVG(revenue_per_labor_hour) AS avg_rev_per_labor_hour,
+                    AVG(net_profit_cents) AS avg_net_profit_cents,
+                    SUM(net_profit_cents) AS total_net_profit_cents
+                FROM daily_profitability
+                WHERE site_id = :sid
+                  AND profit_date BETWEEN :s AND :e
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        ).mappings().first()
+
+    return {
+        "days_count": int((row or {}).get("days_count") or 0),
+        "avg_labor_pct": float(row["avg_labor_pct"]) if row and row.get("avg_labor_pct") is not None else None,
+        "avg_rev_per_labor_hour": (
+            float(row["avg_rev_per_labor_hour"])
+            if row and row.get("avg_rev_per_labor_hour") is not None
+            else None
+        ),
+        "avg_net_profit_cents": (
+            float(row["avg_net_profit_cents"])
+            if row and row.get("avg_net_profit_cents") is not None
+            else None
+        ),
+        "total_net_profit_cents": int(row["total_net_profit_cents"] or 0) if row else 0,
+    }
+
+
+def compute_recommendation_realized_impact(
+    site_id: str,
+    rec_id: str,
+    window_days: int = 7,
+) -> Optional[dict]:
+    """
+    Compare KPI change 7 days before vs after adoption date and persist outcome_data.
+    """
+    with engine.connect() as conn:
+        rec = conn.execute(
+            _text(
+                """
+                SELECT rec_id, action_type, action_timing, outcome_data
+                FROM recommendations
+                WHERE site_id = :sid AND rec_id = :rid
+                """
+            ),
+            {"sid": site_id, "rid": rec_id},
+        ).mappings().first()
+        if not rec:
+            return None
+
+        adoption = conn.execute(
+            _text(
+                """
+                SELECT log_date
+                FROM adoption_logs
+                WHERE site_id = :sid
+                  AND rec_id = :rid
+                  AND adopted = TRUE
+                ORDER BY log_date DESC
+                LIMIT 1
+                """
+            ),
+            {"sid": site_id, "rid": rec_id},
+        ).mappings().first()
+        if not adoption:
+            return None
+
+    anchor = adoption["log_date"]
+    before_start = anchor - timedelta(days=window_days)
+    before_end = anchor - timedelta(days=1)
+    after_start = anchor + timedelta(days=1)
+    after_end = anchor + timedelta(days=window_days)
+
+    before = _profitability_window_metrics(site_id, before_start, before_end)
+    after = _profitability_window_metrics(site_id, after_start, after_end)
+
+    labor_pct_delta_pp = None
+    if before["avg_labor_pct"] is not None and after["avg_labor_pct"] is not None:
+        labor_pct_delta_pp = round(after["avg_labor_pct"] - before["avg_labor_pct"], 2)
+
+    rev_per_labor_hour_delta_pct = None
+    if before["avg_rev_per_labor_hour"] and after["avg_rev_per_labor_hour"]:
+        if before["avg_rev_per_labor_hour"] > 0:
+            rev_per_labor_hour_delta_pct = round(
+                ((after["avg_rev_per_labor_hour"] - before["avg_rev_per_labor_hour"]) / before["avg_rev_per_labor_hour"]) * 100,
+                2,
+            )
+
+    avg_daily_net_profit_delta_cents = None
+    if before["avg_net_profit_cents"] is not None and after["avg_net_profit_cents"] is not None:
+        avg_daily_net_profit_delta_cents = round(after["avg_net_profit_cents"] - before["avg_net_profit_cents"])
+
+    weekly_net_profit_delta_cents = after["total_net_profit_cents"] - before["total_net_profit_cents"]
+
+    realized = {
+        "anchor_date": anchor.isoformat(),
+        "window_days": window_days,
+        "before_days": before["days_count"],
+        "after_days": after["days_count"],
+        "labor_pct_delta_pp": labor_pct_delta_pp,
+        "rev_per_labor_hour_delta_pct": rev_per_labor_hour_delta_pct,
+        "avg_daily_net_profit_delta_cents": avg_daily_net_profit_delta_cents,
+        "weekly_net_profit_delta_cents": weekly_net_profit_delta_cents,
+        "computed_at": datetime.utcnow().isoformat(),
+    }
+
+    with engine.connect() as conn:
+        current_outcome = conn.execute(
+            _text(
+                "SELECT outcome_data FROM recommendations WHERE site_id = :sid AND rec_id = :rid"
+            ),
+            {"sid": site_id, "rid": rec_id},
+        ).scalar()
+        if isinstance(current_outcome, str):
+            try:
+                current_outcome = json.loads(current_outcome)
+            except json.JSONDecodeError:
+                current_outcome = {}
+        if not isinstance(current_outcome, dict):
+            current_outcome = {}
+        current_outcome["realized"] = realized
+
+        conn.execute(
+            _text(
+                """
+                UPDATE recommendations
+                SET outcome_data = :outcome,
+                    adopted = TRUE
+                WHERE site_id = :sid AND rec_id = :rid
+                """
+            ),
+            {"sid": site_id, "rid": rec_id, "outcome": _json_dumps(current_outcome)},
+        )
+        conn.commit()
+
+    return realized
+
+
+def backfill_realized_impacts(
+    site_id: str,
+    lookback_days: int = 120,
+    window_days: int = 7,
+    limit: int = 50,
+) -> dict:
+    """Compute/persist realized impact for adopted recommendations missing it."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    r.rec_id,
+                    MAX(r.created_at) AS latest_created_at
+                FROM recommendations r
+                JOIN adoption_logs al ON al.rec_id = r.rec_id
+                WHERE r.site_id = :sid
+                  AND al.adopted = TRUE
+                  AND al.log_date >= (CURRENT_DATE - (:days * INTERVAL '1 day'))
+                  AND (
+                    r.outcome_data IS NULL
+                    OR (r.outcome_data->'realized') IS NULL
+                  )
+                GROUP BY r.rec_id
+                ORDER BY latest_created_at DESC
+                LIMIT :lim
+                """
+            ),
+            {"sid": site_id, "days": lookback_days, "lim": limit},
+        ).mappings().all()
+
+    updated = 0
+    for row in rows:
+        if compute_recommendation_realized_impact(site_id, row["rec_id"], window_days=window_days):
+            updated += 1
+
+    return {"candidates": len(rows), "updated": updated}
+
+
+def recommendation_exists_for_action_key(
+    site_id: str,
+    action_type: str,
+    action_key: str,
+    target_date: date,
+) -> bool:
+    """Idempotency guard: has this action key already been stored for date?"""
+    with engine.connect() as conn:
+        exists = conn.execute(
+            _text(
+                """
+                SELECT 1
+                FROM recommendations
+                WHERE site_id = :sid
+                  AND action_type = :atype
+                  AND DATE(action_timing) = :d
+                  AND action_details->>'action_key' = :akey
+                LIMIT 1
+                """
+            ),
+            {"sid": site_id, "atype": action_type, "d": target_date, "akey": action_key},
+        ).first()
+        return exists is not None
+
+
+def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 90) -> dict:
+    """Summarize adoption outcomes for a recommendation action_type."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            _text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE al.adopted = TRUE) AS adopted_count,
+                    COUNT(*) AS total_count,
+                    AVG(al.helpfulness_rating) AS helpfulness_avg,
+                    AVG(
+                        NULLIF(r.outcome_data->'realized'->>'weekly_net_profit_delta_cents', '')::numeric
+                    ) AS avg_realized_weekly_profit_delta_cents,
+                    AVG(
+                        NULLIF(r.outcome_data->'realized'->>'avg_daily_net_profit_delta_cents', '')::numeric
+                    ) AS avg_realized_daily_net_profit_delta_cents
+                FROM adoption_logs al
+                JOIN recommendations r ON r.rec_id = al.rec_id
+                WHERE r.site_id = :sid
+                  AND r.action_type = :atype
+                  AND al.log_date >= (CURRENT_DATE - (:days * INTERVAL '1 day'))
+                """
+            ),
+            {"sid": site_id, "atype": action_type, "days": days},
+        ).mappings().first()
+
+    adopted = int((row or {}).get("adopted_count") or 0)
+    total = int((row or {}).get("total_count") or 0)
+    helpfulness = (row or {}).get("helpfulness_avg")
+    avg_realized_weekly = (row or {}).get("avg_realized_weekly_profit_delta_cents")
+    avg_realized_daily = (row or {}).get("avg_realized_daily_net_profit_delta_cents")
+    return {
+        "adopted_count": adopted,
+        "total_count": total,
+        "adoption_rate": round(adopted / total, 3) if total > 0 else None,
+        "helpfulness_avg": round(float(helpfulness), 2) if helpfulness is not None else None,
+        "avg_realized_weekly_profit_delta_cents": (
+            round(float(avg_realized_weekly))
+            if avg_realized_weekly is not None
+            else None
+        ),
+        "avg_realized_daily_net_profit_delta_cents": (
+            round(float(avg_realized_daily))
+            if avg_realized_daily is not None
+            else None
+        ),
+    }
 
 
 # ============================================================
@@ -1331,20 +1606,38 @@ def get_item_costs(site_id: str) -> dict[str, int]:
 # ============================================================
 
 
+def _ensure_daily_profitability_quality_columns(conn) -> None:
+    """Backwards-safe migration for labor quality metadata columns."""
+    conn.execute(
+        _text(
+            "ALTER TABLE daily_profitability "
+            "ADD COLUMN IF NOT EXISTS labor_data_quality TEXT"
+        )
+    )
+    conn.execute(
+        _text(
+            "ALTER TABLE daily_profitability "
+            "ADD COLUMN IF NOT EXISTS labor_data_issues JSONB"
+        )
+    )
+
+
 def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) -> None:
     """Upsert a daily profitability record."""
     with engine.connect() as conn:
+        _ensure_daily_profitability_quality_columns(conn)
         conn.execute(
             _text("""
                 INSERT INTO daily_profitability
                     (site_id, profit_date, revenue_cents, labor_cost_cents,
                      cogs_cents, gross_profit_cents, net_profit_cents,
                      order_count, item_count, drink_count, labor_hours,
-                     revenue_per_labor_hour, cost_per_drink, labor_pct)
+                     revenue_per_labor_hour, cost_per_drink, labor_pct,
+                     labor_data_quality, labor_data_issues)
                 VALUES
                     (:sid, :pd, :rev, :labor, :cogs, :gross, :net,
                      :orders, :items, :drinks, :hours,
-                     :rev_hr, :cpd, :labor_pct)
+                     :rev_hr, :cpd, :labor_pct, :ldq, :ldi)
                 ON CONFLICT (site_id, profit_date) DO UPDATE SET
                     revenue_cents = EXCLUDED.revenue_cents,
                     labor_cost_cents = EXCLUDED.labor_cost_cents,
@@ -1358,6 +1651,8 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
                     revenue_per_labor_hour = EXCLUDED.revenue_per_labor_hour,
                     cost_per_drink = EXCLUDED.cost_per_drink,
                     labor_pct = EXCLUDED.labor_pct,
+                    labor_data_quality = EXCLUDED.labor_data_quality,
+                    labor_data_issues = EXCLUDED.labor_data_issues,
                     computed_at = NOW()
             """),
             {
@@ -1375,6 +1670,8 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
                 "rev_hr": metrics.get("revenue_per_labor_hour"),
                 "cpd": metrics.get("cost_per_drink"),
                 "labor_pct": metrics.get("labor_pct"),
+                "ldq": metrics.get("labor_data_quality"),
+                "ldi": _json_dumps(metrics.get("labor_data_issues", [])),
             },
         )
         conn.commit()
@@ -1392,12 +1689,14 @@ def get_daily_profitability(
 ) -> list[dict]:
     """Retrieve daily P&L records for a date range."""
     with engine.connect() as conn:
+        _ensure_daily_profitability_quality_columns(conn)
         result = conn.execute(
             _text("""
                 SELECT profit_date, revenue_cents, labor_cost_cents,
                        cogs_cents, gross_profit_cents, net_profit_cents,
                        order_count, item_count, drink_count, labor_hours,
-                       revenue_per_labor_hour, cost_per_drink, labor_pct
+                       revenue_per_labor_hour, cost_per_drink, labor_pct,
+                       labor_data_quality, labor_data_issues
                 FROM daily_profitability
                 WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
                 ORDER BY profit_date
@@ -1419,6 +1718,8 @@ def get_daily_profitability(
                 "revenue_per_labor_hour": int(row[10]) if row[10] is not None else None,
                 "cost_per_drink": int(row[11]) if row[11] is not None else None,
                 "labor_pct": float(row[12]) if row[12] is not None else None,
+                "labor_data_quality": row[13] if len(row) > 13 else None,
+                "labor_data_issues": row[14] if len(row) > 14 else None,
             }
             for row in result
         ]
@@ -1678,6 +1979,80 @@ def store_xero_tokens(
     logger.info("Stored Xero tokens for site %s (tenant %s)", site_id, tenant_id)
 
 
+def _ensure_xero_oauth_states_table(conn) -> None:
+    """Create OAuth state table lazily for backward compatibility on existing DBs."""
+    conn.execute(
+        _text(
+            """
+            CREATE TABLE IF NOT EXISTS xero_oauth_states (
+                state TEXT PRIMARY KEY,
+                site_id UUID NOT NULL REFERENCES sites(site_id),
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_xero_oauth_states_expires
+            ON xero_oauth_states(expires_at)
+            """
+        )
+    )
+
+
+def store_xero_oauth_state(site_id: str, state: str, expires_at: datetime) -> None:
+    """Persist OAuth state so callback validation survives app restarts."""
+    with engine.connect() as conn:
+        _ensure_xero_oauth_states_table(conn)
+        conn.execute(
+            _text(
+                """
+                INSERT INTO xero_oauth_states (state, site_id, expires_at)
+                VALUES (:st, :sid, :ea)
+                ON CONFLICT (state) DO UPDATE SET
+                    site_id = EXCLUDED.site_id,
+                    expires_at = EXCLUDED.expires_at,
+                    created_at = NOW()
+                """
+            ),
+            {"st": state, "sid": site_id, "ea": expires_at},
+        )
+        # Opportunistic cleanup of expired states.
+        conn.execute(
+            _text("DELETE FROM xero_oauth_states WHERE expires_at < NOW()"),
+        )
+        conn.commit()
+
+
+def consume_xero_oauth_state(state: str) -> Optional[str]:
+    """
+    Validate and consume OAuth state token.
+    Returns site_id when valid; otherwise None.
+    """
+    with engine.connect() as conn:
+        _ensure_xero_oauth_states_table(conn)
+        row = conn.execute(
+            _text(
+                """
+                DELETE FROM xero_oauth_states
+                WHERE state = :st
+                  AND expires_at >= NOW()
+                RETURNING site_id
+                """
+            ),
+            {"st": state},
+        ).mappings().first()
+        # Also clear expired states to keep table small.
+        conn.execute(
+            _text("DELETE FROM xero_oauth_states WHERE expires_at < NOW()"),
+        )
+        conn.commit()
+        return str(row["site_id"]) if row else None
+
+
 def get_xero_tokens(site_id: str) -> Optional[dict]:
     """Fetch current Xero OAuth2 tokens for a site."""
     with engine.connect() as conn:
@@ -1793,3 +2168,292 @@ def get_data_freshness(site_id: str) -> Optional[str]:
             {"sid": site_id},
         ).scalar()
         return str(result) if result else None
+
+
+# ============================================================
+# Intelligence Engine — Insights
+# ============================================================
+
+
+def store_insight(
+    site_id: str,
+    cycle_date: date,
+    insight_type: str,
+    severity: str,
+    title: str,
+    body: str,
+    data: dict = None,
+    action_type: str = None,
+    confidence: float = 0.5,
+    rec_id: str = None,
+    expires_at: date = None,
+) -> Optional[str]:
+    """Insert an insight. ON CONFLICT DO NOTHING for idempotency. Returns insight_id or None."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                """
+                INSERT INTO insights
+                    (site_id, cycle_date, insight_type, severity, title, body,
+                     data, action_type, confidence, rec_id, expires_at)
+                VALUES
+                    (:sid, :cd, :itype, :sev, :title, :body,
+                     :data, :atype, :conf, :rid, :exp)
+                ON CONFLICT (site_id, cycle_date, insight_type, title) DO NOTHING
+                RETURNING insight_id
+                """
+            ),
+            {
+                "sid": site_id,
+                "cd": cycle_date,
+                "itype": insight_type,
+                "sev": severity,
+                "title": title,
+                "body": body,
+                "data": _json_dumps(data) if data else None,
+                "atype": action_type,
+                "conf": confidence,
+                "rid": rec_id,
+                "exp": expires_at,
+            },
+        )
+        row = result.first()
+        conn.commit()
+
+    if row:
+        logger.info("Stored insight '%s' for %s", title, cycle_date)
+        return str(row[0])
+    return None
+
+
+def get_recent_insights(
+    site_id: str, days: int = 14, types: list[str] = None
+) -> list[dict]:
+    """Fetch recent insights for a site, optionally filtered by type."""
+    cutoff = date.today() - timedelta(days=days)
+    sql = (
+        "SELECT insight_id, cycle_date, insight_type, severity, title, body, "
+        "data, action_type, confidence, rec_id, status, expires_at, created_at "
+        "FROM insights "
+        "WHERE site_id = :sid AND cycle_date >= :cutoff AND status = 'active' "
+    )
+    params: dict = {"sid": site_id, "cutoff": cutoff}
+    if types:
+        sql += "AND insight_type = ANY(:types) "
+        params["types"] = types
+    sql += "ORDER BY cycle_date DESC, severity DESC"
+
+    with engine.connect() as conn:
+        rows = conn.execute(_text(sql), params).mappings().all()
+
+    results = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("data"), str):
+            try:
+                d["data"] = json.loads(d["data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        results.append(d)
+    return results
+
+
+def update_insight_status(insight_id: str, status: str = None, rec_id: str = None) -> None:
+    """Update an insight's status and/or linked rec_id."""
+    sets = []
+    params: dict = {"iid": insight_id}
+    if status:
+        sets.append("status = :status")
+        params["status"] = status
+    if rec_id:
+        sets.append("rec_id = :rid")
+        params["rid"] = rec_id
+    if not sets:
+        return
+
+    with engine.connect() as conn:
+        conn.execute(
+            _text(f"UPDATE insights SET {', '.join(sets)} WHERE insight_id = :iid"),
+            params,
+        )
+        conn.commit()
+
+
+# ============================================================
+# Intelligence Engine — Learned Patterns
+# ============================================================
+
+
+def store_learned_pattern(
+    site_id: str,
+    pattern_type: str,
+    pattern_key: str,
+    description: str,
+    pattern_data: dict,
+    confidence: float = 0.5,
+    sample_size: int = 1,
+) -> str:
+    """Upsert a learned pattern. ON CONFLICT updates description, data, confidence. Returns pattern_id."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                """
+                INSERT INTO learned_patterns
+                    (site_id, pattern_type, pattern_key, description,
+                     pattern_data, confidence, sample_size)
+                VALUES
+                    (:sid, :ptype, :pkey, :desc, :pdata, :conf, :ss)
+                ON CONFLICT (site_id, pattern_type, pattern_key) DO UPDATE SET
+                    description = EXCLUDED.description,
+                    pattern_data = EXCLUDED.pattern_data,
+                    confidence = GREATEST(learned_patterns.confidence, EXCLUDED.confidence),
+                    sample_size = learned_patterns.sample_size + 1,
+                    updated_at = NOW()
+                RETURNING pattern_id
+                """
+            ),
+            {
+                "sid": site_id,
+                "ptype": pattern_type,
+                "pkey": pattern_key,
+                "desc": description,
+                "pdata": _json_dumps(pattern_data),
+                "conf": confidence,
+                "ss": sample_size,
+            },
+        )
+        pattern_id = str(result.scalar())
+        conn.commit()
+
+    logger.info("Upserted pattern '%s' (%s)", pattern_key, pattern_type)
+    return pattern_id
+
+
+def get_learned_patterns(
+    site_id: str, pattern_type: str = None, min_confidence: float = 0.0
+) -> list[dict]:
+    """Fetch active learned patterns, optionally filtered by type and min confidence."""
+    sql = (
+        "SELECT pattern_id, pattern_type, pattern_key, description, "
+        "pattern_data, confidence, sample_size, total_impact_cents, "
+        "last_validated, suppressed, created_at, updated_at "
+        "FROM learned_patterns "
+        "WHERE site_id = :sid AND confidence >= :mc "
+    )
+    params: dict = {"sid": site_id, "mc": min_confidence}
+    if pattern_type:
+        sql += "AND pattern_type = :ptype "
+        params["ptype"] = pattern_type
+    # Only return non-suppressed unless caller explicitly asks for low confidence
+    if min_confidence >= 0.0:
+        sql += "AND suppressed = FALSE "
+    sql += "ORDER BY confidence DESC"
+
+    with engine.connect() as conn:
+        rows = conn.execute(_text(sql), params).mappings().all()
+
+    results = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("pattern_data"), str):
+            try:
+                d["pattern_data"] = json.loads(d["pattern_data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        results.append(d)
+    return results
+
+
+def update_pattern_confidence(
+    pattern_id: str,
+    new_confidence: float,
+    sample_size_delta: int = 0,
+    impact_cents_delta: int = 0,
+) -> None:
+    """Adjust confidence, sample_size, and impact after outcome measurement."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                """
+                UPDATE learned_patterns SET
+                    confidence = :conf,
+                    sample_size = sample_size + :ss_delta,
+                    total_impact_cents = total_impact_cents + :impact_delta,
+                    last_validated = NOW(),
+                    updated_at = NOW()
+                WHERE pattern_id = :pid
+                """
+            ),
+            {
+                "pid": pattern_id,
+                "conf": max(0.05, min(0.95, new_confidence)),
+                "ss_delta": sample_size_delta,
+                "impact_delta": impact_cents_delta,
+            },
+        )
+        conn.commit()
+
+
+def suppress_pattern(pattern_id: str) -> None:
+    """Mark a pattern as suppressed (consistently negative outcomes)."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text(
+                "UPDATE learned_patterns SET suppressed = TRUE, updated_at = NOW() "
+                "WHERE pattern_id = :pid"
+            ),
+            {"pid": pattern_id},
+        )
+        conn.commit()
+    logger.info("Suppressed pattern %s", pattern_id)
+
+
+def get_intelligence_summary(site_id: str) -> dict:
+    """Quick summary: active insights count, top patterns, learning stats."""
+    with engine.connect() as conn:
+        # Active insights count
+        insight_count = conn.execute(
+            _text(
+                "SELECT COUNT(*) FROM insights "
+                "WHERE site_id = :sid AND status = 'active' "
+                "AND cycle_date >= (CURRENT_DATE - INTERVAL '14 days')"
+            ),
+            {"sid": site_id},
+        ).scalar() or 0
+
+        # Top patterns by confidence
+        top_patterns = conn.execute(
+            _text(
+                "SELECT pattern_key, description, confidence, "
+                "total_impact_cents, sample_size "
+                "FROM learned_patterns "
+                "WHERE site_id = :sid AND suppressed = FALSE "
+                "AND confidence >= 0.3 "
+                "ORDER BY confidence DESC LIMIT 5"
+            ),
+            {"sid": site_id},
+        ).mappings().all()
+
+        # Learning stats
+        stats = conn.execute(
+            _text(
+                "SELECT "
+                "COUNT(*) AS total_patterns, "
+                "COUNT(*) FILTER (WHERE confidence >= 0.7) AS high_confidence, "
+                "COUNT(*) FILTER (WHERE suppressed = TRUE) AS suppressed, "
+                "SUM(total_impact_cents) AS total_impact "
+                "FROM learned_patterns WHERE site_id = :sid"
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+    return {
+        "active_insights": int(insight_count),
+        "top_patterns": [dict(p) for p in top_patterns],
+        "learning_stats": {
+            "total_patterns": int((stats or {}).get("total_patterns") or 0),
+            "high_confidence": int((stats or {}).get("high_confidence") or 0),
+            "suppressed": int((stats or {}).get("suppressed") or 0),
+            "total_impact_cents": int((stats or {}).get("total_impact") or 0),
+        },
+    }

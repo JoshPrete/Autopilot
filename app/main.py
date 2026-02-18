@@ -126,6 +126,21 @@ def scheduled_predict():
         logger.exception("Scheduled predict failed")
 
 
+def scheduled_intelligence():
+    """6:15pm AEST — Run daily intelligence cycle (after predict@6:00pm)."""
+    from analysis.intelligence import run_intelligence_cycle
+    site = _resolve_site_id()
+    if not site:
+        logger.warning("Scheduled intelligence skipped: no site configured")
+        return
+    site_id, site_name = site
+    try:
+        result = run_intelligence_cycle(site_id, site_name, date.today())
+        logger.info("Scheduled intelligence cycle: %s", result)
+    except Exception:
+        logger.exception("Scheduled intelligence cycle failed")
+
+
 def scheduled_weekly_roi():
     """Monday 8:05am AEST — Send weekly ROI summary to manager."""
     from analysis.reporting import format_weekly_roi_sms, generate_weekly_roi_report
@@ -242,6 +257,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.add_job(
+        scheduled_intelligence,
+        CronTrigger(hour=18, minute=15),
+        id="daily_intelligence",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         scheduled_weekly_kpi_snapshot,
         CronTrigger(day_of_week="mon", hour=8, minute=0),
         id="weekly_kpi_snapshot",
@@ -256,7 +277,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info(
         "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, "
-        "xero@17:25, predict@18:00, weekly_kpi@Mon08:00, weekly_roi@Mon08:05 AEST"
+        "xero@17:25, predict@18:00, intelligence@18:15, weekly_kpi@Mon08:00, weekly_roi@Mon08:05 AEST"
     )
     yield
     # Shutdown

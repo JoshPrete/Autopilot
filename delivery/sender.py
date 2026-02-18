@@ -352,3 +352,29 @@ def _build_message(
     else:
         # Fallback: use the message from action_details
         return details.get("message")
+
+
+# ============================================================
+# Intelligence Digest
+# ============================================================
+
+
+def dispatch_intelligence_digest(
+    site_id: str, insights: list[dict]
+) -> list[dict]:
+    """Send top insights as a morning SMS digest to manager."""
+    if not insights:
+        return []
+
+    top = [i for i in insights if i.get("severity") in ("opportunity", "warning")][:3]
+    if not top:
+        return []
+
+    lines = ["Autopilot Intelligence:"]
+    for insight in top:
+        icon = "!" if insight.get("severity") == "warning" else ">"
+        lines.append(f"{icon} {insight.get('title', '')}")
+
+    lines.append("Ask me for details in chat.")
+    message = "\n".join(lines)
+    return send_to_manager(site_id, message)

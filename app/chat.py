@@ -22,9 +22,12 @@ from data.storage import (
     get_document,
     get_dow_pattern,
     get_events_range,
+    get_intelligence_summary,
     get_item_costs,
+    get_learned_patterns,
     get_prediction,
     get_recent_documents,
+    get_recent_insights,
     get_rosters_for_date,
     get_roster_summary,
     get_site,
@@ -758,6 +761,33 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: intelligence summary ---
+    try:
+        intel_summary = get_intelligence_summary(site_id)
+        if intel_summary and intel_summary.get("active_insights", 0) > 0:
+            context["intelligence_summary"] = intel_summary
+    except Exception:
+        pass
+
+    # --- Always: recent active insights ---
+    try:
+        recent_insights = get_recent_insights(site_id, days=7)
+        if recent_insights:
+            context["active_insights"] = recent_insights
+    except Exception:
+        pass
+
+    # --- Conditional: learned patterns (keyword-triggered) ---
+    if _keyword_match(question, ["insight", "learn", "pattern", "intelligence",
+                                  "recommendation", "suggest", "advice",
+                                  "improve", "optimize", "optimise"]):
+        try:
+            patterns = get_learned_patterns(site_id, min_confidence=0.5)
+            if patterns:
+                context["learned_patterns"] = patterns
+        except Exception:
+            pass
+
     # --- Conditional: events / closures / holidays ---
     if _keyword_match(question, ["closed", "closure", "holiday", "event",
                                   "public holiday", "market", "festival"]):
@@ -1043,6 +1073,72 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append("**COGS STATUS:** No real cost data available. Only estimated/default COGS exist.")
         sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
         sections.append("Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'")
+        sections.append("")
+
+    # --- Intelligence Engine ---
+    if "active_insights" in context or "intelligence_summary" in context:
+        sections.append("## Intelligence Engine")
+        sections.append(
+            "The system runs a daily intelligence cycle that analyzes patterns and learns from outcomes."
+        )
+        sections.append("")
+
+        if "active_insights" in context:
+            sections.append("### Active Insights (last 7 days)")
+            for ins in context["active_insights"][:5]:
+                icon = "!" if ins.get("severity") == "warning" else (
+                    ">" if ins.get("severity") == "opportunity" else "-"
+                )
+                conf = float(ins.get("confidence", 0))
+                sections.append(
+                    f"{icon} **{ins.get('title', '')}** (confidence: {conf:.0%})"
+                )
+                body = ins.get("body", "")
+                if body:
+                    sections.append(f"  {body}")
+            sections.append("")
+
+        if "intelligence_summary" in context:
+            summary = context["intelligence_summary"]
+            if summary.get("top_patterns"):
+                sections.append("### What the System Has Learned")
+                for p in summary["top_patterns"]:
+                    conf = float(p.get("confidence", 0))
+                    impact = int(p.get("total_impact_cents") or 0)
+                    impact_str = f", measured impact: ${impact / 100:+,.0f}/week" if impact != 0 else ""
+                    sections.append(
+                        f"- {p.get('description', p.get('pattern_key', '?'))} "
+                        f"(confidence: {conf:.0%}{impact_str})"
+                    )
+                sections.append("")
+
+            stats = summary.get("learning_stats", {})
+            if stats.get("total_patterns", 0) > 0:
+                sections.append(
+                    f"Learning stats: {stats['total_patterns']} patterns tracked, "
+                    f"{stats.get('high_confidence', 0)} high-confidence, "
+                    f"{stats.get('suppressed', 0)} suppressed"
+                )
+                sections.append("")
+
+        sections.append(
+            "When discussing insights, mention confidence levels. High confidence (>70%) "
+            "patterns with positive measured impact are proven recommendations. Low confidence "
+            "patterns are observations worth monitoring."
+        )
+        sections.append("")
+
+    if "learned_patterns" in context:
+        sections.append("### Detailed Learned Patterns")
+        for p in context["learned_patterns"][:10]:
+            conf = float(p.get("confidence", 0))
+            samples = int(p.get("sample_size", 0))
+            impact = int(p.get("total_impact_cents") or 0)
+            sections.append(
+                f"- **{p.get('pattern_key', '?')}**: {p.get('description', '')} "
+                f"(confidence: {conf:.0%}, samples: {samples}, "
+                f"cumulative impact: ${impact / 100:+,.0f})"
+            )
         sections.append("")
 
     sections.append("=== LIVE DATA ===")

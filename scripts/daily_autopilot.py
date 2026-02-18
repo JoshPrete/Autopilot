@@ -365,6 +365,32 @@ def step_predict(
     }
 
 
+def step_intelligence(
+    site_id: str,
+    site_name: str,
+    run_date: date,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Step 3: Run intelligence cycle — analyze patterns, generate insights, learn.
+
+    Runs after predict. Follows fail-quiet pattern.
+    """
+    logger.info("=== STEP: INTELLIGENCE (date: %s) ===", run_date)
+
+    if dry_run:
+        return {"status": "skipped", "reason": "dry_run"}
+
+    try:
+        from analysis.intelligence import run_intelligence_cycle
+
+        result = run_intelligence_cycle(site_id, site_name, run_date)
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.exception("Intelligence cycle failed (non-fatal)")
+        return {"status": "error", "error": str(e)}
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -386,7 +412,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "deputy", "xero", "profitability", "predict", "all"],
+        choices=["ingest", "deputy", "xero", "profitability", "predict", "intelligence", "all"],
         default="all",
         help="Which pipeline step to run. Default: all.",
     )
@@ -501,6 +527,15 @@ def main(argv: list[str]) -> int:
                 run_date=run_date,
                 staff_scheduled=args.staff,
                 staff_names=staff_names,
+                dry_run=args.dry_run,
+            )
+
+        # Step 3: Intelligence (after predict)
+        if args.step in ("intelligence", "all"):
+            results["intelligence"] = step_intelligence(
+                site_id=site_id,
+                site_name=site_name,
+                run_date=run_date,
                 dry_run=args.dry_run,
             )
 

@@ -326,6 +326,8 @@ CREATE TABLE daily_profitability (
     revenue_per_labor_hour INT,
     cost_per_drink INT,
     labor_pct NUMERIC(5,2),
+    labor_data_quality TEXT,
+    labor_data_issues JSONB,
     computed_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(site_id, profit_date)
 );
@@ -368,6 +370,18 @@ CREATE TABLE IF NOT EXISTS xero_tokens (
 );
 
 -- ============================================================
+-- Xero OAuth2 States (short-lived CSRF state for connect flow)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS xero_oauth_states (
+    state      TEXT PRIMARY KEY,
+    site_id    UUID NOT NULL REFERENCES sites(site_id),
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_xero_oauth_states_expires ON xero_oauth_states(expires_at);
+
+-- ============================================================
 -- Xero Line Mappings (cached LLM description → score_key)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS xero_line_mappings (
@@ -397,4 +411,46 @@ CREATE TABLE weekly_reviews (
     actions_next_week JSONB,
     generated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(site_id, week_start)
+);
+
+-- ============================================================
+-- Insights (Intelligence Engine observations)
+-- ============================================================
+CREATE TABLE insights (
+    insight_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id         UUID NOT NULL REFERENCES sites(site_id),
+    cycle_date      DATE NOT NULL,
+    insight_type    TEXT NOT NULL,       -- 'staffing', 'margin', 'demand', 'prediction', 'revenue', 'operations'
+    severity        TEXT NOT NULL DEFAULT 'info',  -- 'info', 'warning', 'opportunity'
+    title           TEXT NOT NULL,
+    body            TEXT NOT NULL,
+    data            JSONB,              -- structured evidence (numbers, ranges, comparisons)
+    action_type     TEXT,               -- recommended action_type for recommendations table (nullable)
+    confidence      REAL DEFAULT 0.5,
+    rec_id          UUID REFERENCES recommendations(rec_id),  -- linked recommendation if one was created
+    status          TEXT DEFAULT 'active',  -- 'active', 'acted_on', 'dismissed', 'expired'
+    expires_at      DATE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(site_id, cycle_date, insight_type, title)
+);
+CREATE INDEX idx_insights_site_date ON insights(site_id, cycle_date DESC);
+
+-- ============================================================
+-- Learned Patterns (Intelligence Engine memory)
+-- ============================================================
+CREATE TABLE learned_patterns (
+    pattern_id      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id         UUID NOT NULL REFERENCES sites(site_id),
+    pattern_type    TEXT NOT NULL,       -- matches insight_type
+    pattern_key     TEXT NOT NULL,       -- unique identifier e.g. 'overstaffed_tuesday_14'
+    description     TEXT NOT NULL,       -- human-readable summary
+    pattern_data    JSONB NOT NULL,      -- structured pattern: thresholds, values, evidence
+    confidence      REAL DEFAULT 0.5,   -- 0.0-1.0, adjusted by outcomes
+    sample_size     INT DEFAULT 1,
+    total_impact_cents INT DEFAULT 0,   -- cumulative measured P&L impact
+    last_validated  TIMESTAMPTZ,
+    suppressed      BOOLEAN DEFAULT FALSE,  -- TRUE if consistently negative outcomes
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(site_id, pattern_type, pattern_key)
 );
