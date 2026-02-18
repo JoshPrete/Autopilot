@@ -14,8 +14,10 @@ from fastapi.responses import RedirectResponse
 
 from config.settings import settings
 from data.storage import (
+    consume_xero_oauth_state,
     get_all_xero_mappings,
     get_site,
+    store_xero_oauth_state,
     get_xero_tokens,
     store_xero_tokens,
 )
@@ -34,10 +36,6 @@ XERO_SCOPES = (
     "payroll.payslip.read payroll.settings.read payroll.timesheets.read"
 )
 
-# In-memory state store for CSRF protection (maps state → site_id).
-# In production, use a short-lived DB/cache table instead.
-_oauth_states: dict[str, str] = {}
-
 
 @router.get("/connect")
 def xero_connect(site_id: str = Query(..., description="Site UUID")):
@@ -50,7 +48,11 @@ def xero_connect(site_id: str = Query(..., description="Site UUID")):
         raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found")
 
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = site_id
+    store_xero_oauth_state(
+        site_id=site_id,
+        state=state,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
 
     params = {
         "response_type": "code",
@@ -72,7 +74,7 @@ def xero_callback(
 ):
     """Handle Xero OAuth2 callback: exchange code for tokens."""
     # Validate state
-    site_id = _oauth_states.pop(state, None)
+    site_id = consume_xero_oauth_state(state)
     if not site_id:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
