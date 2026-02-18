@@ -329,20 +329,18 @@ def _aggregate_profitability_rows(rows: list[dict]) -> dict:
     total_cogs = sum(r.get("cogs_cents", 0) or 0 for r in rows)
     total_net = sum(r.get("net_profit_cents", 0) or 0 for r in rows)
 
-    labor_pct_values = [r["labor_pct"] for r in rows if r.get("labor_pct") is not None]
-    rev_per_hour_values = [
-        r["revenue_per_labor_hour"]
-        for r in rows
-        if r.get("revenue_per_labor_hour") is not None
-    ]
-
+    # Compute from weekly totals (not avg of daily %s, which skews on low-rev days)
     avg_labor_pct = (
-        round(sum(labor_pct_values) / len(labor_pct_values), 2)
-        if labor_pct_values else None
+        round(total_labor / total_revenue * 100, 2)
+        if total_revenue > 0 else None
+    )
+
+    total_labor_hours = sum(
+        float(r.get("labor_hours", 0) or 0) for r in rows
     )
     avg_rev_per_hour = (
-        int(round(sum(rev_per_hour_values) / len(rev_per_hour_values)))
-        if rev_per_hour_values else None
+        int(round(total_revenue / total_labor_hours))
+        if total_labor_hours > 0 else None
     )
 
     return {

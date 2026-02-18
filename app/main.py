@@ -280,6 +280,11 @@ def dashboard():
     return (_static_dir / "dashboard.html").read_text()
 
 
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard_alias():
+    return (_static_dir / "dashboard.html").read_text()
+
+
 @app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
 def chat_page():
     return (_static_dir / "chat.html").read_text()
