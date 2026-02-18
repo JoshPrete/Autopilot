@@ -13,6 +13,7 @@ so tokens are stored in DB and auto-refreshed on expiry.
 
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import anthropic
@@ -138,6 +139,9 @@ class XeroClient:
         """
         Fetch supplier bills (ACCPAY invoices) from Xero.
 
+        The list endpoint returns summary data without line items,
+        so we fetch each invoice individually to get full detail.
+
         Args:
             since_date: Only fetch bills modified since this date.
 
@@ -152,6 +156,7 @@ class XeroClient:
         else:
             headers = {}
 
+        # 1. Get list of invoice IDs
         try:
             data = self._request(
                 "GET", "Invoices",
@@ -166,18 +171,32 @@ class XeroClient:
             logger.warning("Unexpected bills response type: %s", type(raw_bills))
             return []
 
+        logger.info("Found %d bills, fetching line items...", len(raw_bills))
+
+        # 2. Fetch each invoice individually for full line item detail
+        # Xero rate limit: 60 calls/minute — pace requests ~1/sec
         bills = []
-        for raw in raw_bills:
+        for i, raw in enumerate(raw_bills):
+            invoice_id = raw.get("InvoiceID")
+            if not invoice_id:
+                continue
+            if i > 0:
+                time.sleep(1.0)
             try:
-                bills.append(self._normalize_bill(raw))
+                detail = self._request("GET", f"Invoices/{invoice_id}")
+                full_invoice = detail.get("Invoices", [{}])[0]
+                bills.append(self._normalize_bill(full_invoice))
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(
                     "Skipping malformed bill %s: %s",
                     raw.get("InvoiceNumber", "?"), e,
                 )
                 continue
+            except XeroError as e:
+                logger.warning("Failed to fetch bill %s: %s", invoice_id, e)
+                continue
 
-        logger.info("Fetched %d bills from Xero", len(bills))
+        logger.info("Fetched %d bills with line items from Xero", len(bills))
         return bills
 
     def _normalize_bill(self, raw: dict) -> dict:
@@ -264,10 +283,14 @@ def map_xero_lines_to_score_keys(
         len(cached), len(uncached),
     )
 
-    # LLM mapping for uncached items
+    # LLM mapping for uncached items (batch in groups of 25 to avoid token limits)
     llm_mapped = {}
     if uncached and settings.ANTHROPIC_API_KEY:
-        llm_mapped = _llm_map_descriptions(site_id, uncached)
+        batch_size = 25
+        for i in range(0, len(uncached), batch_size):
+            batch = uncached[i:i + batch_size]
+            batch_result = _llm_map_descriptions(site_id, batch)
+            llm_mapped.update(batch_result)
         # Cache new mappings
         for desc, mapping in llm_mapped.items():
             store_xero_line_mapping(
@@ -340,7 +363,7 @@ If an item should be skipped (not food/drink related), omit it from the response
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-5-20250929",
-            max_tokens=2000,
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
 
