@@ -1,6 +1,6 @@
 from datetime import date
 
-from analysis.profitability import compute_item_margins
+from analysis.profitability import _assess_labor_data_quality, compute_item_margins
 from data.deputy import DeputyClient
 from data.storage import get_daily_profitability
 
@@ -123,3 +123,35 @@ class TestDailyProfitabilityRowParsing:
         assert day["revenue_per_labor_hour"] == 0
         assert day["cost_per_drink"] == 0
         assert day["labor_pct"] == 0.0
+
+
+class TestLaborQualityGuardrails:
+    def test_flags_and_caps_extreme_labor_outlier(self):
+        adjusted, quality, issues = _assess_labor_data_quality(
+            labor_cost_cents=95_000,
+            labor_hours=10.0,
+            shift_count=4,
+            max_hourly_rate=95.0,
+            median_daily_labor_cents=30_000,
+            revenue_cents=100_000,
+        )
+
+        assert adjusted <= 37_500
+        assert quality == "suspect"
+        assert "implausible_hourly_rate" in issues
+        assert "labor_cost_outlier_vs_history" in issues
+        assert "labor_cost_capped_to_baseline" in issues
+
+    def test_marks_missing_when_no_roster_hours(self):
+        adjusted, quality, issues = _assess_labor_data_quality(
+            labor_cost_cents=0,
+            labor_hours=0.0,
+            shift_count=0,
+            max_hourly_rate=None,
+            median_daily_labor_cents=25_000,
+            revenue_cents=80_000,
+        )
+
+        assert adjusted == 0
+        assert quality == "missing"
+        assert "missing_roster" in issues

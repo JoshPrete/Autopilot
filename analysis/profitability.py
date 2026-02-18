@@ -42,6 +42,49 @@ def _parse_quantity(raw_qty) -> int:
     return int(value)
 
 
+def _assess_labor_data_quality(
+    labor_cost_cents: int,
+    labor_hours: float,
+    shift_count: int,
+    max_hourly_rate: float | None,
+    median_daily_labor_cents: int | None,
+    revenue_cents: int,
+) -> tuple[int, str, list[str]]:
+    """
+    Apply guardrails to Deputy-derived labor and return:
+      (possibly adjusted labor_cost_cents, quality_flag, issues)
+    """
+    issues: list[str] = []
+    adjusted = labor_cost_cents
+
+    if shift_count <= 0 or labor_hours <= 0:
+        issues.append("missing_roster")
+
+    if max_hourly_rate is not None and max_hourly_rate > 70:
+        issues.append("implausible_hourly_rate")
+
+    if labor_hours > 32:
+        issues.append("excessive_total_shift_hours")
+
+    if median_daily_labor_cents and labor_cost_cents > int(median_daily_labor_cents * 2.2):
+        issues.append("labor_cost_outlier_vs_history")
+        adjusted = min(adjusted, round(median_daily_labor_cents * 1.25))
+        if adjusted < labor_cost_cents:
+            issues.append("labor_cost_capped_to_baseline")
+
+    labor_pct = (adjusted / revenue_cents * 100) if revenue_cents > 0 else 0
+    if labor_pct > 70:
+        issues.append("extreme_labor_pct")
+
+    if "missing_roster" in issues:
+        quality = "missing"
+    elif issues:
+        quality = "suspect"
+    else:
+        quality = "trusted"
+    return adjusted, quality, issues
+
+
 def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
     """
     Compute and store a full daily P&L for a single date.
@@ -79,24 +122,98 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
             logger.info("No orders for %s — skipping profitability", target_date)
             return None
 
-        # 2. Labor cost and hours from deputy_rosters
+        # 2. Labor cost and hours from deputy_rosters (deduped + guarded)
         labor_row = conn.execute(
             _text(
-                "SELECT COALESCE(SUM(cost_dollars), 0) AS total_cost, "
-                "COALESCE(SUM(total_hours), 0) AS total_hours "
-                "FROM deputy_rosters "
-                "WHERE site_id = :sid AND shift_date = :d"
+                """
+                WITH shifts AS (
+                    SELECT DISTINCT ON (
+                        COALESCE(
+                            deputy_id::text,
+                            CONCAT_WS('|', employee_id::text, employee_name, start_time::text, end_time::text)
+                        )
+                    )
+                        total_hours,
+                        cost_dollars,
+                        deputy_id
+                    FROM deputy_rosters
+                    WHERE site_id = :sid
+                      AND shift_date = :d
+                      AND COALESCE(is_open, FALSE) = FALSE
+                    ORDER BY
+                        COALESCE(
+                            deputy_id::text,
+                            CONCAT_WS('|', employee_id::text, employee_name, start_time::text, end_time::text)
+                        ),
+                        created_at DESC
+                )
+                SELECT
+                    COALESCE(SUM(GREATEST(cost_dollars, 0)), 0) AS total_cost,
+                    COALESCE(SUM(GREATEST(total_hours, 0)), 0) AS total_hours,
+                    COUNT(*) AS shift_count,
+                    MAX(
+                        CASE WHEN total_hours > 0
+                             THEN cost_dollars / NULLIF(total_hours, 0)
+                             ELSE NULL END
+                    ) AS max_hourly_rate
+                FROM shifts
+                """
             ),
             {"sid": site_id, "d": target_date},
         ).mappings().first()
 
-        labor_cost_dollars = float(labor_row["total_cost"])
-        labor_cost_cents = round(labor_cost_dollars * 100)
+        labor_cost_cents_raw = round(float(labor_row["total_cost"]) * 100)
+        labor_hours = float(labor_row["total_hours"])
+        shift_count = int(labor_row["shift_count"] or 0)
+        max_hourly_rate = (
+            float(labor_row["max_hourly_rate"])
+            if labor_row["max_hourly_rate"] is not None
+            else None
+        )
 
-        # Add amortised owner salary ($100k/365 per day)
+        median_row = conn.execute(
+            _text(
+                """
+                WITH daily AS (
+                    SELECT
+                        shift_date,
+                        COALESCE(SUM(GREATEST(cost_dollars, 0)), 0) * 100 AS labor_cents
+                    FROM deputy_rosters
+                    WHERE site_id = :sid
+                      AND shift_date BETWEEN :start_d AND :end_d
+                      AND shift_date <> :d
+                      AND COALESCE(is_open, FALSE) = FALSE
+                    GROUP BY shift_date
+                )
+                SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY labor_cents) AS median_labor_cents
+                FROM daily
+                """
+            ),
+            {
+                "sid": site_id,
+                "d": target_date,
+                "start_d": target_date - timedelta(days=28),
+                "end_d": target_date - timedelta(days=1),
+            },
+        ).mappings().first()
+        median_daily_labor_cents = (
+            int(median_row["median_labor_cents"])
+            if median_row and median_row.get("median_labor_cents") is not None
+            else None
+        )
+
+        labor_cost_cents, labor_data_quality, labor_data_issues = _assess_labor_data_quality(
+            labor_cost_cents=labor_cost_cents_raw,
+            labor_hours=labor_hours,
+            shift_count=shift_count,
+            max_hourly_rate=max_hourly_rate,
+            median_daily_labor_cents=median_daily_labor_cents,
+            revenue_cents=revenue_cents,
+        )
+
+        # Add amortised owner salary ($100k/365 per day) after quality adjustment.
         from config.constants import OWNER_DAILY_SALARY_CENTS
         labor_cost_cents += OWNER_DAILY_SALARY_CENTS
-        labor_hours = float(labor_row["total_hours"])
 
         # 3. Item counts and COGS from order_items
         # We need the score_key for each item to look up COGS.
@@ -153,6 +270,8 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
         "revenue_per_labor_hour": revenue_per_labor_hour,
         "cost_per_drink": cost_per_drink,
         "labor_pct": labor_pct,
+        "labor_data_quality": labor_data_quality,
+        "labor_data_issues": labor_data_issues,
     }
 
     # 5. Store
