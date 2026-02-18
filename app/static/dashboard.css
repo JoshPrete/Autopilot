@@ -488,6 +488,45 @@ body {
   letter-spacing: 0.4px;
 }
 
+/* --- Next Actions --- */
+.next-actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.next-action-card {
+  background: var(--panel-alt);
+  border-radius: 10px;
+  padding: 12px;
+  border-left: 3px solid var(--accent-2);
+}
+
+.next-action-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.next-action-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.next-action-reason {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.next-action-metrics {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* --- Recommendations Log --- */
 .rec-table {
   width: 100%;

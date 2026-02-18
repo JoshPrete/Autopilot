@@ -437,6 +437,37 @@ function renderDailyEfficiency(data) {
   el.innerHTML = html;
 }
 
+function renderNextActions(data) {
+  const el = $("#next-actions-content");
+  if (!data || !Array.isArray(data.actions) || data.actions.length === 0) {
+    el.innerHTML = '<div class="no-data">No actionable recommendations yet for this date.</div>';
+    return;
+  }
+
+  let html = '<div class="next-actions-list">';
+  for (const action of data.actions) {
+    const conf = action.confidence != null ? `${Math.round(action.confidence * 100)}%` : "--";
+    const uplift = fmtMoney(action.expected_weekly_profit_uplift_cents);
+    html += `
+      <div class="next-action-card">
+        <div class="next-action-head">
+          <div class="next-action-title">${action.title || action.action_type || "Action"}</div>
+          <span class="status-pill status-balanced">${conf} confidence</span>
+        </div>
+        <div class="next-action-reason">${action.reason || "--"}</div>
+        <div class="next-action-metrics">
+          <span class="staffing-chip">Type: ${action.action_type || "--"}</span>
+          <span class="staffing-chip">Est. weekly impact: ${uplift}</span>
+          ${action.window_start ? `<span class="staffing-chip">Window: ${fmtTime(action.window_start)}</span>` : ""}
+          ${action.item ? `<span class="staffing-chip">Item: ${action.item}</span>` : ""}
+        </div>
+      </div>
+    `;
+  }
+  html += "</div>";
+  el.innerHTML = html;
+}
+
 // --- Main Load ---
 
 async function loadDashboard() {
@@ -519,6 +550,11 @@ async function loadDashboard() {
   fetchJSON(`${API}/analysis/daily-efficiency`)
     .then(renderDailyEfficiency)
     .catch(() => renderDailyEfficiency(null));
+
+  // Fetch next best actions
+  fetchJSON(`${API}/analysis/recommendations/next-actions`)
+    .then(renderNextActions)
+    .catch(() => renderNextActions(null));
 
   // Fetch delivery log
   fetchJSON(`${API}/delivery/log?limit=10`)
