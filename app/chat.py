@@ -17,6 +17,7 @@ import anthropic
 from config.database import engine
 from config.settings import settings
 from data.storage import (
+    get_daily_efficiency_snapshot,
     get_daily_profitability,
     get_data_freshness,
     get_document,
@@ -667,6 +668,113 @@ def _get_weather_context(site_id: str) -> dict | None:
     return None
 
 
+def _get_cogs_snapshot(site_id: str) -> dict:
+    """Summarize available COGS coverage and recency for chat grounding."""
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS total_items,
+                        COUNT(*) FILTER (WHERE source IN ('xero', 'document')) AS real_items,
+                        COUNT(*) FILTER (WHERE source = 'xero') AS xero_items,
+                        COUNT(*) FILTER (WHERE source = 'document') AS document_items,
+                        MAX(updated_at) AS last_updated_at
+                    FROM item_costs
+                    WHERE site_id = :sid
+                    """
+                ),
+                {"sid": site_id},
+            ).mappings().first()
+    except Exception:
+        return {}
+
+    if not row:
+        return {}
+    return {
+        "total_items": int(row.get("total_items") or 0),
+        "real_items": int(row.get("real_items") or 0),
+        "xero_items": int(row.get("xero_items") or 0),
+        "document_items": int(row.get("document_items") or 0),
+        "last_updated_at": str(row.get("last_updated_at")) if row.get("last_updated_at") else None,
+    }
+
+
+def _get_recent_efficiency_context(site_id: str, lookback_days: int = 3) -> dict | None:
+    """
+    Return the latest daily efficiency snapshot with usable trade/staffing signals.
+    Falls back to the most recent checked date.
+    """
+    today = date.today()
+    fallback = None
+
+    for offset in range(0, max(1, lookback_days)):
+        d = today - timedelta(days=offset)
+        snap = get_daily_efficiency_snapshot(site_id, d)
+        if not fallback:
+            fallback = snap
+        summary = snap.get("summary", {})
+        has_signal = (
+            int(summary.get("intervals_analyzed") or 0) > 0
+            or int(summary.get("total_revenue_cents") or 0) > 0
+        )
+        if has_signal:
+            return snap
+
+    return fallback
+
+
+def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) -> list[dict]:
+    """Fetch recent persisted recommendations for grounded follow-up."""
+    from sqlalchemy import text
+
+    cutoff = date.today() - timedelta(days=days)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT rec_id, action_type, action_timing, action_details, adopted, outcome_data
+                    FROM recommendations
+                    WHERE site_id = :sid
+                      AND DATE(action_timing) >= :cutoff
+                    ORDER BY action_timing DESC
+                    LIMIT :lim
+                    """
+                ),
+                {"sid": site_id, "cutoff": cutoff, "lim": limit},
+            ).mappings().all()
+    except Exception:
+        return []
+
+    result = []
+    for r in rows:
+        details = _safe_json(r.get("action_details") or {})
+        outcome = _safe_json(r.get("outcome_data") or {})
+        if not isinstance(details, dict):
+            details = {}
+        if not isinstance(outcome, dict):
+            outcome = {}
+        realized = outcome.get("realized") if isinstance(outcome.get("realized"), dict) else {}
+        result.append(
+            {
+                "rec_id": str(r.get("rec_id")),
+                "action_type": r.get("action_type"),
+                "action_timing": str(r.get("action_timing")),
+                "title": details.get("title"),
+                "expected_weekly_profit_uplift_cents": details.get("expected_weekly_profit_uplift_cents"),
+                "ranking_score_cents": details.get("ranking_score_cents"),
+                "confidence": details.get("confidence"),
+                "adopted": bool(r.get("adopted")),
+                "realized_weekly_delta_cents": realized.get("weekly_net_profit_delta_cents"),
+            }
+        )
+    return result
+
+
 # ============================================================
 # Main Context Gatherer
 # ============================================================
@@ -717,12 +825,6 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
-    # --- Always: item variations (full history) ---
-    try:
-        context["item_variations"] = _get_item_variations(site_id, days=90)
-    except Exception:
-        pass
-
     # --- Always: rolling 7-day roster window (past 3 + today + future 3) ---
     try:
         roster_summary = get_roster_summary(
@@ -752,6 +854,14 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         context["xero_connected"] = is_xero_configured(site_id)
     except Exception:
         context["xero_connected"] = False
+
+    # --- Always: COGS coverage summary ---
+    try:
+        cogs_snapshot = _get_cogs_snapshot(site_id)
+        if cogs_snapshot:
+            context["cogs_snapshot"] = cogs_snapshot
+    except Exception:
+        pass
 
     # --- Always: recent documents ---
     try:
@@ -832,6 +942,49 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         else:
             context["deputy_status"] = "not_connected"
 
+    # --- Conditional: operator efficiency snapshot ---
+    if _keyword_match(question, ["efficiency", "profit", "labor", "labour", "staff", "roster",
+                                 "schedule", "optimize", "optimise", "recommend", "action"]):
+        try:
+            efficiency = _get_recent_efficiency_context(site_id, lookback_days=3)
+            if efficiency:
+                context["daily_efficiency"] = efficiency
+        except Exception:
+            pass
+
+    # --- Conditional: latest generated actions (grounding for "what should I do") ---
+    if _keyword_match(question, ["recommend", "suggest", "what should", "next action",
+                                 "what do i do", "improve", "optimize", "optimise",
+                                 "profit", "efficiency", "staff"]):
+        try:
+            from analysis.next_actions import generate_next_actions
+            context["next_actions_live"] = generate_next_actions(
+                site_id=site_id,
+                target_date=today,
+                max_actions=5,
+            )
+        except Exception:
+            pass
+        try:
+            recent_recs = _get_recent_recommendations(site_id, days=14, limit=8)
+            if recent_recs:
+                context["recent_recommendations"] = recent_recs
+        except Exception:
+            pass
+
+    # --- Conditional: 2-4 week roster planning ---
+    if _keyword_match(question, ["2 weeks", "3 weeks", "4 weeks", "next week", "roster ahead",
+                                 "schedule ahead", "advance roster", "shift plan", "templates"]):
+        try:
+            from analysis.shift_optimizer import optimize_shifts_range
+            context["optimized_shift_range"] = optimize_shifts_range(
+                site_id=site_id,
+                start_date=today,
+                days=28,
+            )
+        except Exception:
+            pass
+
     # --- Conditional: staffing / forecast range ---
     if _keyword_match(question, ["staff", "roster", "schedule", "next week",
                                   "next 2 weeks", "coming days", "forecast",
@@ -884,7 +1037,7 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         try:
             context["top_items"] = _get_top_items(site_id, days=14, limit=15)
             context["item_counts_by_day"] = _get_item_counts_by_day(site_id, days=7)
-            context["item_variations"] = _get_item_variations(site_id, days=7)
+            context["item_variations"] = _get_item_variations(site_id, days=30)
         except Exception:
             pass
 
@@ -1050,6 +1203,8 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         "- Australian English, casual-professional tone",
         "- Dates in DD/MM format, currency in AUD ($)",
         "- If you don't have data for something, say so — don't guess",
+        "- For recommendations, cite the specific metric(s) used (for example labor %, rev/labor-hour, understaffed intervals, margin %)",
+        "- If data is missing/empty, say that explicitly and provide the next check to run",
         "- Keep responses focused. Don't pad with generic advice unless asked",
         "",
     ])
@@ -1073,6 +1228,18 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append("**COGS STATUS:** No real cost data available. Only estimated/default COGS exist.")
         sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
         sections.append("Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'")
+        sections.append("")
+
+    # --- COGS coverage details ---
+    if "cogs_snapshot" in context:
+        c = context["cogs_snapshot"]
+        sections.append("### COGS Coverage")
+        sections.append(
+            f"- Items with costs: {c.get('total_items', 0)} total "
+            f"({c.get('real_items', 0)} real, {c.get('xero_items', 0)} from Xero, {c.get('document_items', 0)} from documents)"
+        )
+        if c.get("last_updated_at"):
+            sections.append(f"- Last cost update: {c['last_updated_at']}")
         sections.append("")
 
     # --- Intelligence Engine ---
@@ -1376,6 +1543,83 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             if days_with_labor < len(pnl):
                 sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
 
+    # --- Daily Efficiency (latest available day) ---
+    if "daily_efficiency" in context:
+        eff = context["daily_efficiency"]
+        s = eff.get("summary", {})
+        vs = eff.get("variance_summary", {})
+        sections.append("\n## Daily Efficiency Snapshot")
+        sections.append(
+            f"- Date: {eff.get('date')} | Intervals analyzed: {s.get('intervals_analyzed', 0)} | "
+            f"Revenue: ${((s.get('total_revenue_cents') or 0) / 100):,.0f}"
+        )
+        sections.append(
+            f"- Labor: ${((s.get('deputy_labor_cost_cents') or 0) / 100):,.0f} | "
+            f"Labor %: {s.get('labor_pct') if s.get('labor_pct') is not None else 'N/A'} | "
+            f"Rev/labor-hour: "
+            f"{('$' + str(round((s.get('revenue_per_labor_hour_cents') or 0) / 100))) if s.get('revenue_per_labor_hour_cents') else 'N/A'}"
+        )
+        sections.append(
+            f"- Variance intervals: understaffed={vs.get('understaffed_intervals', 0)}, "
+            f"overstaffed={vs.get('overstaffed_intervals', 0)}, no_staff={vs.get('no_staff_intervals', 0)}"
+        )
+        top_mismatch = (eff.get("peaks") or {}).get("mismatch") or []
+        if top_mismatch:
+            sections.append("- Top mismatch intervals:")
+            for row in top_mismatch[:5]:
+                rev = int(row.get("revenue_cents") or 0)
+                sections.append(
+                    f"  - {row.get('interval_start')}: {row.get('status')} "
+                    f"(staff_on={row.get('staff_on')}, expected={row.get('expected_staff')}, revenue=${rev / 100:,.0f})"
+                )
+
+    # --- Live Next Actions ---
+    if "next_actions_live" in context:
+        payload = context["next_actions_live"]
+        actions = payload.get("actions") or []
+        if actions:
+            sections.append("\n## Recommended Next Actions (live)")
+            for a in actions[:5]:
+                expected = int(a.get("expected_weekly_profit_uplift_cents") or 0)
+                proven = a.get("proven_weekly_impact_cents")
+                proven_text = f", proven {int(proven) / 100:+,.0f}/wk" if proven is not None else ""
+                conf = a.get("confidence")
+                conf_text = f", conf {round(float(conf) * 100)}%" if conf is not None else ""
+                sections.append(
+                    f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}"
+                )
+
+    # --- Recently persisted recommendations ---
+    if "recent_recommendations" in context:
+        sections.append("\n## Recent Recommendation Memory")
+        for r in context["recent_recommendations"][:8]:
+            expected = int(r.get("expected_weekly_profit_uplift_cents") or 0)
+            realized = r.get("realized_weekly_delta_cents")
+            realized_text = f", realized {int(realized) / 100:+,.0f}/wk" if realized is not None else ""
+            adopted = "adopted" if r.get("adopted") else "not adopted"
+            sections.append(
+                f"- {r.get('title') or r.get('action_type')}: est {expected / 100:+,.0f}/wk{realized_text}, {adopted}"
+            )
+
+    # --- 2-4 week optimization templates ---
+    if "optimized_shift_range" in context:
+        opt = context["optimized_shift_range"]
+        summary = opt.get("summary", {})
+        sections.append("\n## 28-Day Shift Optimization")
+        sections.append(
+            f"- Days with predictions: {summary.get('days_with_predictions', 0)} / {opt.get('days', 0)}"
+        )
+        templates = opt.get("weekly_templates") or []
+        for t in templates:
+            if t.get("status") != "ok":
+                continue
+            shift_count = len(t.get("template_shifts") or [])
+            delta = t.get("avg_estimated_labor_delta_cents")
+            delta_text = f"{int(delta) / 100:+,.0f}/day" if delta is not None else "N/A"
+            sections.append(
+                f"- {t.get('day_of_week')}: {shift_count} template shifts, avg labor delta {delta_text}"
+            )
+
     # --- Item Margins ---
     if "item_margins" in context:
         margins = context["item_margins"]
@@ -1481,9 +1725,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
 
     # --- Item variations (detailed from raw Square data) ---
     if "item_variations" in context:
-        items = context["item_variations"]
+        items = context["item_variations"][:40]
         total_sold = sum(i["total"] for i in items)
-        sections.append(f"\n## Detailed Item Breakdown (Square POS, all history — {total_sold} total items)")
+        sections.append(f"\n## Detailed Item Breakdown (Square POS, recent window — {total_sold} total items)")
         for item in items:
             sections.append(f"\n### {item['item']} — {item['total']} sold")
             if item.get("variations"):
@@ -1491,7 +1735,7 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 for name, count in item["variations"]:
                     sections.append(f"  - {name}: {count}")
             if item.get("modifiers"):
-                top_mods = item["modifiers"][:15]
+                top_mods = item["modifiers"][:10]
                 sections.append("  Top modifiers:")
                 for name, count in top_mods:
                     sections.append(f"  - {name}: {count}")

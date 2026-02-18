@@ -213,6 +213,27 @@ class ChatUI {
         }),
       });
 
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        fullContent = `*Request failed (${res.status}). ${this._escapeHtml(errText || "Please try again.")}*`;
+        bubbleEl.innerHTML = this._renderMarkdown(fullContent);
+        this.messages.push({ role: "assistant", content: fullContent });
+        this.streaming = false;
+        this.sendBtn.disabled = false;
+        this.inputEl.focus();
+        return;
+      }
+
+      if (!res.body) {
+        fullContent = "*No response body received from chat API.*";
+        bubbleEl.innerHTML = this._renderMarkdown(fullContent);
+        this.messages.push({ role: "assistant", content: fullContent });
+        this.streaming = false;
+        this.sendBtn.disabled = false;
+        this.inputEl.focus();
+        return;
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
