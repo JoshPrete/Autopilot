@@ -3,8 +3,8 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.dependencies import get_validated_site
-from app.schemas import QueueSignalsRequest
-from data.storage import get_prediction
+from app.schemas import QueueSignalsRequest, RecommendationFeedbackRequest
+from data.storage import get_prediction, get_recommendation, store_adoption_log
 from models.recommendations import generate_realtime_recommendations
 from models.workload import QueueSignals, evaluate_transition_signals
 
@@ -46,3 +46,26 @@ def evaluate_signals(body: QueueSignalsRequest, site: dict = Depends(get_validat
         "transitions": transitions,
         "recommendations": recommendations,
     }
+
+
+@router.post("/{rec_id}/feedback")
+def submit_feedback(
+    rec_id: str,
+    body: RecommendationFeedbackRequest,
+    site: dict = Depends(get_validated_site),
+):
+    rec = get_recommendation(site["site_id"], rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recommendation not found for this site")
+
+    log_id = store_adoption_log(
+        site_id=site["site_id"],
+        log_date=body.log_date or date.today(),
+        rec_id=rec_id,
+        manager_name=body.manager_name,
+        adopted=body.adopted,
+        rush_timing_rating=body.rush_timing_rating,
+        helpfulness_rating=body.helpfulness_rating,
+        notes=body.notes,
+    )
+    return {"status": "ok", "log_id": log_id, "rec_id": rec_id}

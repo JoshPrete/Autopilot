@@ -55,6 +55,15 @@ class QueueSignalsRequest(BaseModel):
     staff_names: Optional[dict] = None
 
 
+class RecommendationFeedbackRequest(BaseModel):
+    adopted: bool
+    manager_name: str = "manager"
+    helpfulness_rating: Optional[int] = Field(default=None, ge=1, le=5)
+    rush_timing_rating: Optional[int] = Field(default=None, ge=1, le=5)
+    notes: Optional[str] = None
+    log_date: Optional[date] = None
+
+
 # --- Pipeline ---
 
 class IngestRequest(BaseModel):
