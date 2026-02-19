@@ -1647,25 +1647,30 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
         actual_cost = staff_on * cost_per
         min_cost = min_staff * cost_per
         excess = max(0, staff_on - min_staff) * cost_per
-        is_overstaffed = staff_on > min_staff
+        deficit = max(0, min_staff - staff_on) * cost_per
 
         if day_str not in day_data:
             day_data[day_str] = {
                 "actual_labor_cents": 0,
                 "min_labor_cents": 0,
                 "excess_labor_cents": 0,
+                "deficit_labor_cents": 0,
                 "total_revenue_cents": 0,
                 "intervals": 0,
                 "overstaffed_intervals": 0,
+                "understaffed_intervals": 0,
             }
         d = day_data[day_str]
         d["actual_labor_cents"] += actual_cost
         d["min_labor_cents"] += min_cost
         d["excess_labor_cents"] += excess
+        d["deficit_labor_cents"] += deficit
         d["total_revenue_cents"] += rev
         d["intervals"] += 1
-        if is_overstaffed:
+        if staff_on > min_staff:
             d["overstaffed_intervals"] += 1
+        elif staff_on < min_staff:
+            d["understaffed_intervals"] += 1
 
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -1678,7 +1683,10 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
         except Exception:
             dow = 0
             day_name = "Unknown"
-        eff = round(d["min_labor_cents"] / d["actual_labor_cents"], 4) if d["actual_labor_cents"] > 0 else 1.0
+        # efficiency_score: capped at 1.0 (1.0 = no overstaffing waste)
+        # raw_ratio > 1.0 means understaffed (min > actual)
+        raw_ratio = d["min_labor_cents"] / d["actual_labor_cents"] if d["actual_labor_cents"] > 0 else 1.0
+        eff = min(1.0, round(raw_ratio, 4))
         by_day.append({
             "date": day_str,
             "day_name": day_name,
@@ -1686,10 +1694,12 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             "actual_labor_cents": d["actual_labor_cents"],
             "min_labor_cents": d["min_labor_cents"],
             "excess_labor_cents": d["excess_labor_cents"],
+            "deficit_labor_cents": d["deficit_labor_cents"],
             "efficiency_score": round(eff, 4),
             "total_revenue_cents": d["total_revenue_cents"],
             "intervals": d["intervals"],
             "overstaffed_intervals": d["overstaffed_intervals"],
+            "understaffed_intervals": d["understaffed_intervals"],
         })
 
     # Aggregate by day-of-week
@@ -1697,8 +1707,9 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
     for entry in by_day:
         dow = entry["dow"]
         if dow not in dow_agg:
-            dow_agg[dow] = {"excess_list": [], "eff_list": [], "day_name": entry["day_name"]}
+            dow_agg[dow] = {"excess_list": [], "deficit_list": [], "eff_list": [], "day_name": entry["day_name"]}
         dow_agg[dow]["excess_list"].append(entry["excess_labor_cents"])
+        dow_agg[dow]["deficit_list"].append(entry["deficit_labor_cents"])
         dow_agg[dow]["eff_list"].append(entry["efficiency_score"])
 
     by_dow = []
@@ -1710,6 +1721,7 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             "day_name": agg["day_name"],
             "sample_days": n,
             "avg_excess_labor_cents": round(sum(agg["excess_list"]) / n) if n else 0,
+            "avg_deficit_labor_cents": round(sum(agg["deficit_list"]) / n) if n else 0,
             "avg_efficiency_score": round(sum(agg["eff_list"]) / n, 4) if n else 1.0,
         })
 
@@ -1717,8 +1729,10 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
     total_actual = sum(d["actual_labor_cents"] for d in by_day)
     total_min = sum(d["min_labor_cents"] for d in by_day)
     total_excess = sum(d["excess_labor_cents"] for d in by_day)
+    total_deficit = sum(d["deficit_labor_cents"] for d in by_day)
     total_rev = sum(d["total_revenue_cents"] for d in by_day)
-    eff_score = round(total_min / total_actual, 4) if total_actual > 0 else 1.0
+    # Cap at 1.0: above 1.0 means understaffed, not overstaffing waste
+    eff_score = min(1.0, round(total_min / total_actual, 4)) if total_actual > 0 else 1.0
 
     return {
         "totals": {
@@ -1726,6 +1740,7 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             "actual_labor_cents": total_actual,
             "minimum_labor_cents": total_min,
             "excess_labor_cents": total_excess,
+            "deficit_labor_cents": total_deficit,
             "total_revenue_cents": total_rev,
             "efficiency_score": eff_score,
         },

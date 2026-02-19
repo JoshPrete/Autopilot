@@ -208,10 +208,12 @@ def gather_signals(site_id: str, cycle_date: date) -> list[dict]:
     signals = []
     for detector in [
         detect_staffing_signals,
+        detect_efficiency_gap_signals,
         detect_margin_signals,
         detect_demand_signals,
         detect_prediction_signals,
         detect_revenue_signals,
+        detect_profitability_signals,
     ]:
         try:
             signals += detector(site_id, cycle_date)
@@ -318,6 +320,112 @@ def detect_staffing_signals(
                     "occurrences": understaffed_count,
                     "out_of": len(recent),
                     "avg_workload_per_staff": round(sum(avg_wps) / len(avg_wps), 2) if avg_wps else None,
+                },
+                "severity": "warning",
+                "suggested_action": "STAFFING_ADJUST",
+            })
+
+    return signals
+
+
+def detect_efficiency_gap_signals(
+    site_id: str, cycle_date: date, lookback_days: int = 28
+) -> list[dict]:
+    """
+    Dollar-denominated staffing efficiency signals.
+
+    Three signal types:
+    1. Overall low efficiency (score < 0.80)
+    2. Per-DOW recurring excess (> $13/day avg)
+    3. Efficiency trend (comparing two halves of the window)
+    """
+    from config.constants import EFFICIENCY_SCORE_TARGET
+    from data.storage import get_efficiency_gap_range
+
+    signals = []
+    start = cycle_date - timedelta(days=lookback_days)
+
+    try:
+        gap = get_efficiency_gap_range(site_id, start, cycle_date)
+    except Exception:
+        logger.exception("detect_efficiency_gap_signals: query failed")
+        return signals
+
+    totals = gap.get("totals", {})
+    by_dow = gap.get("by_dow", [])
+    by_day = gap.get("by_day", [])
+
+    # Signal 1: Overall low efficiency
+    eff_score = totals.get("efficiency_score", 1.0)
+    excess = totals.get("excess_labor_cents", 0)
+    days_analyzed = totals.get("days_analyzed", 0)
+
+    if eff_score < 0.80 and days_analyzed >= 7:
+        weekly_excess = round(excess / max(days_analyzed, 1) * 7)
+        signals.append({
+            "signal_type": "efficiency",
+            "key": "overall_low_efficiency",
+            "title": (
+                f"Staffing efficiency at {round(eff_score * 100)}% "
+                f"— ${weekly_excess / 100:,.0f}/week excess labor"
+            ),
+            "evidence": {
+                "efficiency_score": round(eff_score, 4),
+                "excess_labor_cents": excess,
+                "weekly_excess_cents": weekly_excess,
+                "days_analyzed": days_analyzed,
+                "target": EFFICIENCY_SCORE_TARGET,
+            },
+            "severity": "warning",
+            "suggested_action": "STAFFING_ADJUST",
+        })
+
+    # Signal 2: Per-DOW recurring excess (> $13/day = 1300 cents)
+    for dow_entry in by_dow:
+        avg_excess = dow_entry.get("avg_excess_labor_cents", 0)
+        avg_eff = dow_entry.get("avg_efficiency_score", 1.0)
+        samples = dow_entry.get("sample_days", 0)
+        if avg_excess > 1300 and samples >= 2:
+            signals.append({
+                "signal_type": "efficiency",
+                "key": f"dow_excess_{dow_entry['day_name'].lower()}",
+                "title": (
+                    f"{dow_entry['day_name']}: avg ${avg_excess / 100:,.0f}/day excess labor "
+                    f"(efficiency: {round(avg_eff * 100)}%)"
+                ),
+                "evidence": {
+                    "dow": dow_entry["dow"],
+                    "day_name": dow_entry["day_name"],
+                    "avg_excess_labor_cents": avg_excess,
+                    "avg_efficiency_score": round(avg_eff, 4),
+                    "sample_days": samples,
+                },
+                "severity": "opportunity",
+                "suggested_action": "STAFFING_ADJUST",
+            })
+
+    # Signal 3: Efficiency trend (split window into halves)
+    if len(by_day) >= 14:
+        mid = len(by_day) // 2
+        first_scores = [d["efficiency_score"] for d in by_day[:mid]]
+        second_scores = [d["efficiency_score"] for d in by_day[mid:]]
+        first_avg = sum(first_scores) / len(first_scores) if first_scores else 0
+        second_avg = sum(second_scores) / len(second_scores) if second_scores else 0
+        delta_pp = round((second_avg - first_avg) * 100, 1)
+
+        if delta_pp < -5:
+            signals.append({
+                "signal_type": "efficiency",
+                "key": "efficiency_trend_declining",
+                "title": (
+                    f"Staffing efficiency declined {abs(delta_pp):.0f}pp: "
+                    f"{round(first_avg * 100)}% → {round(second_avg * 100)}%"
+                ),
+                "evidence": {
+                    "first_half_avg": round(first_avg, 4),
+                    "second_half_avg": round(second_avg, 4),
+                    "delta_pp": delta_pp,
+                    "window_days": len(by_day),
                 },
                 "severity": "warning",
                 "suggested_action": "STAFFING_ADJUST",
@@ -639,6 +747,322 @@ def detect_revenue_signals(
 
     except Exception:
         logger.exception("detect_revenue_signals failed")
+
+    return signals
+
+
+def detect_profitability_signals(
+    site_id: str, cycle_date: date, lookback_days: int = 28
+) -> list[dict]:
+    """
+    Three-way cross-correlation detector: Xero COGS × Square revenue × Deputy labor.
+
+    Six analyses:
+    A. Per-item unit economics (labor-adjusted margin)
+    B. Optimal staffing by DOW (profit-based)
+    C. Revenue per labor dollar trends
+    D. COGS-to-revenue ratio trends
+    E. High-value understaffed windows
+    F. Menu mix profit optimization
+    """
+    from data.storage import (
+        get_daily_efficiency_snapshot,
+        get_daily_profitability,
+        get_item_costs,
+        get_profitability_correlations,
+        has_real_cogs,
+    )
+    from sqlalchemy import text
+
+    signals = []
+
+    if not has_real_cogs(site_id):
+        return signals
+
+    start = cycle_date - timedelta(days=lookback_days)
+
+    # --- A. Per-Item Unit Economics (Revenue × COGS × Labor) ---
+    try:
+        from analysis.profitability import compute_item_margins
+
+        margins = compute_item_margins(site_id, days=lookback_days)
+        pnl = get_daily_profitability(site_id, start, cycle_date)
+
+        if margins and pnl:
+            # Estimate daily labor allocation per item based on workload share
+            total_labor = sum(d["labor_cost_cents"] for d in pnl if d.get("labor_cost_cents"))
+            total_items = sum(d.get("item_count", 0) or 0 for d in pnl)
+            labor_per_item = total_labor / total_items if total_items > 0 else 0
+
+            for m in margins:
+                if m.get("qty", 0) < 50:
+                    continue
+                avg_price = m.get("avg_price_cents", 0)
+                cogs = m.get("cogs_cents", 0)
+                gross_margin_pct = m.get("margin_pct", 100)
+
+                # Approximate labor cost per item
+                item_labor = round(labor_per_item)
+                labor_adjusted_profit = avg_price - cogs - item_labor
+                labor_adjusted_margin = round(
+                    (labor_adjusted_profit / avg_price) * 100, 1
+                ) if avg_price > 0 else 0
+
+                if labor_adjusted_margin < 15 and gross_margin_pct >= 25:
+                    item_key = m["item"].lower().replace(" ", "_")
+                    signals.append({
+                        "signal_type": "profitability",
+                        "key": f"low_profit_after_labor_{item_key}",
+                        "title": f"{m['item']} has {gross_margin_pct}% gross margin but only {labor_adjusted_margin}% after labor",
+                        "evidence": {
+                            "item": m["item"],
+                            "qty": m["qty"],
+                            "avg_price_cents": avg_price,
+                            "cogs_cents": cogs,
+                            "labor_per_item_cents": item_labor,
+                            "gross_margin_pct": gross_margin_pct,
+                            "labor_adjusted_margin_pct": labor_adjusted_margin,
+                        },
+                        "severity": "warning",
+                        "suggested_action": "MARGIN_ALERT",
+                    })
+    except Exception:
+        logger.exception("Profitability signal A (unit economics) failed")
+
+    # --- B. Optimal Staffing by DOW (Profit-Based) ---
+    try:
+        correlations = get_profitability_correlations(site_id, days=lookback_days)
+        optimal = correlations.get("optimal_staffing", [])
+        by_dow = {d["dow"]: d for d in correlations.get("by_dow", [])}
+
+        day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+        for opt in optimal:
+            dow_data = by_dow.get(opt["dow"])
+            if not dow_data:
+                continue
+            current_staff = dow_data.get("avg_staff_count", 0)
+            optimal_staff = opt["optimal_staff"]
+            if current_staff > 0 and abs(current_staff - optimal_staff) >= 1:
+                current_pps = round(dow_data["avg_net_profit_cents"] / current_staff) if current_staff > 0 else 0
+                optimal_pps = opt["profit_per_staff"]
+                day_name = day_names[opt["dow"]] if opt["dow"] < 7 else opt.get("day_name", "?")
+                direction = "fewer" if optimal_staff < current_staff else "more"
+                signals.append({
+                    "signal_type": "profitability",
+                    "key": f"optimal_staff_{day_name.lower()}",
+                    "title": f"{day_name}: historically {optimal_staff} staff yielded ${optimal_pps / 100:.0f}/staff. Currently avg {current_staff:.0f} → ${current_pps / 100:.0f}/staff. Worth trying {direction}?",
+                    "evidence": {
+                        "dow": opt["dow"],
+                        "day": day_name,
+                        "best_observed_staff": optimal_staff,
+                        "current_avg_staff": round(current_staff, 1),
+                        "profit_per_staff_at_best": optimal_pps,
+                        "profit_per_staff_current": current_pps,
+                        "note": "Historical correlation, not causal — experiment recommended",
+                    },
+                    "severity": "opportunity",
+                    "suggested_action": "STAFFING_ADJUST",
+                })
+    except Exception:
+        logger.exception("Profitability signal B (optimal staffing) failed")
+
+    # --- C. Revenue per Labor Dollar Trends ---
+    try:
+        pnl = get_daily_profitability(site_id, start, cycle_date)
+        valid = [d for d in pnl if d.get("revenue_cents") and d.get("labor_cost_cents") and d["labor_cost_cents"] > 0]
+
+        if len(valid) >= 14:
+            mid = len(valid) // 2
+            first_ratios = [d["revenue_cents"] / d["labor_cost_cents"] for d in valid[:mid]]
+            second_ratios = [d["revenue_cents"] / d["labor_cost_cents"] for d in valid[mid:]]
+
+            first_avg = sum(first_ratios) / len(first_ratios)
+            second_avg = sum(second_ratios) / len(second_ratios)
+
+            if first_avg > 0:
+                change_pct = ((second_avg - first_avg) / first_avg) * 100
+                if change_pct < -10:
+                    signals.append({
+                        "signal_type": "profitability",
+                        "key": "rev_per_labor_dollar_declining",
+                        "title": f"Revenue per labor dollar declining ({change_pct:.1f}% over {lookback_days} days)",
+                        "evidence": {
+                            "first_half_avg": round(first_avg, 2),
+                            "second_half_avg": round(second_avg, 2),
+                            "change_pct": round(change_pct, 1),
+                        },
+                        "severity": "warning",
+                        "suggested_action": "REVENUE_INSIGHT",
+                    })
+
+            # Check specific DOW underperformers
+            dow_ratios: dict[str, list] = {}
+            for d in valid:
+                try:
+                    dt = date.fromisoformat(d["date"])
+                    dow = dt.strftime("%A")
+                    ratio = d["revenue_cents"] / d["labor_cost_cents"]
+                    dow_ratios.setdefault(dow, []).append(ratio)
+                except Exception:
+                    continue
+
+            if dow_ratios:
+                overall_avg = sum(sum(v) for v in dow_ratios.values()) / sum(len(v) for v in dow_ratios.values())
+                for dow, ratios in dow_ratios.items():
+                    if len(ratios) >= 2:
+                        dow_avg = sum(ratios) / len(ratios)
+                        if dow_avg < overall_avg * 0.75:
+                            signals.append({
+                                "signal_type": "profitability",
+                                "key": f"low_labor_roi_{dow.lower()}",
+                                "title": f"{dow} has low revenue per labor dollar (${dow_avg:.2f} vs ${overall_avg:.2f} avg)",
+                                "evidence": {
+                                    "day": dow,
+                                    "dow_avg_ratio": round(dow_avg, 2),
+                                    "overall_avg_ratio": round(overall_avg, 2),
+                                    "sample_size": len(ratios),
+                                },
+                                "severity": "opportunity",
+                                "suggested_action": "REVENUE_INSIGHT",
+                            })
+    except Exception:
+        logger.exception("Profitability signal C (rev/labor dollar) failed")
+
+    # --- D. COGS-to-Revenue Ratio Trends ---
+    try:
+        pnl = get_daily_profitability(site_id, start, cycle_date)
+        valid = [d for d in pnl if d.get("cogs_cents") and d.get("revenue_cents") and d["revenue_cents"] > 0]
+
+        if len(valid) >= 14:
+            mid = len(valid) // 2
+            first_cogs_pct = [d["cogs_cents"] / d["revenue_cents"] * 100 for d in valid[:mid]]
+            second_cogs_pct = [d["cogs_cents"] / d["revenue_cents"] * 100 for d in valid[mid:]]
+
+            first_avg = sum(first_cogs_pct) / len(first_cogs_pct)
+            second_avg = sum(second_cogs_pct) / len(second_cogs_pct)
+            delta_pp = second_avg - first_avg
+
+            # Also check revenue trend to detect margin compression
+            first_rev = sum(d["revenue_cents"] for d in valid[:mid]) / len(valid[:mid])
+            second_rev = sum(d["revenue_cents"] for d in valid[mid:]) / len(valid[mid:])
+            rev_change_pct = ((second_rev - first_rev) / first_rev) * 100 if first_rev > 0 else 0
+
+            if delta_pp > 2.0 and abs(rev_change_pct) < 10:
+                signals.append({
+                    "signal_type": "profitability",
+                    "key": "cogs_ratio_rising",
+                    "title": f"COGS ratio rising +{delta_pp:.1f}pp while revenue flat — margin compression",
+                    "evidence": {
+                        "first_half_cogs_pct": round(first_avg, 1),
+                        "second_half_cogs_pct": round(second_avg, 1),
+                        "delta_pp": round(delta_pp, 1),
+                        "revenue_change_pct": round(rev_change_pct, 1),
+                    },
+                    "severity": "warning",
+                    "suggested_action": "MARGIN_ALERT",
+                })
+    except Exception:
+        logger.exception("Profitability signal D (COGS ratio) failed")
+
+    # --- E. High-Value Understaffed Windows ---
+    try:
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        # Aggregate across recent days
+        window_tracker: dict[tuple, list] = {}  # (dow, hour) -> [revenue_cents, ...]
+
+        for offset in range(min(lookback_days, 14)):
+            check_date = cycle_date - timedelta(days=offset)
+            try:
+                snap = get_daily_efficiency_snapshot(site_id, check_date)
+            except Exception:
+                continue
+
+            for interval in snap.get("intervals", []):
+                if interval.get("status") != "understaffed":
+                    continue
+                rev = interval.get("revenue_cents", 0)
+                if rev <= 0:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(interval["interval_start"])
+                except (ValueError, TypeError):
+                    continue
+                dow = ts.weekday()
+                hour = ts.hour
+                window_tracker.setdefault((dow, hour), []).append(rev)
+
+        for (dow, hour), revenues in window_tracker.items():
+            if len(revenues) < 2:
+                continue
+            avg_rev = sum(revenues) / len(revenues)
+            if avg_rev > 5000:  # > $50 per 15-min interval while understaffed
+                signals.append({
+                    "signal_type": "profitability",
+                    "key": f"high_revenue_understaffed_{day_names[dow].lower()}_{hour}",
+                    "title": f"{day_names[dow]} {hour}:00 consistently understaffed with ${avg_rev / 100:.0f} avg revenue",
+                    "evidence": {
+                        "day": day_names[dow],
+                        "hour": hour,
+                        "occurrences": len(revenues),
+                        "avg_revenue_cents": round(avg_rev),
+                    },
+                    "severity": "opportunity",
+                    "suggested_action": "STAFFING_ADJUST",
+                })
+    except Exception:
+        logger.exception("Profitability signal E (understaffed windows) failed")
+
+    # --- F. Menu Mix Profit Optimization ---
+    try:
+        from analysis.profitability import compute_item_margins
+
+        margins = compute_item_margins(site_id, days=lookback_days)
+        if margins and len(margins) >= 5:
+            total_qty = sum(m.get("qty", 0) for m in margins)
+            if total_qty > 0:
+                # Enrich with volume share
+                for m in margins:
+                    m["volume_pct"] = round(m.get("qty", 0) / total_qty * 100, 1)
+                    m["total_profit_cents"] = m.get("total_profit_cents", 0)
+
+                by_volume = sorted(margins, key=lambda x: x.get("qty", 0), reverse=True)[:10]
+                by_profit = sorted(margins, key=lambda x: x.get("total_profit_cents", 0), reverse=True)[:10]
+
+                # Find high-volume items with below-median margins
+                margin_values = [m.get("margin_pct", 0) for m in margins if m.get("qty", 0) >= 5]
+                if margin_values:
+                    median_margin = sorted(margin_values)[len(margin_values) // 2]
+
+                    top_seller = by_volume[0] if by_volume else None
+                    top_profit = by_profit[0] if by_profit else None
+
+                    if (top_seller and top_profit
+                            and top_seller["item"] != top_profit["item"]
+                            and top_seller.get("margin_pct", 100) < median_margin):
+                        signals.append({
+                            "signal_type": "profitability",
+                            "key": "menu_mix_opportunity",
+                            "title": (
+                                f"Top seller ({top_seller['item']}, {top_seller['volume_pct']}% vol) "
+                                f"has {top_seller.get('margin_pct', 0)}% margin. "
+                                f"{top_profit['item']} ({top_profit['volume_pct']}% vol) "
+                                f"has {top_profit.get('margin_pct', 0)}% margin"
+                            ),
+                            "evidence": {
+                                "top_seller": top_seller["item"],
+                                "top_seller_volume_pct": top_seller["volume_pct"],
+                                "top_seller_margin_pct": top_seller.get("margin_pct"),
+                                "top_profit_item": top_profit["item"],
+                                "top_profit_volume_pct": top_profit["volume_pct"],
+                                "top_profit_margin_pct": top_profit.get("margin_pct"),
+                                "median_margin_pct": median_margin,
+                            },
+                            "severity": "opportunity",
+                            "suggested_action": "MARGIN_ALERT",
+                        })
+    except Exception:
+        logger.exception("Profitability signal F (menu mix) failed")
 
     return signals
 

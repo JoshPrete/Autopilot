@@ -161,6 +161,13 @@ STAFFING_WU_PER_PERSON_HIGH = 3.8
 STAFFING_WU_PER_PERSON_LOW = 1.8
 
 # ------------------------------------------------------------
+# Staffing Efficiency Gap Engine
+# ------------------------------------------------------------
+LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS = 650  # ~$26/hr per 15-min
+EFFICIENCY_SCORE_TARGET = 0.85   # 85% = 15% buffer acceptable
+EFFICIENCY_SCORE_WARNING = 0.70  # Below this = critical
+
+# ------------------------------------------------------------
 # Day-of-Week Pattern Defaults (Section 5.5)
 # ------------------------------------------------------------
 DOW_PATTERN_DEFAULT = {
