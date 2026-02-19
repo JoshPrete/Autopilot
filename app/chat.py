@@ -17,16 +17,21 @@ import anthropic
 from config.database import engine
 from config.settings import settings
 from data.storage import (
+    get_all_xero_mappings,
+    get_cogs_source_summary,
     get_daily_efficiency_snapshot,
     get_daily_profitability,
     get_data_freshness,
     get_document,
     get_dow_pattern,
+    get_efficiency_gap_range,
     get_events_range,
     get_intelligence_summary,
     get_item_costs,
+    get_item_costs_detailed,
     get_learned_patterns,
     get_prediction,
+    get_profitability_correlations,
     get_recent_documents,
     get_recent_insights,
     get_rosters_for_date,
@@ -863,6 +868,31 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: COGS source summary (cheap query) ---
+    try:
+        cogs_sources = get_cogs_source_summary(site_id)
+        if cogs_sources:
+            context["cogs_sources"] = cogs_sources
+    except Exception:
+        pass
+
+    # --- Always (when real COGS): profitability correlations ---
+    try:
+        if context.get("has_real_cogs"):
+            prof_corr = get_profitability_correlations(site_id)
+            if prof_corr and prof_corr.get("by_dow"):
+                context["profitability_correlations"] = prof_corr
+    except Exception:
+        pass
+
+    # --- Always: staffing efficiency gap (7-day window) ---
+    try:
+        eff_gap = get_efficiency_gap_range(site_id, today - timedelta(days=7), today)
+        if eff_gap and eff_gap.get("totals", {}).get("days_analyzed", 0) > 0:
+            context["efficiency_gap"] = eff_gap
+    except Exception:
+        pass
+
     # --- Always: recent documents ---
     try:
         recent_docs = get_recent_documents(site_id, limit=5)
@@ -1109,9 +1139,25 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         except Exception:
             pass
 
+    # --- Conditional: Xero / supplier detail ---
+    if _keyword_match(question, ["xero", "supplier", "mapping", "sync", "invoice"]):
+        try:
+            xero_mappings = get_all_xero_mappings(site_id)
+            if xero_mappings:
+                context["xero_mappings"] = xero_mappings
+        except Exception:
+            pass
+        try:
+            item_costs_detail = get_item_costs_detailed(site_id)
+            if item_costs_detail:
+                context["item_costs_detail"] = item_costs_detail
+        except Exception:
+            pass
+
     # --- Conditional: profitability / P&L / margins ---
     if _keyword_match(question, ["profit", "p&l", "margin", "cogs", "cost of goods",
-                                  "profitable", "bottom line"]):
+                                  "profitable", "bottom line", "xero", "cost",
+                                  "supplier", "ingredient", "price", "pricing"]):
         try:
             pnl = _get_profitability_context(site_id, days=14)
             if pnl:
@@ -1209,38 +1255,126 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         "",
     ])
 
-    # --- COGS status ---
+    # --- COGS status (enhanced with source breakdown) ---
     has_real = context.get("has_real_cogs", False)
     xero_connected = context.get("xero_connected", False)
-    if has_real and xero_connected:
-        sections.append("**COGS STATUS:** Real cost data available (source: Xero, auto-synced daily).")
-        sections.append("Full P&L analysis is available with real COGS.")
-        sections.append("")
-    elif has_real:
-        sections.append("**COGS STATUS:** Real cost data available (source: uploaded documents).")
-        sections.append("Full P&L analysis is available. Consider connecting Xero at /xero/setup for automatic updates.")
+    cogs_sources = context.get("cogs_sources", {})
+    cogs_snapshot = context.get("cogs_snapshot", {})
+
+    # Build detailed COGS status line
+    source_parts = []
+    for src in ["xero", "document", "default"]:
+        info = cogs_sources.get(src)
+        if info and info.get("count", 0) > 0:
+            date_str = f" (synced {info['last_updated']})" if info.get("last_updated") else ""
+            source_parts.append(f"{info['count']} from {src}{date_str}")
+
+    total_items = cogs_snapshot.get("total_items", 0)
+    real_items = cogs_snapshot.get("real_items", 0)
+    coverage_pct = round(real_items / total_items * 100) if total_items > 0 else 0
+
+    if has_real and source_parts:
+        sections.append(f"**COGS STATUS:** {', '.join(source_parts)}.")
+        sections.append(f"Real COGS coverage: {coverage_pct}%. Full P&L analysis available.")
+        if not xero_connected:
+            sections.append("Consider connecting Xero at /xero/setup for automatic updates.")
         sections.append("")
     elif xero_connected:
         sections.append("**COGS STATUS:** Xero is connected but no costs have synced yet. A sync will run automatically at 5:25pm AEST, or the user can trigger one at /xero/setup.")
         sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS sync is pending.")
         sections.append("")
     else:
-        sections.append("**COGS STATUS:** No real cost data available. Only estimated/default COGS exist.")
+        default_count = cogs_sources.get("default", {}).get("count", 0)
+        if default_count > 0:
+            sections.append(f"**COGS STATUS:** {default_count} items with default/estimated costs only.")
+        else:
+            sections.append("**COGS STATUS:** No cost data available.")
         sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
         sections.append("Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'")
         sections.append("")
 
-    # --- COGS coverage details ---
-    if "cogs_snapshot" in context:
-        c = context["cogs_snapshot"]
-        sections.append("### COGS Coverage")
+    # --- Staffing Efficiency (always-visible) ---
+    if "efficiency_gap" in context:
+        from config.constants import EFFICIENCY_SCORE_TARGET
+        eg = context["efficiency_gap"]
+        eg_totals = eg.get("totals", {})
+        eg_score = eg_totals.get("efficiency_score", 1.0)
+        eg_excess = eg_totals.get("excess_labor_cents", 0)
+        eg_deficit = eg_totals.get("deficit_labor_cents", 0)
+        eg_days = eg_totals.get("days_analyzed", 0)
+        target_pct = round(EFFICIENCY_SCORE_TARGET * 100)
+        score_pct = round(eg_score * 100)
+
+        if eg_excess > 0:
+            # Overstaffing scenario
+            weekly_excess = round(eg_excess / max(eg_days, 1) * 7)
+            if score_pct >= target_pct:
+                status_label = "on target"
+            elif score_pct >= 70:
+                status_label = "needs attention"
+            else:
+                status_label = "critical"
+
+            eff_line = (
+                f"**STAFFING EFFICIENCY (7d):** Score {score_pct}% ({status_label}) "
+                f"| Excess labor: ${weekly_excess / 100:,.0f}/week | Target: {target_pct}%"
+            )
+
+            # Find worst day for overstaffing
+            by_dow = eg.get("by_dow", [])
+            if by_dow:
+                worst_dow = max(by_dow, key=lambda d: d.get("avg_excess_labor_cents", 0))
+                if worst_dow.get("avg_excess_labor_cents", 0) > 0:
+                    eff_line += (
+                        f"\n  Worst day: {worst_dow['day_name']} "
+                        f"— ${worst_dow['avg_excess_labor_cents'] / 100:,.0f}/day excess"
+                    )
+        elif eg_deficit > 0:
+            # Understaffing scenario — running lean
+            weekly_deficit = round(eg_deficit / max(eg_days, 1) * 7)
+            status_label = "running lean"
+            eff_line = (
+                f"**STAFFING EFFICIENCY (7d):** Score {score_pct}% ({status_label}) "
+                f"| No excess labor — understaffed by ${weekly_deficit / 100:,.0f}/week equivalent"
+            )
+
+            # Find worst day for understaffing
+            by_dow = eg.get("by_dow", [])
+            if by_dow:
+                worst_dow = max(by_dow, key=lambda d: d.get("avg_deficit_labor_cents", 0))
+                if worst_dow.get("avg_deficit_labor_cents", 0) > 0:
+                    eff_line += (
+                        f"\n  Most stretched: {worst_dow['day_name']} "
+                        f"— ${worst_dow['avg_deficit_labor_cents'] / 100:,.0f}/day understaffed"
+                    )
+        else:
+            eff_line = f"**STAFFING EFFICIENCY (7d):** Score {score_pct}% (on target) | No excess or deficit"
+
+        sections.append(eff_line)
         sections.append(
-            f"- Items with costs: {c.get('total_items', 0)} total "
-            f"({c.get('real_items', 0)} real, {c.get('xero_items', 0)} from Xero, {c.get('document_items', 0)} from documents)"
+            "Revenue is demand-driven. Staff count does not drive revenue. "
+            "The goal is minimum staff to maintain quality."
         )
-        if c.get("last_updated_at"):
-            sections.append(f"- Last cost update: {c['last_updated_at']}")
         sections.append("")
+
+        # Detail: by-day breakdown table
+        by_day = eg.get("by_day", [])
+        if by_day:
+            sections.append("### Staffing Efficiency — Daily Breakdown (7d)")
+            sections.append("| Date | Day | Eff % | Actual Labor | Min Labor | Excess | Deficit | Revenue | Over/Under |")
+            sections.append("|------|-----|-------|-------------|-----------|--------|---------|---------|------------|")
+            for d in by_day:
+                sections.append(
+                    f"| {d['date']} | {d['day_name'][:3]} "
+                    f"| {round(d['efficiency_score'] * 100)}% "
+                    f"| ${d['actual_labor_cents'] / 100:,.0f} "
+                    f"| ${d['min_labor_cents'] / 100:,.0f} "
+                    f"| ${d['excess_labor_cents'] / 100:,.0f} "
+                    f"| ${d.get('deficit_labor_cents', 0) / 100:,.0f} "
+                    f"| ${d['total_revenue_cents'] / 100:,.0f} "
+                    f"| +{d['overstaffed_intervals']}/-{d.get('understaffed_intervals', 0)}/{d['intervals']} |"
+                )
+            sections.append("")
 
     # --- Intelligence Engine ---
     if "active_insights" in context or "intelligence_summary" in context:
@@ -1634,6 +1768,67 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             )
         total_profit = sum(m["total_profit_cents"] for m in margins)
         sections.append(f"\n**Total estimated product profit: ${total_profit / 100:,.0f}**")
+
+    # --- Profitability by Day of Week ---
+    if "profitability_correlations" in context:
+        corr = context["profitability_correlations"]
+        by_dow = corr.get("by_dow", [])
+        if by_dow:
+            sections.append("\n## Profitability by Day of Week")
+            sections.append("| Day | Revenue | COGS | Labor | Net Profit | Staff | Profit/Staff | Rev/$Labor |")
+            sections.append("|-----|---------|------|-------|------------|-------|--------------|------------|")
+            for d in by_dow:
+                rev = d["avg_revenue_cents"] / 100
+                cogs = d["avg_cogs_cents"] / 100
+                labor = d["avg_labor_cents"] / 100
+                net = d["avg_net_profit_cents"] / 100
+                staff = d["avg_staff_count"]
+                pps = f"${d['profit_per_staff_cents'] / 100:.0f}" if d.get("profit_per_staff_cents") else "N/A"
+                rpld = f"${d['rev_per_labor_dollar']:.2f}" if d.get("rev_per_labor_dollar") else "N/A"
+                sections.append(
+                    f"| {d['day_name']} | ${rev:,.0f} | ${cogs:,.0f} | ${labor:,.0f} | "
+                    f"${net:,.0f} | {staff:.1f} | {pps} | {rpld} |"
+                )
+
+        optimal = corr.get("optimal_staffing", [])
+        if optimal:
+            sections.append("\n**Staffing vs Profit (historical best — explore alternatives, not prescriptive):**")
+            for o in optimal:
+                sections.append(
+                    f"- {o['day_name']}: best observed with {o['optimal_staff']} staff → "
+                    f"${o['profit_per_staff'] / 100:.0f}/staff (consider whether more/fewer "
+                    f"could improve throughput or reduce cost)"
+                )
+
+    # --- Item Costs (COGS Detail) ---
+    if "item_costs_detail" in context:
+        items = context["item_costs_detail"]
+        sections.append(f"\n## Item Costs (COGS Detail) — {len(items)} items")
+        sections.append("| Item | Cost | Source | Last Updated |")
+        sections.append("|------|------|--------|--------------|")
+        for item in items:
+            cost = f"${item['cost_cents'] / 100:.2f}"
+            updated = item.get("updated_at", "N/A")
+            if updated and len(updated) > 10:
+                updated = updated[:10]
+            sections.append(
+                f"| {item['score_key']} | {cost} | {item['source']} | {updated} |"
+            )
+
+    # --- Xero Supplier Mappings ---
+    if "xero_mappings" in context:
+        mappings = context["xero_mappings"]
+        confirmed = sum(1 for m in mappings if float(m.get("confidence", 0)) >= 0.8)
+        unconfirmed = len(mappings) - confirmed
+        sections.append(f"\n## Xero Supplier Mappings")
+        sections.append(f"{len(mappings)} items mapped ({confirmed} confirmed, {unconfirmed} unconfirmed)")
+        for m in mappings[:15]:
+            conf = float(m.get("confidence", 0))
+            conf_label = "confirmed" if conf >= 0.8 else "unconfirmed"
+            units = f", {m['units_per_pack']} units/pack" if m.get("units_per_pack") else ""
+            sections.append(
+                f"- {m['xero_description']} → {m['score_key']} ({conf_label}{units})"
+            )
 
     # --- Tomorrow's Weather ---
     if "tomorrow_weather" in context:
