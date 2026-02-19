@@ -239,6 +239,7 @@ def get_recent_pattern(
     cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
 
     with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
         result = conn.execute(
             _text(
                 "SELECT workload_units FROM workload_timeline "
@@ -246,6 +247,11 @@ def get_recent_pattern(
                 "AND EXTRACT(DOW FROM interval_start) = :dow "
                 "AND EXTRACT(HOUR FROM interval_start) = :hr "
                 "AND interval_start >= :cutoff "
+                "AND DATE(interval_start) NOT IN ("
+                "  SELECT flag_date FROM data_quality_flags "
+                "  WHERE site_id = :sid AND active = TRUE "
+                "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
+                ") "
                 "ORDER BY interval_start"
             ),
             {
@@ -293,12 +299,18 @@ def get_yoy_pattern(
         return []
 
     with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
         result = conn.execute(
             _text(
                 "SELECT workload_units FROM workload_timeline "
                 "WHERE site_id = :sid "
                 "AND EXTRACT(WEEK FROM interval_start) = :week "
                 "AND EXTRACT(YEAR FROM interval_start) = ANY(:years) "
+                "AND DATE(interval_start) NOT IN ("
+                "  SELECT flag_date FROM data_quality_flags "
+                "  WHERE site_id = :sid AND active = TRUE "
+                "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
+                ") "
                 "ORDER BY interval_start"
             ),
             {
@@ -329,6 +341,7 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
                  "Thursday", "Friday", "Saturday"]
 
     with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
         result = conn.execute(
             _text(
                 "SELECT "
@@ -337,6 +350,11 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
                 "FROM workload_timeline "
                 "WHERE site_id = :sid "
                 "AND interval_start >= :cutoff "
+                "AND DATE(interval_start) NOT IN ("
+                "  SELECT flag_date FROM data_quality_flags "
+                "  WHERE site_id = :sid AND active = TRUE "
+                "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
+                ") "
                 "GROUP BY EXTRACT(DOW FROM interval_start)"
             ),
             {"sid": site_id, "cutoff": cutoff},
@@ -1551,6 +1569,172 @@ def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
 
 
 # ============================================================
+# Staffing Efficiency Gap
+# ============================================================
+
+
+def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> dict:
+    """
+    Compute staffing efficiency gap across a date range.
+
+    Single SQL query joins workload_timeline + deputy_rosters + orders_raw
+    to get per-interval: workload_units, staff_on, revenue_cents.
+    Python computes min_staff, excess cost, and efficiency score.
+    """
+    from config.constants import LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+    from config.workflow_profiles import minimum_viable_staff
+
+    cost_per = LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _text(
+                """
+                WITH intervals AS (
+                    SELECT
+                        wt.interval_start,
+                        DATE(wt.interval_start) AS day,
+                        wt.workload_units,
+                        (
+                            SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text))
+                            FROM deputy_rosters dr
+                            WHERE dr.site_id = :sid
+                              AND dr.shift_date = DATE(wt.interval_start)
+                              AND dr.start_time <= wt.interval_start
+                              AND dr.end_time > wt.interval_start
+                        ) AS staff_on
+                    FROM workload_timeline wt
+                    WHERE wt.site_id = :sid
+                      AND wt.interval_start >= :s
+                      AND wt.interval_start < :e ::date + interval '1 day'
+                ),
+                trade AS (
+                    SELECT
+                        date_trunc('hour', closed_at)
+                        + (floor(extract(minute from closed_at) / 15) * interval '15 minutes')
+                        AS interval_start,
+                        COALESCE(SUM(total_money_cents), 0) AS revenue_cents
+                    FROM orders_raw
+                    WHERE site_id = :sid
+                      AND closed_at IS NOT NULL
+                      AND DATE(closed_at) >= :s
+                      AND DATE(closed_at) <= :e
+                    GROUP BY 1
+                )
+                SELECT
+                    i.interval_start,
+                    i.day,
+                    i.workload_units,
+                    i.staff_on,
+                    COALESCE(t.revenue_cents, 0) AS revenue_cents
+                FROM intervals i
+                LEFT JOIN trade t ON t.interval_start = i.interval_start
+                WHERE i.staff_on > 0
+                ORDER BY i.interval_start
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        ).mappings().all()
+
+    # Aggregate per-day
+    day_data: dict[str, dict] = {}
+    for row in rows:
+        day_str = str(row["day"])
+        wu = float(row["workload_units"] or 0)
+        staff_on = int(row["staff_on"] or 0)
+        rev = int(row["revenue_cents"] or 0)
+        min_staff = minimum_viable_staff(wu)
+        actual_cost = staff_on * cost_per
+        min_cost = min_staff * cost_per
+        excess = max(0, staff_on - min_staff) * cost_per
+        is_overstaffed = staff_on > min_staff
+
+        if day_str not in day_data:
+            day_data[day_str] = {
+                "actual_labor_cents": 0,
+                "min_labor_cents": 0,
+                "excess_labor_cents": 0,
+                "total_revenue_cents": 0,
+                "intervals": 0,
+                "overstaffed_intervals": 0,
+            }
+        d = day_data[day_str]
+        d["actual_labor_cents"] += actual_cost
+        d["min_labor_cents"] += min_cost
+        d["excess_labor_cents"] += excess
+        d["total_revenue_cents"] += rev
+        d["intervals"] += 1
+        if is_overstaffed:
+            d["overstaffed_intervals"] += 1
+
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    by_day = []
+    for day_str, d in sorted(day_data.items()):
+        try:
+            dt = date.fromisoformat(day_str)
+            dow = dt.weekday()
+            day_name = day_names[dow]
+        except Exception:
+            dow = 0
+            day_name = "Unknown"
+        eff = round(d["min_labor_cents"] / d["actual_labor_cents"], 4) if d["actual_labor_cents"] > 0 else 1.0
+        by_day.append({
+            "date": day_str,
+            "day_name": day_name,
+            "dow": dow,
+            "actual_labor_cents": d["actual_labor_cents"],
+            "min_labor_cents": d["min_labor_cents"],
+            "excess_labor_cents": d["excess_labor_cents"],
+            "efficiency_score": round(eff, 4),
+            "total_revenue_cents": d["total_revenue_cents"],
+            "intervals": d["intervals"],
+            "overstaffed_intervals": d["overstaffed_intervals"],
+        })
+
+    # Aggregate by day-of-week
+    dow_agg: dict[int, dict] = {}
+    for entry in by_day:
+        dow = entry["dow"]
+        if dow not in dow_agg:
+            dow_agg[dow] = {"excess_list": [], "eff_list": [], "day_name": entry["day_name"]}
+        dow_agg[dow]["excess_list"].append(entry["excess_labor_cents"])
+        dow_agg[dow]["eff_list"].append(entry["efficiency_score"])
+
+    by_dow = []
+    for dow in sorted(dow_agg):
+        agg = dow_agg[dow]
+        n = len(agg["excess_list"])
+        by_dow.append({
+            "dow": dow,
+            "day_name": agg["day_name"],
+            "sample_days": n,
+            "avg_excess_labor_cents": round(sum(agg["excess_list"]) / n) if n else 0,
+            "avg_efficiency_score": round(sum(agg["eff_list"]) / n, 4) if n else 1.0,
+        })
+
+    # Totals
+    total_actual = sum(d["actual_labor_cents"] for d in by_day)
+    total_min = sum(d["min_labor_cents"] for d in by_day)
+    total_excess = sum(d["excess_labor_cents"] for d in by_day)
+    total_rev = sum(d["total_revenue_cents"] for d in by_day)
+    eff_score = round(total_min / total_actual, 4) if total_actual > 0 else 1.0
+
+    return {
+        "totals": {
+            "days_analyzed": len(by_day),
+            "actual_labor_cents": total_actual,
+            "minimum_labor_cents": total_min,
+            "excess_labor_cents": total_excess,
+            "total_revenue_cents": total_rev,
+            "efficiency_score": eff_score,
+        },
+        "by_day": by_day,
+        "by_dow": by_dow,
+    }
+
+
+# ============================================================
 # Item Costs (COGS)
 # ============================================================
 
@@ -1937,6 +2121,164 @@ def has_real_cogs(site_id: str) -> bool:
         return (count or 0) > 0
 
 
+def get_item_costs_detailed(site_id: str) -> list[dict]:
+    """Return full item cost records including source and timestamps."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT score_key, category, cost_cents, description, source, updated_at "
+                "FROM item_costs WHERE site_id = :sid "
+                "ORDER BY source, score_key"
+            ),
+            {"sid": site_id},
+        )
+        return [
+            {
+                "score_key": row[0],
+                "category": row[1],
+                "cost_cents": int(row[2]),
+                "description": row[3],
+                "source": row[4] or "default",
+                "updated_at": str(row[5]) if row[5] else None,
+            }
+            for row in result
+        ]
+
+
+def get_cogs_source_summary(site_id: str) -> dict:
+    """Lightweight COGS source aggregation: count and last update per source."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _text(
+                "SELECT COALESCE(source, 'default') AS src, COUNT(*) AS cnt, "
+                "MAX(updated_at) AS last_updated "
+                "FROM item_costs WHERE site_id = :sid "
+                "GROUP BY COALESCE(source, 'default')"
+            ),
+            {"sid": site_id},
+        ).mappings().all()
+
+    return {
+        row["src"]: {
+            "count": int(row["cnt"]),
+            "last_updated": str(row["last_updated"])[:10] if row["last_updated"] else None,
+        }
+        for row in rows
+    }
+
+
+def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
+    """
+    Three-way profitability correlations by day-of-week.
+
+    Joins daily_profitability + deputy_rosters to compute per-DOW:
+    avg revenue, labor, COGS, net profit, staff count, profit/staff, rev/$labor.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    EXTRACT(DOW FROM dp.profit_date)::int AS dow,
+                    TRIM(TO_CHAR(dp.profit_date, 'Day')) AS day_name,
+                    AVG(dp.revenue_cents) AS avg_revenue_cents,
+                    AVG(dp.labor_cost_cents) AS avg_labor_cents,
+                    AVG(COALESCE(dp.cogs_cents, 0)) AS avg_cogs_cents,
+                    AVG(COALESCE(dp.net_profit_cents, 0)) AS avg_net_profit_cents,
+                    AVG(dr_staff.staff_count) AS avg_staff_count
+                FROM daily_profitability dp
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text)) AS staff_count
+                    FROM deputy_rosters dr
+                    WHERE dr.site_id = dp.site_id AND dr.shift_date = dp.profit_date
+                ) dr_staff ON TRUE
+                WHERE dp.site_id = :sid
+                  AND dp.profit_date >= CURRENT_DATE - :days
+                GROUP BY EXTRACT(DOW FROM dp.profit_date), TRIM(TO_CHAR(dp.profit_date, 'Day'))
+                ORDER BY EXTRACT(DOW FROM dp.profit_date)
+                """
+            ),
+            {"sid": site_id, "days": days},
+        ).mappings().all()
+
+    by_dow = []
+    for r in rows:
+        avg_rev = int(float(r["avg_revenue_cents"] or 0))
+        avg_labor = int(float(r["avg_labor_cents"] or 0))
+        avg_cogs = int(float(r["avg_cogs_cents"] or 0))
+        avg_net = int(float(r["avg_net_profit_cents"] or 0))
+        avg_staff = round(float(r["avg_staff_count"] or 0), 1)
+
+        profit_per_staff = round(avg_net / avg_staff) if avg_staff > 0 else None
+        rev_per_labor_dollar = round(avg_rev / avg_labor, 2) if avg_labor > 0 else None
+
+        by_dow.append({
+            "dow": int(r["dow"]),
+            "day_name": r["day_name"],
+            "avg_revenue_cents": avg_rev,
+            "avg_labor_cents": avg_labor,
+            "avg_cogs_cents": avg_cogs,
+            "avg_net_profit_cents": avg_net,
+            "avg_staff_count": avg_staff,
+            "profit_per_staff_cents": profit_per_staff,
+            "rev_per_labor_dollar": rev_per_labor_dollar,
+        })
+
+    # Optimal staffing: for each DOW, find staff count that maximizes profit/staff
+    optimal_staffing = []
+    try:
+        staff_rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    EXTRACT(DOW FROM dp.profit_date)::int AS dow,
+                    TRIM(TO_CHAR(dp.profit_date, 'Day')) AS day_name,
+                    dr_staff.staff_count,
+                    AVG(COALESCE(dp.net_profit_cents, 0)) AS avg_profit,
+                    COUNT(*) AS sample_size
+                FROM daily_profitability dp
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text)) AS staff_count
+                    FROM deputy_rosters dr
+                    WHERE dr.site_id = dp.site_id AND dr.shift_date = dp.profit_date
+                ) dr_staff ON TRUE
+                WHERE dp.site_id = :sid
+                  AND dp.profit_date >= CURRENT_DATE - :days
+                  AND dr_staff.staff_count > 0
+                GROUP BY EXTRACT(DOW FROM dp.profit_date), TRIM(TO_CHAR(dp.profit_date, 'Day')), dr_staff.staff_count
+                HAVING COUNT(*) >= 2
+                ORDER BY EXTRACT(DOW FROM dp.profit_date), avg_profit DESC
+                """
+            ),
+            {"sid": site_id, "days": days},
+        ).mappings().all()
+
+        # For each DOW, pick the staff count with best profit/staff
+        seen_dow = set()
+        for sr in staff_rows:
+            dow_val = int(sr["dow"])
+            if dow_val in seen_dow:
+                continue
+            staff_count = int(sr["staff_count"])
+            avg_profit = int(float(sr["avg_profit"] or 0))
+            if staff_count > 0:
+                optimal_staffing.append({
+                    "dow": dow_val,
+                    "day_name": sr["day_name"],
+                    "optimal_staff": staff_count,
+                    "profit_at_optimal": avg_profit,
+                    "profit_per_staff": round(avg_profit / staff_count),
+                })
+                seen_dow.add(dow_val)
+    except Exception:
+        logger.warning("Optimal staffing query failed (non-fatal)")
+
+    return {
+        "by_dow": by_dow,
+        "optimal_staffing": optimal_staffing,
+    }
+
+
 # ============================================================
 # Xero Tokens & Line Mappings
 # ============================================================
@@ -2168,6 +2510,667 @@ def get_data_freshness(site_id: str) -> Optional[str]:
             {"sid": site_id},
         ).scalar()
         return str(result) if result else None
+
+
+# ============================================================
+# Data Quality Flags (fail-closed controls)
+# ============================================================
+
+
+def _ensure_data_quality_flags_table(conn) -> None:
+    conn.execute(
+        _text(
+            """
+            CREATE TABLE IF NOT EXISTS data_quality_flags (
+                flag_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                site_id UUID REFERENCES sites(site_id),
+                flag_date DATE NOT NULL,
+                flag_type TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'medium',
+                source TEXT NOT NULL DEFAULT 'system',
+                reason TEXT,
+                metadata JSONB,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                resolved_at TIMESTAMPTZ
+            )
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_data_quality_unique_active
+            ON data_quality_flags(site_id, flag_date, flag_type, source, active)
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_data_quality_site_date
+            ON data_quality_flags(site_id, flag_date DESC)
+            """
+        )
+    )
+
+
+def upsert_data_quality_flag(
+    site_id: str,
+    flag_date: date,
+    flag_type: str,
+    severity: str = "medium",
+    source: str = "system",
+    reason: str | None = None,
+    metadata: dict | None = None,
+) -> str:
+    with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
+        existing = conn.execute(
+            _text(
+                """
+                SELECT flag_id
+                FROM data_quality_flags
+                WHERE site_id = :sid
+                  AND flag_date = :d
+                  AND flag_type = :t
+                  AND source = :src
+                  AND active = TRUE
+                LIMIT 1
+                """
+            ),
+            {"sid": site_id, "d": flag_date, "t": flag_type, "src": source},
+        ).scalar()
+        if existing:
+            conn.execute(
+                _text(
+                    """
+                    UPDATE data_quality_flags
+                    SET severity = :sev,
+                        reason = :reason,
+                        metadata = :meta
+                    WHERE flag_id = :fid
+                    """
+                ),
+                {"sev": severity, "reason": reason, "meta": _json_dumps(metadata) if metadata else None, "fid": existing},
+            )
+            conn.commit()
+            return str(existing)
+
+        flag_id = conn.execute(
+            _text(
+                """
+                INSERT INTO data_quality_flags
+                    (site_id, flag_date, flag_type, severity, source, reason, metadata, active)
+                VALUES
+                    (:sid, :d, :t, :sev, :src, :reason, :meta, TRUE)
+                RETURNING flag_id
+                """
+            ),
+            {
+                "sid": site_id,
+                "d": flag_date,
+                "t": flag_type,
+                "sev": severity,
+                "src": source,
+                "reason": reason,
+                "meta": _json_dumps(metadata) if metadata else None,
+            },
+        ).scalar()
+        conn.commit()
+        return str(flag_id)
+
+
+def resolve_data_quality_flag(
+    site_id: str,
+    flag_date: date,
+    flag_type: str,
+    source: str | None = None,
+) -> int:
+    with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
+        result = conn.execute(
+            _text(
+                """
+                UPDATE data_quality_flags
+                SET active = FALSE,
+                    resolved_at = NOW()
+                WHERE site_id = :sid
+                  AND flag_date = :d
+                  AND flag_type = :t
+                  AND active = TRUE
+                  AND (:src IS NULL OR source = :src)
+                """
+            ),
+            {"sid": site_id, "d": flag_date, "t": flag_type, "src": source},
+        )
+        conn.commit()
+        return int(result.rowcount or 0)
+
+
+def get_data_quality_flags(
+    site_id: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    active_only: bool = True,
+    limit: int = 200,
+) -> list[dict]:
+    lim = max(1, min(limit, 1000))
+    with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    flag_id, site_id, flag_date, flag_type, severity, source,
+                    reason, metadata, active, created_at, resolved_at
+                FROM data_quality_flags
+                WHERE site_id = :sid
+                  AND (:active_only = FALSE OR active = TRUE)
+                  AND (:s IS NULL OR flag_date >= :s)
+                  AND (:e IS NULL OR flag_date <= :e)
+                ORDER BY flag_date DESC, created_at DESC
+                LIMIT :lim
+                """
+            ),
+            {"sid": site_id, "active_only": active_only, "s": start_date, "e": end_date, "lim": lim},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_day_ingest_diagnostics(site_id: str, target_date: date) -> dict:
+    """
+    Diagnose whether a day looks like partial ingestion by comparing
+    completed orders/revenue/active hours to recent same-weekday history.
+    """
+    with engine.connect() as conn:
+        day = conn.execute(
+            _text(
+                """
+                SELECT
+                    COUNT(*) AS total_orders,
+                    COUNT(*) FILTER (WHERE state = 'COMPLETED') AS completed_orders,
+                    COALESCE(SUM(total_money_cents) FILTER (WHERE state = 'COMPLETED'), 0) AS completed_revenue_cents,
+                    COUNT(DISTINCT date_trunc('hour', closed_at)) FILTER (WHERE state = 'COMPLETED' AND closed_at IS NOT NULL) AS active_hours
+                FROM orders_raw
+                WHERE site_id = :sid
+                  AND DATE(closed_at) = :d
+                """
+            ),
+            {"sid": site_id, "d": target_date},
+        ).mappings().first()
+
+        baseline_rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    DATE(closed_at) AS trade_date,
+                    COUNT(*) FILTER (WHERE state = 'COMPLETED') AS completed_orders,
+                    COALESCE(SUM(total_money_cents) FILTER (WHERE state = 'COMPLETED'), 0) AS completed_revenue_cents,
+                    COUNT(DISTINCT date_trunc('hour', closed_at)) FILTER (WHERE state = 'COMPLETED' AND closed_at IS NOT NULL) AS active_hours
+                FROM orders_raw
+                WHERE site_id = :sid
+                  AND closed_at IS NOT NULL
+                  AND DATE(closed_at) < :d
+                  AND EXTRACT(DOW FROM closed_at) = EXTRACT(DOW FROM :d::date)
+                GROUP BY DATE(closed_at)
+                ORDER BY trade_date DESC
+                LIMIT 8
+                """
+            ),
+            {"sid": site_id, "d": target_date},
+        ).mappings().all()
+
+    day_completed_orders = int((day or {}).get("completed_orders") or 0)
+    day_revenue = int((day or {}).get("completed_revenue_cents") or 0)
+    day_active_hours = int((day or {}).get("active_hours") or 0)
+    baseline_orders = sorted(int(r.get("completed_orders") or 0) for r in baseline_rows)
+    baseline_revenue = sorted(int(r.get("completed_revenue_cents") or 0) for r in baseline_rows)
+    baseline_hours = sorted(int(r.get("active_hours") or 0) for r in baseline_rows)
+
+    def _median(vals: list[int]) -> float | None:
+        if not vals:
+            return None
+        n = len(vals)
+        mid = n // 2
+        if n % 2 == 1:
+            return float(vals[mid])
+        return (vals[mid - 1] + vals[mid]) / 2.0
+
+    med_orders = _median(baseline_orders)
+    med_revenue = _median(baseline_revenue)
+    med_hours = _median(baseline_hours)
+
+    partial_signals = []
+    if med_orders and day_completed_orders < max(10, round(med_orders * 0.35)):
+        partial_signals.append("orders_below_35pct_baseline")
+    if med_revenue and day_revenue < max(50_00, round(med_revenue * 0.35)):
+        partial_signals.append("revenue_below_35pct_baseline")
+    if med_hours and day_active_hours < max(3, round(med_hours * 0.45)):
+        partial_signals.append("active_hours_below_45pct_baseline")
+
+    suspected_partial = len(partial_signals) >= 2
+    return {
+        "date": target_date.isoformat(),
+        "day": {
+            "completed_orders": day_completed_orders,
+            "completed_revenue_cents": day_revenue,
+            "active_hours": day_active_hours,
+            "total_orders": int((day or {}).get("total_orders") or 0),
+        },
+        "baseline_same_dow": {
+            "sample_days": len(baseline_rows),
+            "median_completed_orders": med_orders,
+            "median_completed_revenue_cents": med_revenue,
+            "median_active_hours": med_hours,
+        },
+        "suspected_partial_ingest": suspected_partial,
+        "signals": partial_signals,
+    }
+
+
+def apply_partial_ingest_guard(site_id: str, target_date: date) -> dict:
+    """
+    Strict guard: if a day looks partially ingested, flag and exclude from forecasts.
+    """
+    diag = get_day_ingest_diagnostics(site_id, target_date)
+    if diag["suspected_partial_ingest"]:
+        flag_id = upsert_data_quality_flag(
+            site_id=site_id,
+            flag_date=target_date,
+            flag_type="partial_ingest",
+            severity="high",
+            source="system",
+            reason="Day appears partially ingested vs same-weekday baseline.",
+            metadata=diag,
+        )
+        return {"status": "flagged", "flag_id": flag_id, "diagnostics": diag}
+
+    resolved = resolve_data_quality_flag(site_id, target_date, "partial_ingest", source="system")
+    return {"status": "clear", "resolved": resolved, "diagnostics": diag}
+
+
+# ============================================================
+# Reliability Observability
+# ============================================================
+
+
+def _ensure_pipeline_runs_table(conn) -> None:
+    """Backwards-safe migration for pipeline run observability."""
+    conn.execute(
+        _text(
+            """
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                run_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                site_id UUID REFERENCES sites(site_id),
+                job_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ,
+                duration_ms INT,
+                result_json JSONB,
+                error_text TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_started
+            ON pipeline_runs(site_id, started_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_job_started
+            ON pipeline_runs(site_id, job_name, started_at DESC)
+            """
+        )
+    )
+
+
+def store_pipeline_run(
+    site_id: str,
+    job_name: str,
+    status: str,
+    started_at: Optional[datetime] = None,
+    finished_at: Optional[datetime] = None,
+    result: Optional[dict] = None,
+    error_text: Optional[str] = None,
+) -> str:
+    """Persist a scheduler/manual pipeline run status row."""
+    started = started_at or datetime.utcnow()
+    finished = finished_at
+    duration_ms = None
+    if started and finished:
+        duration_ms = max(0, round((finished - started).total_seconds() * 1000))
+
+    with engine.connect() as conn:
+        _ensure_pipeline_runs_table(conn)
+        run_id = conn.execute(
+            _text(
+                """
+                INSERT INTO pipeline_runs
+                    (site_id, job_name, status, started_at, finished_at, duration_ms, result_json, error_text)
+                VALUES
+                    (:sid, :job, :status, :started, :finished, :dur, :result, :err)
+                RETURNING run_id
+                """
+            ),
+            {
+                "sid": site_id,
+                "job": job_name,
+                "status": status,
+                "started": started,
+                "finished": finished,
+                "dur": duration_ms,
+                "result": _json_dumps(result) if result is not None else None,
+                "err": error_text,
+            },
+        ).scalar()
+        conn.commit()
+
+    return str(run_id)
+
+
+def get_recent_pipeline_runs(site_id: str, limit: int = 30, job_name: Optional[str] = None) -> list[dict]:
+    """Get recent pipeline run rows for operator/debug visibility."""
+    lim = max(1, min(limit, 200))
+    with engine.connect() as conn:
+        _ensure_pipeline_runs_table(conn)
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    run_id, site_id, job_name, status, started_at, finished_at,
+                    duration_ms, result_json, error_text, created_at
+                FROM pipeline_runs
+                WHERE site_id = :sid
+                  AND (:job_name IS NULL OR job_name = :job_name)
+                ORDER BY started_at DESC
+                LIMIT :lim
+                """
+            ),
+            {"sid": site_id, "job_name": job_name, "lim": lim},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
+    """Summarize run success/failed/skipped rates for recent scheduler reliability."""
+    window_hours = max(1, min(hours, 24 * 30))
+    with engine.connect() as conn:
+        _ensure_pipeline_runs_table(conn)
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    job_name,
+                    COUNT(*) AS total_runs,
+                    COUNT(*) FILTER (WHERE status = 'ok') AS ok_runs,
+                    COUNT(*) FILTER (WHERE status = 'error') AS error_runs,
+                    COUNT(*) FILTER (WHERE status = 'skipped') AS skipped_runs,
+                    MAX(started_at) AS last_started_at
+                FROM pipeline_runs
+                WHERE site_id = :sid
+                  AND started_at >= (NOW() - (:h * INTERVAL '1 hour'))
+                GROUP BY job_name
+                ORDER BY job_name
+                """
+            ),
+            {"sid": site_id, "h": window_hours},
+        ).mappings().all()
+
+    components = []
+    totals = {"total_runs": 0, "ok_runs": 0, "error_runs": 0, "skipped_runs": 0}
+    for r in rows:
+        total = int(r.get("total_runs") or 0)
+        ok_runs = int(r.get("ok_runs") or 0)
+        error_runs = int(r.get("error_runs") or 0)
+        skipped_runs = int(r.get("skipped_runs") or 0)
+        totals["total_runs"] += total
+        totals["ok_runs"] += ok_runs
+        totals["error_runs"] += error_runs
+        totals["skipped_runs"] += skipped_runs
+        success_rate = round(ok_runs / total, 3) if total > 0 else None
+        components.append(
+            {
+                "job_name": r.get("job_name"),
+                "total_runs": total,
+                "ok_runs": ok_runs,
+                "error_runs": error_runs,
+                "skipped_runs": skipped_runs,
+                "success_rate": success_rate,
+                "last_started_at": str(r.get("last_started_at")) if r.get("last_started_at") else None,
+            }
+        )
+
+    overall_success = (
+        round(totals["ok_runs"] / totals["total_runs"], 3)
+        if totals["total_runs"] > 0
+        else None
+    )
+    status = "green"
+    if totals["error_runs"] > 0:
+        status = "yellow"
+    if totals["error_runs"] >= 3:
+        status = "red"
+
+    return {
+        "window_hours": window_hours,
+        "status": status,
+        "overall_success_rate": overall_success,
+        **totals,
+        "components": components,
+    }
+
+
+def _freshness_component(latest: Optional[date], max_green_days: int, max_yellow_days: int) -> tuple[str, Optional[int]]:
+    if latest is None:
+        return "red", None
+    age_days = max(0, (date.today() - latest).days)
+    if age_days <= max_green_days:
+        return "green", age_days
+    if age_days <= max_yellow_days:
+        return "yellow", age_days
+    return "red", age_days
+
+
+def get_data_health(site_id: str) -> dict:
+    """
+    Compute per-source data trust status and overall health score.
+    Used as a gate for recommendation confidence.
+    """
+    with engine.connect() as conn:
+        _ensure_data_quality_flags_table(conn)
+        # Square/orders freshness + today volume.
+        orders_row = conn.execute(
+            _text(
+                """
+                SELECT
+                    MAX(closed_at)::date AS latest_date,
+                    COUNT(*) FILTER (WHERE DATE(closed_at) = CURRENT_DATE) AS today_orders
+                FROM orders_raw
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+        # Deputy roster freshness + next 14-day coverage.
+        deputy_row = conn.execute(
+            _text(
+                """
+                SELECT
+                    MAX(shift_date) AS latest_date,
+                    COUNT(*) FILTER (WHERE shift_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days') AS next_14d_shifts
+                FROM deputy_rosters
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+        # Profitability freshness.
+        pnl_row = conn.execute(
+            _text(
+                """
+                SELECT MAX(profit_date) AS latest_date
+                FROM daily_profitability
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+        # Prediction freshness.
+        pred_row = conn.execute(
+            _text(
+                """
+                SELECT MAX(forecast_date) AS latest_date
+                FROM predictions
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+        # Xero connection + cost freshness.
+        xero_row = conn.execute(
+            _text(
+                """
+                SELECT
+                    EXISTS(SELECT 1 FROM xero_tokens xt WHERE xt.site_id = :sid) AS connected,
+                    COUNT(*) FILTER (WHERE source = 'xero') AS xero_cost_items,
+                    MAX(updated_at)::date FILTER (WHERE source = 'xero') AS xero_latest_date
+                FROM item_costs
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+        quality_flags = conn.execute(
+            _text(
+                """
+                SELECT flag_date, flag_type, severity, source, reason
+                FROM data_quality_flags
+                WHERE site_id = :sid
+                  AND active = TRUE
+                  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')
+                  AND flag_date >= (CURRENT_DATE - INTERVAL '14 days')
+                ORDER BY flag_date DESC
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().all()
+
+    components = []
+
+    square_latest = orders_row.get("latest_date") if orders_row else None
+    square_status, square_age = _freshness_component(square_latest, max_green_days=1, max_yellow_days=2)
+    components.append(
+        {
+            "source": "square_orders",
+            "status": square_status,
+            "latest_date": str(square_latest) if square_latest else None,
+            "age_days": square_age,
+            "today_orders": int((orders_row or {}).get("today_orders") or 0),
+        }
+    )
+
+    deputy_latest = deputy_row.get("latest_date") if deputy_row else None
+    deputy_status = "green" if deputy_latest and deputy_latest >= date.today() else "yellow"
+    if deputy_latest is None:
+        deputy_status = "red"
+    components.append(
+        {
+            "source": "deputy_rosters",
+            "status": deputy_status,
+            "latest_date": str(deputy_latest) if deputy_latest else None,
+            "next_14d_shifts": int((deputy_row or {}).get("next_14d_shifts") or 0),
+        }
+    )
+
+    pnl_latest = pnl_row.get("latest_date") if pnl_row else None
+    pnl_status, pnl_age = _freshness_component(pnl_latest, max_green_days=1, max_yellow_days=2)
+    components.append(
+        {
+            "source": "daily_profitability",
+            "status": pnl_status,
+            "latest_date": str(pnl_latest) if pnl_latest else None,
+            "age_days": pnl_age,
+        }
+    )
+
+    pred_latest = pred_row.get("latest_date") if pred_row else None
+    pred_status, pred_age = _freshness_component(pred_latest, max_green_days=1, max_yellow_days=2)
+    components.append(
+        {
+            "source": "predictions",
+            "status": pred_status,
+            "latest_date": str(pred_latest) if pred_latest else None,
+            "age_days": pred_age,
+        }
+    )
+
+    xero_connected = bool((xero_row or {}).get("connected"))
+    xero_latest = (xero_row or {}).get("xero_latest_date")
+    xero_items = int((xero_row or {}).get("xero_cost_items") or 0)
+    if not xero_connected:
+        xero_status = "yellow"
+        xero_age = None
+    else:
+        xero_status, xero_age = _freshness_component(xero_latest, max_green_days=7, max_yellow_days=14)
+        if xero_items <= 0:
+            xero_status = "yellow"
+    components.append(
+        {
+            "source": "xero_cogs",
+            "status": xero_status,
+            "connected": xero_connected,
+            "latest_date": str(xero_latest) if xero_latest else None,
+            "age_days": xero_age,
+            "xero_cost_items": xero_items,
+        }
+    )
+
+    if quality_flags:
+        components.append(
+            {
+                "source": "data_quality_flags",
+                "status": "red",
+                "active_flags": [dict(r) for r in quality_flags],
+            }
+        )
+    else:
+        components.append(
+            {
+                "source": "data_quality_flags",
+                "status": "green",
+                "active_flags": [],
+            }
+        )
+
+    score_map = {"green": 1.0, "yellow": 0.5, "red": 0.0}
+    component_score = round(sum(score_map[c["status"]] for c in components) / len(components), 3) if components else 0.0
+    overall_status = "green"
+    if any(c["status"] == "red" for c in components):
+        overall_status = "red"
+    elif any(c["status"] == "yellow" for c in components):
+        overall_status = "yellow"
+
+    return {
+        "site_id": site_id,
+        "as_of": datetime.utcnow().isoformat(),
+        "status": overall_status,
+        "score": component_score,
+        "components": components,
+    }
 
 
 # ============================================================

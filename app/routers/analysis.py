@@ -6,10 +6,18 @@ from app.dependencies import get_validated_site
 from analysis.accuracy import get_rolling_accuracy, get_adoption_metrics
 from analysis.next_actions import generate_next_actions, persist_next_actions
 from analysis.shift_optimizer import optimize_shifts, optimize_shifts_range
+from analysis.workflow import analyze_workflow, generate_roster_change_plan
 from analysis.reporting import generate_weekly_review, generate_weekly_roi_report
 from data.storage import (
+    get_day_ingest_diagnostics,
+    get_data_quality_flags,
     backfill_realized_impacts,
+    resolve_data_quality_flag,
+    upsert_data_quality_flag,
+    get_data_health,
     get_daily_efficiency_snapshot,
+    get_pipeline_health,
+    get_recent_pipeline_runs,
     get_staffing_variance_intervals,
 )
 
@@ -85,6 +93,163 @@ def daily_efficiency(
     return get_daily_efficiency_snapshot(
         site_id=site["site_id"],
         target_date=target_date or date.today(),
+    )
+
+
+@router.get("/data-health")
+def data_health(site: dict = Depends(get_validated_site)):
+    return get_data_health(site_id=site["site_id"])
+
+
+@router.get("/pipeline-runs")
+def pipeline_runs(
+    site: dict = Depends(get_validated_site),
+    limit: int = Query(default=30, ge=1, le=200),
+    job_name: Optional[str] = Query(default=None),
+):
+    return {
+        "site_id": site["site_id"],
+        "runs": get_recent_pipeline_runs(
+            site_id=site["site_id"],
+            limit=limit,
+            job_name=job_name,
+        ),
+    }
+
+
+@router.get("/pipeline-health")
+def pipeline_health(
+    site: dict = Depends(get_validated_site),
+    hours: int = Query(default=24, ge=1, le=24 * 30),
+):
+    return get_pipeline_health(site_id=site["site_id"], hours=hours)
+
+
+@router.get("/data-quality/day-diagnostics")
+def data_quality_day_diagnostics(
+    site: dict = Depends(get_validated_site),
+    target_date: Optional[date] = Query(default=None),
+):
+    return get_day_ingest_diagnostics(site["site_id"], target_date or date.today())
+
+
+@router.get("/data-quality/flags")
+def data_quality_flags(
+    site: dict = Depends(get_validated_site),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    active_only: bool = Query(default=True),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    return {
+        "site_id": site["site_id"],
+        "flags": get_data_quality_flags(
+            site_id=site["site_id"],
+            start_date=start_date,
+            end_date=end_date,
+            active_only=active_only,
+            limit=limit,
+        ),
+    }
+
+
+@router.post("/data-quality/flags/manual-exclude")
+def add_manual_forecast_exclusion(
+    site: dict = Depends(get_validated_site),
+    flag_date: date = Query(...),
+    reason: str = Query(default="Manually excluded from forecast baseline"),
+):
+    flag_id = upsert_data_quality_flag(
+        site_id=site["site_id"],
+        flag_date=flag_date,
+        flag_type="manual_exclude_forecast",
+        severity="high",
+        source="manual",
+        reason=reason,
+        metadata={"set_via": "api"},
+    )
+    return {"status": "ok", "flag_id": flag_id, "flag_date": flag_date.isoformat()}
+
+
+@router.delete("/data-quality/flags/manual-exclude")
+def remove_manual_forecast_exclusion(
+    site: dict = Depends(get_validated_site),
+    flag_date: date = Query(...),
+):
+    resolved = resolve_data_quality_flag(
+        site_id=site["site_id"],
+        flag_date=flag_date,
+        flag_type="manual_exclude_forecast",
+        source="manual",
+    )
+    return {"status": "ok", "resolved": resolved, "flag_date": flag_date.isoformat()}
+
+
+@router.post("/data-quality/flags/partial-ingest")
+def add_partial_ingest_flag(
+    site: dict = Depends(get_validated_site),
+    flag_date: date = Query(...),
+    reason: str = Query(default="Manual partial-ingest flag"),
+):
+    flag_id = upsert_data_quality_flag(
+        site_id=site["site_id"],
+        flag_date=flag_date,
+        flag_type="partial_ingest",
+        severity="high",
+        source="manual",
+        reason=reason,
+        metadata={"set_via": "api"},
+    )
+    return {"status": "ok", "flag_id": flag_id, "flag_date": flag_date.isoformat()}
+
+
+@router.delete("/data-quality/flags/partial-ingest")
+def remove_partial_ingest_flag(
+    site: dict = Depends(get_validated_site),
+    flag_date: date = Query(...),
+):
+    resolved = resolve_data_quality_flag(
+        site_id=site["site_id"],
+        flag_date=flag_date,
+        flag_type="partial_ingest",
+        source="manual",
+    )
+    # Also clear system flag if operator has verified day integrity.
+    resolved += resolve_data_quality_flag(
+        site_id=site["site_id"],
+        flag_date=flag_date,
+        flag_type="partial_ingest",
+        source="system",
+    )
+    return {"status": "ok", "resolved": resolved, "flag_date": flag_date.isoformat()}
+
+
+@router.get("/workflow")
+def workflow(
+    site: dict = Depends(get_validated_site),
+    target_date: Optional[date] = Query(default=None),
+):
+    return analyze_workflow(site_id=site["site_id"], target_date=target_date or date.today())
+
+
+@router.get("/workflow/roster-plan")
+def workflow_roster_plan(
+    site: dict = Depends(get_validated_site),
+    start_date: Optional[date] = Query(default=None),
+    days: int = Query(default=14, ge=7, le=56),
+    target_wu_per_person: float = Query(default=3.0, ge=1.5, le=6.0),
+    min_shift_hours: int = Query(default=3, ge=2, le=8),
+    max_shift_hours: int = Query(default=9, ge=4, le=12),
+    base_floor_staff: int = Query(default=1, ge=0, le=3),
+):
+    return generate_roster_change_plan(
+        site_id=site["site_id"],
+        start_date=start_date or date.today(),
+        days=days,
+        target_wu_per_person=target_wu_per_person,
+        min_shift_hours=min_shift_hours,
+        max_shift_hours=max_shift_hours,
+        base_floor_staff=base_floor_staff,
     )
 
 

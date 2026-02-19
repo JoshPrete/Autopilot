@@ -472,6 +472,41 @@ body {
   color: var(--muted);
 }
 
+.status-green {
+  background: rgba(111, 207, 151, 0.15);
+  color: var(--success);
+}
+
+.status-yellow {
+  background: rgba(226, 177, 74, 0.15);
+  color: var(--accent);
+}
+
+.status-red {
+  background: rgba(255, 140, 140, 0.15);
+  color: var(--danger);
+}
+
+.status-ok {
+  background: rgba(111, 207, 151, 0.15);
+  color: var(--success);
+}
+
+.status-error {
+  background: rgba(255, 140, 140, 0.15);
+  color: var(--danger);
+}
+
+.status-skipped {
+  background: rgba(154, 164, 178, 0.15);
+  color: var(--muted);
+}
+
+.status-no_prediction {
+  background: rgba(154, 164, 178, 0.15);
+  color: var(--muted);
+}
+
 /* --- Daily Efficiency --- */
 .efficiency-summary {
   display: flex;
@@ -525,6 +560,13 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.quality-flags-signals {
+  margin: 8px 0 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* --- Recommendations Log --- */

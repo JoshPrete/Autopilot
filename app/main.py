@@ -2,7 +2,7 @@ import logging
 import csv
 import json
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -46,6 +46,45 @@ def _resolve_site_id() -> tuple[str, str] | None:
     return None
 
 
+def _derive_run_status(result: dict | None, fallback: str = "ok") -> str:
+    if not isinstance(result, dict):
+        return fallback
+    step_status = (result.get("status") or "").lower()
+    if step_status in ("error", "failed"):
+        return "error"
+    if step_status in ("skipped", "no_data", "dry_run"):
+        return "skipped"
+    if step_status == "ok":
+        return "ok"
+    return fallback
+
+
+def _record_pipeline_run(
+    site_id: str,
+    job_name: str,
+    started_at: datetime,
+    result: dict | None = None,
+    error_text: str | None = None,
+    status: str | None = None,
+) -> None:
+    """Best-effort scheduler run observability."""
+    from data.storage import store_pipeline_run
+
+    final_status = status or _derive_run_status(result, fallback="ok")
+    try:
+        store_pipeline_run(
+            site_id=site_id,
+            job_name=job_name,
+            status=final_status,
+            started_at=started_at,
+            finished_at=datetime.utcnow(),
+            result=result,
+            error_text=error_text,
+        )
+    except Exception:
+        logger.exception("Failed to record pipeline run (%s)", job_name)
+
+
 def scheduled_ingest():
     """5:00pm AEST — Ingest today's orders from Square."""
     from scripts.daily_autopilot import step_ingest
@@ -54,12 +93,25 @@ def scheduled_ingest():
         logger.warning("Scheduled ingest skipped: no site configured")
         return
     site_id, site_name = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     logger.info("=== SCHEDULED INGEST: %s (%s) ===", site_name, date.today())
     try:
         result = step_ingest(site_id, date.today())
         logger.info("Scheduled ingest complete: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled ingest failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="ingest",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_deputy():
@@ -69,11 +121,24 @@ def scheduled_deputy():
     if not site:
         return
     site_id, _ = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     try:
         result = step_deputy(site_id, date.today())
         logger.info("Scheduled deputy sync: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled deputy sync failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="deputy",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_profitability():
@@ -83,11 +148,24 @@ def scheduled_profitability():
     if not site:
         return
     site_id, _ = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     try:
         result = step_profitability(site_id, date.today())
         logger.info("Scheduled profitability: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled profitability failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="profitability",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_xero_sync():
@@ -98,15 +176,29 @@ def scheduled_xero_sync():
     if not site:
         return
     site_id, _ = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
 
     try:
         if not is_xero_configured(site_id):
             logger.info("Scheduled Xero sync skipped: Xero not connected for site %s", site_id)
+            result = {"status": "skipped", "reason": "not_configured"}
             return
         result = sync_xero_bills(site_id, days_back=7)
         logger.info("Scheduled Xero sync: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled Xero sync failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="xero",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_predict():
@@ -117,13 +209,26 @@ def scheduled_predict():
         logger.warning("Scheduled predict skipped: no site configured")
         return
     site_id, site_name = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     tomorrow = date.today() + timedelta(days=1)
     logger.info("=== SCHEDULED PREDICT: %s (for %s) ===", site_name, tomorrow)
     try:
         result = step_predict(site_id, site_name, date.today())
         logger.info("Scheduled predict complete: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled predict failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="predict",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_intelligence():
@@ -134,11 +239,24 @@ def scheduled_intelligence():
         logger.warning("Scheduled intelligence skipped: no site configured")
         return
     site_id, site_name = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     try:
         result = run_intelligence_cycle(site_id, site_name, date.today())
         logger.info("Scheduled intelligence cycle: %s", result)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled intelligence cycle failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="intelligence",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_weekly_roi():
@@ -152,14 +270,28 @@ def scheduled_weekly_roi():
         return
 
     site_id, site_name = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     try:
         report = generate_weekly_roi_report(site_id=site_id, site_name=site_name)
         sms_text = format_weekly_roi_sms(report)
         sms_results = send_to_manager(site_id, sms_text)
         delivered = sum(1 for r in sms_results if r.get("delivered"))
+        result = {"status": "ok", "delivered": delivered, "total": len(sms_results)}
         logger.info("Scheduled weekly ROI SMS: %d/%d delivered", delivered, len(sms_results))
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled weekly ROI failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="weekly_roi",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 def scheduled_weekly_kpi_snapshot():
@@ -172,6 +304,9 @@ def scheduled_weekly_kpi_snapshot():
         return
 
     site_id, site_name = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
     try:
         snapshot = generate_pilot_kpi_snapshot(site_id=site_id, site_name=site_name)
 
@@ -207,9 +342,20 @@ def scheduled_weekly_kpi_snapshot():
                 writer.writeheader()
             writer.writerow(row)
 
+        result = {"status": "ok", "json_path": str(json_path), "csv_path": str(csv_path)}
         logger.info("Scheduled KPI snapshot written: %s", json_path)
-    except Exception:
+    except Exception as e:
+        error_text = str(e)
         logger.exception("Scheduled KPI snapshot failed")
+    finally:
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="weekly_kpi_snapshot",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status="error" if error_text else None,
+        )
 
 
 # ============================================================

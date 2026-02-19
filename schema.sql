@@ -193,6 +193,46 @@ CREATE TABLE recommendations (
 CREATE INDEX idx_recs_site_timing ON recommendations(site_id, action_timing);
 
 -- ============================================================
+-- Pipeline Runs (scheduler/API step observability)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    run_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    job_name TEXT NOT NULL,
+    status TEXT NOT NULL, -- ok, error, skipped
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    duration_ms INT,
+    result_json JSONB,
+    error_text TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_started ON pipeline_runs(site_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_job_started ON pipeline_runs(site_id, job_name, started_at DESC);
+
+-- ============================================================
+-- Data Quality Flags (strict fail-closed controls)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS data_quality_flags (
+    flag_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID REFERENCES sites(site_id),
+    flag_date DATE NOT NULL,
+    flag_type TEXT NOT NULL, -- partial_ingest, manual_exclude_forecast
+    severity TEXT NOT NULL DEFAULT 'medium',
+    source TEXT NOT NULL DEFAULT 'system', -- system/manual
+    reason TEXT,
+    metadata JSONB,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_data_quality_unique_active
+ON data_quality_flags(site_id, flag_date, flag_type, source, active);
+CREATE INDEX IF NOT EXISTS idx_data_quality_site_date ON data_quality_flags(site_id, flag_date DESC);
+
+-- ============================================================
 -- Adoption Logs (Daily feedback)
 -- ============================================================
 CREATE TABLE adoption_logs (

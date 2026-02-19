@@ -47,6 +47,8 @@ from config.settings import settings
 from data.ingestion import SquareIngestion, parse_orders
 from data.processing import process_orders_batch
 from data.storage import (
+    apply_partial_ingest_guard,
+    get_data_quality_flags,
     get_site,
     get_site_by_location_id,
     store_daily_pipeline,
@@ -137,6 +139,11 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
             "items_count": summary["items_count"],
         })
 
+        # Strict data-quality guard: detect and flag likely partial ingestion days.
+        quality_guard = apply_partial_ingest_guard(site_id, run_date)
+    else:
+        quality_guard = {"status": "dry_run"}
+
     # 6. Update yesterday's accuracy (if we have actuals now)
     yesterday = run_date - timedelta(days=1)
     actual_drinks = summary["items_count"]
@@ -158,6 +165,7 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
         "items": summary["items_count"],
         "workload_units": summary["total_workload_units"],
         "storage": storage_result,
+        "quality_guard": quality_guard,
     }
 
 
@@ -304,6 +312,29 @@ def step_predict(
 
     if staff_names is None:
         staff_names = {}
+
+    # Strict fail-closed: if today's ingest is flagged partial, skip prediction.
+    active_flags = get_data_quality_flags(
+        site_id=site_id,
+        start_date=run_date,
+        end_date=run_date,
+        active_only=True,
+        limit=20,
+    )
+    blocking_flags = [f for f in active_flags if f.get("flag_type") in ("partial_ingest",)]
+    if blocking_flags:
+        reason = (
+            f"Prediction skipped for {run_date}: active data quality flag(s) "
+            + ", ".join(f"{f.get('flag_type')}[{f.get('severity')}]" for f in blocking_flags)
+        )
+        logger.error(reason)
+        if not dry_run:
+            send_system_alert(
+                site_id,
+                "prediction_blocked_data_quality",
+                error=reason,
+            )
+        return {"status": "skipped", "reason": "data_quality_flag", "flags": blocking_flags}
 
     # 1. Generate prediction
     prediction = generate_prediction(

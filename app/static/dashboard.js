@@ -350,6 +350,12 @@ function fmtMoney(cents) {
   return `$${Math.round(cents / 100).toLocaleString()}`;
 }
 
+function fmtSignedMoney(cents) {
+  if (cents == null) return "--";
+  const sign = cents > 0 ? "+" : "";
+  return `${sign}$${Math.round(cents / 100).toLocaleString()}`;
+}
+
 function renderDailyEfficiency(data) {
   const el = $("#daily-efficiency-content");
   if (!data || !data.summary) {
@@ -468,6 +474,208 @@ function renderNextActions(data) {
   el.innerHTML = html;
 }
 
+function renderRosterPlan(data) {
+  const el = $("#roster-plan-content");
+  if (!data || !Array.isArray(data.days_plan) || data.days_plan.length === 0) {
+    el.innerHTML = '<div class="no-data">No roster plan available yet.</div>';
+    return;
+  }
+
+  const summary = data.summary || {};
+  const rows = data.days_plan || [];
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip">Days with predictions: ${summary.days_with_predictions ?? "--"}</span>
+      <span class="staffing-chip">Days without predictions: ${summary.days_without_predictions ?? "--"}</span>
+      <span class="staffing-chip">Window: ${data.start_date || "--"} (+${data.days || "--"}d)</span>
+    </div>
+    <table class="staffing-table">
+      <thead>
+        <tr><th>Date</th><th>Mode</th><th>Shifts</th><th>Hours</th><th>Labor Delta</th><th>Roles</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const row of rows) {
+    const roles = Array.isArray(row.role_assignments)
+      ? row.role_assignments.slice(0, 4).map((r) => `${r.role}:${r.zone}`).join(", ")
+      : "--";
+    const status = row.status || "unknown";
+    html += `
+      <tr>
+        <td>${row.date || "--"}</td>
+        <td>${row.workflow_mode || "--"}</td>
+        <td>${row.recommended_shift_count ?? "--"}</td>
+        <td>${row.recommended_total_hours != null ? row.recommended_total_hours : "--"}</td>
+        <td>${fmtSignedMoney(row.estimated_labor_delta_cents)}</td>
+        <td>${roles}</td>
+        <td><span class="status-pill status-${status}">${status}</span></td>
+      </tr>
+    `;
+  }
+
+  html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
+function renderDataHealth(data) {
+  const el = $("#data-health-content");
+  if (!data || !Array.isArray(data.components)) {
+    el.innerHTML = '<div class="no-data">Data health unavailable.</div>';
+    return;
+  }
+
+  const badge = (status) => `<span class="status-pill status-${status}">${status}</span>`;
+  const score = data.score != null ? `${Math.round(data.score * 100)}%` : "--";
+
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip">Overall: ${badge(data.status || "unknown")}</span>
+      <span class="staffing-chip">Health Score: ${score}</span>
+      <span class="staffing-chip">As of: ${data.as_of ? fmtTime(data.as_of) : "--"}</span>
+    </div>
+    <table class="staffing-table">
+      <thead>
+        <tr><th>Source</th><th>Status</th><th>Latest</th><th>Age (days)</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+  `;
+
+  for (const c of data.components) {
+    let notes = "";
+    if (c.source === "square_orders") notes = `today_orders=${c.today_orders ?? 0}`;
+    if (c.source === "deputy_rosters") notes = `next_14d_shifts=${c.next_14d_shifts ?? 0}`;
+    if (c.source === "xero_cogs") notes = `connected=${c.connected ? "yes" : "no"}, xero_items=${c.xero_cost_items ?? 0}`;
+    if (c.source === "data_quality_flags") notes = `active_flags=${Array.isArray(c.active_flags) ? c.active_flags.length : 0}`;
+    html += `
+      <tr>
+        <td>${c.source}</td>
+        <td>${badge(c.status || "unknown")}</td>
+        <td>${c.latest_date || "--"}</td>
+        <td>${c.age_days != null ? c.age_days : "--"}</td>
+        <td>${notes || "--"}</td>
+      </tr>
+    `;
+  }
+
+  html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
+function renderDataQualityFlags(flagsPayload, diagnosticsPayload) {
+  const el = $("#data-quality-flags-content");
+  const flags = Array.isArray(flagsPayload?.flags) ? flagsPayload.flags : [];
+  const diag = diagnosticsPayload || {};
+  const suspected = !!diag.suspected_partial_ingest;
+  const signals = Array.isArray(diag.signals) ? diag.signals : [];
+
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip">Today diagnostics: <span class="status-pill status-${suspected ? "red" : "green"}">${suspected ? "suspected_partial" : "clear"}</span></span>
+      <span class="staffing-chip">Today completed orders: ${diag?.day?.completed_orders ?? "--"}</span>
+      <span class="staffing-chip">Today revenue: ${fmtMoney(diag?.day?.completed_revenue_cents)}</span>
+      <span class="staffing-chip">Signals: ${signals.length}</span>
+    </div>
+  `;
+
+  if (signals.length > 0) {
+    html += `<div class="quality-flags-signals">${signals.map((s) => `<span class="status-pill status-yellow">${s}</span>`).join(" ")}</div>`;
+  }
+
+  if (flags.length === 0) {
+    html += '<div class="no-data">No active data quality flags.</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  if (flags.some((f) => f.flag_type === "partial_ingest")) {
+    html += '<div class="no-data">If you have verified this day was complete, clear the flag via API: DELETE /analysis/data-quality/flags/partial-ingest?flag_date=YYYY-MM-DD</div>';
+  }
+
+  html += `
+    <table class="staffing-table">
+      <thead><tr><th>Date</th><th>Type</th><th>Severity</th><th>Source</th><th>Reason</th></tr></thead>
+      <tbody>
+        ${flags.map((f) => `
+          <tr>
+            <td>${f.flag_date || "--"}</td>
+            <td>${f.flag_type || "--"}</td>
+            <td><span class="status-pill status-${f.severity === "high" ? "red" : "yellow"}">${f.severity || "--"}</span></td>
+            <td>${f.source || "--"}</td>
+            <td>${f.reason || "--"}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+  el.innerHTML = html;
+}
+
+function renderPipelineHealth(data, runsPayload) {
+  const el = $("#pipeline-health-content");
+  if (!data) {
+    el.innerHTML = '<div class="no-data">Pipeline health unavailable.</div>';
+    return;
+  }
+
+  const badge = (status) => `<span class="status-pill status-${status}">${status}</span>`;
+  const pct = (v) => (v == null ? "--" : `${Math.round(v * 100)}%`);
+  const runs = Array.isArray(runsPayload?.runs) ? runsPayload.runs.slice(0, 10) : [];
+
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip">Overall: ${badge(data.status || "unknown")}</span>
+      <span class="staffing-chip">Success: ${pct(data.overall_success_rate)}</span>
+      <span class="staffing-chip">Runs: ${data.total_runs ?? 0}</span>
+      <span class="staffing-chip">Errors: ${data.error_runs ?? 0}</span>
+      <span class="staffing-chip">Skipped: ${data.skipped_runs ?? 0}</span>
+    </div>
+  `;
+
+  if (Array.isArray(data.components) && data.components.length > 0) {
+    html += `
+      <table class="staffing-table">
+        <thead><tr><th>Job</th><th>Success</th><th>Runs</th><th>Errors</th><th>Last Run</th></tr></thead>
+        <tbody>
+          ${data.components.map((c) => `
+            <tr>
+              <td>${c.job_name}</td>
+              <td>${pct(c.success_rate)}</td>
+              <td>${c.total_runs}</td>
+              <td>${c.error_runs}</td>
+              <td>${c.last_started_at ? fmtTime(c.last_started_at) : "--"}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  html += `<h3 class="efficiency-subhead">Recent Runs</h3>`;
+  if (runs.length === 0) {
+    html += '<div class="no-data">No recent runs logged yet.</div>';
+  } else {
+    html += `
+      <table class="staffing-table">
+        <thead><tr><th>Time</th><th>Job</th><th>Status</th><th>Duration</th><th>Error</th></tr></thead>
+        <tbody>
+          ${runs.map((r) => `
+            <tr>
+              <td>${r.started_at ? fmtTime(r.started_at) : "--"}</td>
+              <td>${r.job_name || "--"}</td>
+              <td>${badge(r.status || "unknown")}</td>
+              <td>${r.duration_ms != null ? `${r.duration_ms}ms` : "--"}</td>
+              <td>${r.error_text || "--"}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  el.innerHTML = html;
+}
+
 // --- Main Load ---
 
 async function loadDashboard() {
@@ -555,6 +763,32 @@ async function loadDashboard() {
   fetchJSON(`${API}/analysis/recommendations/next-actions`)
     .then(renderNextActions)
     .catch(() => renderNextActions(null));
+
+  // Fetch 14-day workflow roster plan
+  fetchJSON(`${API}/analysis/workflow/roster-plan?days=14`)
+    .then(renderRosterPlan)
+    .catch(() => renderRosterPlan(null));
+
+  // Fetch data health
+  fetchJSON(`${API}/analysis/data-health`)
+    .then(renderDataHealth)
+    .catch(() => renderDataHealth(null));
+
+  // Fetch active data-quality flags + today diagnostics
+  Promise.all([
+    fetchJSON(`${API}/analysis/data-quality/flags?active_only=true&limit=100`),
+    fetchJSON(`${API}/analysis/data-quality/day-diagnostics`),
+  ])
+    .then(([flags, diag]) => renderDataQualityFlags(flags, diag))
+    .catch(() => renderDataQualityFlags(null, null));
+
+  // Fetch pipeline health + recent runs
+  Promise.all([
+    fetchJSON(`${API}/analysis/pipeline-health?hours=24`),
+    fetchJSON(`${API}/analysis/pipeline-runs?limit=20`),
+  ])
+    .then(([health, runs]) => renderPipelineHealth(health, runs))
+    .catch(() => renderPipelineHealth(null, null));
 
   // Fetch delivery log
   fetchJSON(`${API}/delivery/log?limit=10`)
