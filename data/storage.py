@@ -504,6 +504,30 @@ def get_prediction_by_id(site_id: str, prediction_id: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def store_prediction_plan_snapshot(site_id: str, prediction_id: str, plan_text: str) -> bool:
+    """
+    Persist an exact rendered tomorrow plan string onto the prediction row.
+
+    This enables deterministic regeneration by prediction_id without depending
+    on any live data lookups during re-render.
+    """
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                """
+                UPDATE predictions
+                SET forecast_data = COALESCE(forecast_data, '{}'::jsonb)
+                    || jsonb_build_object('plan_snapshot_text', :plan_text)
+                WHERE site_id = :sid
+                  AND prediction_id = :pid
+                """
+            ),
+            {"sid": site_id, "pid": prediction_id, "plan_text": plan_text},
+        )
+        conn.commit()
+        return bool(result.rowcount)
+
+
 # ============================================================
 # Recommendations
 # ============================================================
@@ -3937,25 +3961,34 @@ def get_data_quality_flags(
     limit: int = 200,
 ) -> list[dict]:
     lim = max(1, min(limit, 1000))
-    with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
-        rows = conn.execute(
-            _text(
-                """
-                SELECT
-                    flag_id, site_id, flag_date, flag_type, severity, source,
-                    reason, metadata, active, created_at, resolved_at
-                FROM data_quality_flags
-                WHERE site_id = :sid
-                  AND (:active_only = FALSE OR active = TRUE)
-                  AND (:s IS NULL OR flag_date >= :s)
-                  AND (:e IS NULL OR flag_date <= :e)
-                ORDER BY flag_date DESC, created_at DESC
-                LIMIT :lim
-                """
-            ),
-            {"sid": site_id, "active_only": active_only, "s": start_date, "e": end_date, "lim": lim},
-        ).mappings().all()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        flag_id, site_id, flag_date, flag_type, severity, source,
+                        reason, metadata, active, created_at, resolved_at
+                    FROM data_quality_flags
+                    WHERE site_id = :sid
+                      AND (:active_only = FALSE OR active = TRUE)
+                      AND (:s IS NULL OR flag_date >= :s)
+                      AND (:e IS NULL OR flag_date <= :e)
+                    ORDER BY flag_date DESC, created_at DESC
+                    LIMIT :lim
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "active_only": active_only,
+                    "s": start_date,
+                    "e": end_date,
+                    "lim": lim,
+                },
+            ).mappings().all()
+    except Exception as e:
+        logger.warning("data_quality_flags unavailable (non-fatal): %s", e)
+        return []
     return [dict(r) for r in rows]
 
 

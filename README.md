@@ -1,131 +1,109 @@
-# Clubhouse Autopilot v1.2
+# Clubhouse Autopilot (Ops Spine)
 
-Espresso-native workflow control system for Clubhouse Coffee.
+Clubhouse Autopilot is an operations pipeline for cafe decision support.
 
-Sits above Square, Deputy, and existing platforms as a **state + priority enforcement layer**, converting order flow patterns, staffing configuration, and rush pressure signals into operational prompts.
+It focuses on the daily spine:
+- ingest trading + labor + accounting data
+- compute profitability and workload pressure
+- generate tomorrow staffing/ops plan
+- deliver operator-facing alerts and plan output
 
-## Core Outputs
+Voice ordering has been removed from this repository.
 
-1. **Tomorrow Plan** - Printed sheet for bench (daily 6pm)
-2. **Shift Nudges** - SMS to manager/staff (real-time)
-3. **Weekly Ops Review** - Performance metrics (Monday 8am)
+## Requirements
 
-## Setup
-
-### Prerequisites
-
-- Python 3.10+
+- Python 3.11+
 - PostgreSQL 14+
-- Square account with API access
-- Twilio account for SMS
-- OpenWeatherMap API key
+- Square API credentials
+- Deputy credentials (optional)
+- Xero credentials (optional)
+- Twilio credentials (optional for SMS)
 
-### Installation
+## Install
 
 ```bash
-# Clone and enter project
-cd clubhouse-autopilot
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 cp .env.example .env
-# Edit .env with your credentials
-
-# Create database
-createdb clubhouse_autopilot
-psql clubhouse_autopilot < schema.sql
-
-# Verify setup
-python scripts/test_ingestion.py
 ```
 
-### Environment Variables
-
-See `.env.example` for all required variables. At minimum you need:
-
-- `SQUARE_ACCESS_TOKEN` / `SQUARE_LOCATION_ID`
-- `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_PHONE_NUMBER`
-- `DATABASE_URL`
-- `WEATHER_API_KEY`
-- `MANAGER_PHONE`
-
-## Project Structure
-
-```
-clubhouse-autopilot/
-├── config/
-│   ├── settings.py        # Environment variable loading
-│   ├── database.py        # SQLAlchemy engine + session
-│   └── constants.py       # Immutable policy values
-├── data/
-│   ├── ingestion.py       # Square API order fetching
-│   ├── processing.py      # Workload score calculation
-│   └── storage.py         # Database write operations
-├── models/
-│   ├── workload.py        # Workload engine logic
-│   ├── prediction.py      # Multi-layer forecast model
-│   └── recommendations.py # State machine + actions
-├── delivery/
-│   ├── tomorrow_plan.py   # PDF generation
-│   ├── sms_prompts.py     # SMS template library
-│   └── sender.py          # Twilio SMS dispatch
-├── analysis/
-│   ├── accuracy.py        # Prediction vs actual comparison
-│   └── reporting.py       # Weekly review generation
-├── scripts/
-│   ├── daily_autopilot.py # Main daily pipeline (6pm cron)
-│   └── weekly_review.py   # Weekly report (Monday 8am cron)
-├── tests/
-├── schema.sql             # PostgreSQL database schema
-├── requirements.txt       # Python dependencies
-├── .env.example           # Environment variable template
-└── README.md
-```
-
-## Daily Operations
-
-| Time | Job | Description |
-|------|-----|-------------|
-| 5:00pm | `ingest_daily.sh` | Pull today's Square orders |
-| 6:00pm | `generate_plan.sh` | Generate Tomorrow Plan + SMS |
-| 8:30am | `rush_reminder.sh` | Pre-rush SMS reminder |
-| Monday 8am | `weekly_review.sh` | Weekly performance report |
-
-## CLI Usage
+Create schema:
 
 ```bash
-# Full pipeline (default)
-python scripts/daily_autopilot.py --date 2026-02-20
-
-# Individual steps
-python scripts/daily_autopilot.py --step ingest --date 2026-02-20
-python scripts/daily_autopilot.py --step predict --date 2026-02-20
-python scripts/daily_autopilot.py --step intelligence --date 2026-02-20
-
-# Regenerate tomorrow plan from stored prediction (no recomputation)
-python scripts/daily_autopilot.py --step replan --date 2026-02-20
-python scripts/daily_autopilot.py --step replan --date 2026-02-20 --staff-names "P1:Sarah,P2:Tom"
-
-# Dry run (no SMS, no DB writes)
-python scripts/daily_autopilot.py --date 2026-02-20 --dry-run
+psql "$DATABASE_URL" -f schema.sql
 ```
 
-Steps: `ingest` → `deputy` → `xero` → `profitability` → `predict` → `intelligence` | `replan` (standalone)
+## Daily Runner
 
-## Spec Reference
+Show CLI:
 
-Full specification: `Clubhouse Autopilot Spec v1.2 PRODUCTION.pdf`
+```bash
+.venv/bin/python scripts/daily_autopilot.py --help
+```
 
----
+Run full pipeline:
 
-Clubhouse Autopilot v1.2 | Clubhouse Coffee, Nundah QLD
+```bash
+.venv/bin/python scripts/daily_autopilot.py --site-id <SITE_UUID> --step all
+```
 
----
+Run dry-run:
 
-> Voice ordering POC has been moved to a separate repository.
+```bash
+.venv/bin/python scripts/daily_autopilot.py --site-id <SITE_UUID> --step all --dry-run
+```
+
+## Deterministic Tomorrow Plan Regeneration
+
+Regenerate a previously stored tomorrow plan from a prediction record without recalculating forecast/recommendations:
+
+```bash
+.venv/bin/python scripts/daily_autopilot.py \
+  --site-id <SITE_UUID> \
+  --step predict \
+  --prediction-id <PREDICTION_UUID>
+```
+
+Behavior:
+- uses stored `predictions` row by `prediction_id`
+- renders plan deterministically from persisted forecast/rush data
+- does not re-run model forecast or recommendation generation
+
+## Operator Data-Quality Guard
+
+If ingest is flagged partial, the predict step is blocked and emits:
+- impacted site and date
+- blocking reason(s)
+- copy/paste rerun commands
+- explicit note that downstream plan/SMS/intelligence were skipped
+
+Alert type used for manager escalation: `prediction_blocked_data_quality`.
+
+## Formatting and Lint
+
+Use helper scripts:
+
+```bash
+./scripts/format.sh
+./scripts/lint.sh
+```
+
+Or Make targets:
+
+```bash
+make format
+make lint
+```
+
+Configured in `pyproject.toml`:
+- Black (formatting)
+- Ruff (lint)
+
+## Key Paths
+
+- `scripts/daily_autopilot.py` - primary daily pipeline runner
+- `data/storage.py` - persistence + data quality controls
+- `delivery/tomorrow_plan.py` - plan rendering
+- `delivery/sender.py` - SMS dispatch and system alerts
+- `schema.sql` - database schema
