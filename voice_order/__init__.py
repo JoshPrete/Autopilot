@@ -1,1 +1,0 @@
-"""Voice ordering sidecar service."""
