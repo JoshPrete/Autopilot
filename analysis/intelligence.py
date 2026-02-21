@@ -214,6 +214,7 @@ def gather_signals(site_id: str, cycle_date: date) -> list[dict]:
         detect_prediction_signals,
         detect_revenue_signals,
         detect_profitability_signals,
+        detect_inventory_signals,
     ]:
         try:
             signals += detector(site_id, cycle_date)
@@ -1067,6 +1068,84 @@ def detect_profitability_signals(
     return signals
 
 
+def detect_inventory_signals(
+    site_id: str, cycle_date: date, lookback_days: int = 21
+) -> list[dict]:
+    """
+    Detect operational stock risks using:
+      effective_on_hand = latest_count + receipts - consumed_sales
+
+    Produces actionable restock signals for low/out-of-stock and reorder-soon states.
+    """
+    from data.storage import get_inventory_alerts
+
+    signals = []
+    try:
+        alerts = get_inventory_alerts(site_id, lookback_days=lookback_days, include_ok=False)
+    except Exception:
+        logger.exception("detect_inventory_signals failed")
+        return signals
+
+    for alert in alerts[:20]:
+        status = alert.get("status")
+        item_name = alert.get("item_name", "Inventory item")
+        key_base = (
+            str(alert.get("score_key") or item_name)
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+        )
+        on_hand = alert.get("effective_on_hand")
+        reorder_point = alert.get("reorder_point")
+        days_remaining = alert.get("days_remaining")
+        reorder_units = alert.get("recommended_reorder_units")
+
+        if status in ("out_of_stock", "low_stock"):
+            severity = "warning"
+            title = (
+                f"{item_name} out of stock"
+                if status == "out_of_stock"
+                else (
+                    f"{item_name} low stock "
+                    f"({round(float(on_hand or 0), 1)} remaining)"
+                )
+            )
+        elif status == "reorder_soon":
+            severity = "opportunity"
+            days_text = (
+                f"{round(float(days_remaining), 1)} days remaining"
+                if days_remaining is not None
+                else "reorder soon"
+            )
+            title = f"{item_name} nearing reorder point ({days_text})"
+        elif status == "needs_count":
+            severity = "warning"
+            title = f"{item_name} needs a physical stock count"
+        else:
+            continue
+
+        signals.append(
+            {
+                "signal_type": "operations",
+                "key": f"inventory_{status}_{key_base}",
+                "title": title,
+                "evidence": {
+                    "item_name": item_name,
+                    "status": status,
+                    "effective_on_hand": on_hand,
+                    "reorder_point": reorder_point,
+                    "recommended_reorder_units": reorder_units,
+                    "days_remaining": days_remaining,
+                    "window_days": alert.get("window_days"),
+                },
+                "severity": severity,
+                "suggested_action": "INVENTORY_RESTOCK",
+            }
+        )
+
+    return signals
+
+
 # ============================================================
 # Phase 4: Synthesize — LLM Analysis
 # ============================================================
@@ -1109,7 +1188,7 @@ def synthesize_insights(
         '- "title": concise title (under 80 chars)\n'
         '- "body": 1-3 sentence explanation with specific numbers\n'
         '- "action_type": one of "STAFFING_ADJUST", "MARGIN_ALERT", "DEMAND_SHIFT", '
-        '"PREDICTION_DRIFT", "REVENUE_INSIGHT" or null if info-only\n'
+        '"PREDICTION_DRIFT", "REVENUE_INSIGHT", "INVENTORY_RESTOCK" or null if info-only\n'
         '- "confidence": 0.0-1.0 based on evidence strength\n'
         '- "pattern_key": unique identifier like "overstaffed_tuesday_14"\n\n'
         "Rules:\n"

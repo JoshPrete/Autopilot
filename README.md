@@ -81,11 +81,6 @@ clubhouse-autopilot/
 ├── scripts/
 │   ├── daily_autopilot.py # Main daily pipeline (6pm cron)
 │   └── weekly_review.py   # Weekly report (Monday 8am cron)
-├── voice_order/
-│   ├── app.py             # FastAPI voice ordering sidecar
-│   ├── catalog.py         # Catalog index + matching
-│   ├── nlp.py             # Transcript parsing heuristics
-│   └── square_service.py  # Square Orders + Terminal API helpers
 ├── tests/
 ├── schema.sql             # PostgreSQL database schema
 ├── requirements.txt       # Python dependencies
@@ -102,6 +97,27 @@ clubhouse-autopilot/
 | 8:30am | `rush_reminder.sh` | Pre-rush SMS reminder |
 | Monday 8am | `weekly_review.sh` | Weekly performance report |
 
+## CLI Usage
+
+```bash
+# Full pipeline (default)
+python scripts/daily_autopilot.py --date 2026-02-20
+
+# Individual steps
+python scripts/daily_autopilot.py --step ingest --date 2026-02-20
+python scripts/daily_autopilot.py --step predict --date 2026-02-20
+python scripts/daily_autopilot.py --step intelligence --date 2026-02-20
+
+# Regenerate tomorrow plan from stored prediction (no recomputation)
+python scripts/daily_autopilot.py --step replan --date 2026-02-20
+python scripts/daily_autopilot.py --step replan --date 2026-02-20 --staff-names "P1:Sarah,P2:Tom"
+
+# Dry run (no SMS, no DB writes)
+python scripts/daily_autopilot.py --date 2026-02-20 --dry-run
+```
+
+Steps: `ingest` → `deputy` → `xero` → `profitability` → `predict` → `intelligence` | `replan` (standalone)
+
 ## Spec Reference
 
 Full specification: `Clubhouse Autopilot Spec v1.2 PRODUCTION.pdf`
@@ -112,34 +128,4 @@ Clubhouse Autopilot v1.2 | Clubhouse Coffee, Nundah QLD
 
 ---
 
-## Voice Order Sidecar (POC)
-
-This repo now includes a lightweight FastAPI service that parses voice transcripts
-into candidate orders, then confirms via Square Orders API and (optionally) pushes
-a Terminal checkout for in-person payment.
-
-### Run
-
-```bash
-python scripts/voice_order_api.py
-```
-
-### Environment Variables
-
-- `SQUARE_ACCESS_TOKEN`
-- `SQUARE_LOCATION_ID`
-- `SQUARE_ENVIRONMENT` (production or sandbox)
-- `SQUARE_TERMINAL_DEVICE_ID` (optional; for checkout endpoint)
-- `SQUARE_WEBHOOK_SIGNATURE_KEY` (optional; for webhook verification)
-- `SQUARE_WEBHOOK_NOTIFICATION_URL` (optional; for webhook verification)
-- `SQUARE_SANDBOX_TEST_SOURCE_ID` (optional; defaults to `cnon:card-nonce-ok`)
-
-### Endpoints
-
-- `POST /voice/parse` — parse transcript into proposed line items
-- `POST /voice/confirm` — create Square order
-- `POST /voice/checkout` — create Terminal checkout for an order
-- `POST /webhooks/square` — receive Square webhooks (Terminal checkout updates)
-- `GET /webhooks/recent` — view last 20 webhook events
-- `POST /voice/mock-payment` — simulate a successful payment (no Square call)
-- `POST /voice/pay-sandbox` — pay an order in Square Sandbox using a test source id
+> Voice ordering POC has been moved to a separate repository.

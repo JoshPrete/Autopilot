@@ -515,6 +515,13 @@ body {
   margin-bottom: 12px;
 }
 
+.scorecard-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
 .efficiency-subhead {
   margin: 12px 0 8px;
   font-size: 13px;

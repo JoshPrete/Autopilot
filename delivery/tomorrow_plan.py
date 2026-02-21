@@ -73,6 +73,7 @@ def generate_tomorrow_plan(
 
     forecast_date_str = forecast.get("forecast_date", "")
     day_name = forecast.get("day_name", "")
+    forecast_date = None
 
     # Format the forecast date for display
     try:
@@ -98,7 +99,7 @@ def generate_tomorrow_plan(
     ))
 
     # ── Yesterday Recap ──
-    recap = get_yesterday_recap(site_id)
+    recap = get_yesterday_recap(site_id, today=forecast_date or date.today())
     if recap:
         sections.append(_yesterday_recap(recap))
 

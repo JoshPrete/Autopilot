@@ -284,6 +284,144 @@ function renderROI(data) {
   el.innerHTML = html;
 }
 
+function renderBottomLineScorecard(data) {
+  const el = $("#bottom-line-scorecard-content");
+  if (!data || !data.kpis || !data.window) {
+    el.innerHTML = '<div class="no-data">No bottom-line scorecard data available.</div>';
+    return;
+  }
+
+  const k = data.kpis || {};
+  const t = data.trend || {};
+  const d = t.deltas || {};
+  const dirs = t.directions || {};
+  const actions = data.actions || {};
+  const ft = data.financial_truth || {};
+
+  const fmtPct = (n) => (n == null ? "--" : `${n.toFixed(1)}%`);
+  const fmtSigned = (n, suffix = "", decimals = 1) => {
+    if (n == null) return "N/A";
+    const value = Number(n);
+    if (Number.isNaN(value)) return "N/A";
+    return `${value > 0 ? "+" : ""}${value.toFixed(decimals)}${suffix}`;
+  };
+  const score = (n) => (n == null ? "--" : `${Math.round(n * 100)}%`);
+  const tone = (direction) => {
+    if (direction === "improving") return "up";
+    if (direction === "declining") return "down";
+    return "flat";
+  };
+  const typeLabel = (s) => (s || "--").replace(/_/g, " ");
+
+  let html = `
+    <div class="roi-headline">${data.headline || "Bottom-line scorecard"}</div>
+    <div class="scorecard-meta">
+      <span class="staffing-chip">Window: ${data.window.start_date || "--"} to ${data.window.end_date || "--"} (${data.window.days || "--"}d)</span>
+      <span class="staffing-chip">Compare: ${data.window.compare_days || "--"}d vs prior</span>
+      <span class="staffing-chip">Financial truth: ${ft.mode || "estimated_fallback"}</span>
+      <span class="staffing-chip">Truth coverage: ${(ft.coverage_days ?? 0)}/${(ft.window_days ?? data.window.days ?? "--")} days</span>
+      <span class="staffing-chip">Insights: ${(data.intelligence || {}).insights_generated ?? 0}</span>
+      <span class="staffing-chip">High-priority insights: ${(data.intelligence || {}).high_priority_insights ?? 0}</span>
+    </div>
+    <div class="roi-grid">
+      <div class="roi-item">
+        <div class="roi-label">Net Profit (Window)</div>
+        <div class="roi-value">
+          ${fmtMoney(k.total_net_profit_cents)}
+          <span class="roi-delta ${tone(dirs.net_profit)}">${fmtSignedMoney(d.net_profit_cents)}</span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Revenue (Window)</div>
+        <div class="roi-value">${fmtMoney(k.total_revenue_cents)}</div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Actual Incoming (Xero)</div>
+        <div class="roi-value">${fmtMoney(ft.income_cents)}</div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Actual Outgoing (Xero)</div>
+        <div class="roi-value">${fmtMoney(ft.expense_cents)}</div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Actual Net Cash (Xero)</div>
+        <div class="roi-value">${fmtMoney(ft.net_cash_cents)}</div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Net Margin</div>
+        <div class="roi-value">${fmtPct(k.net_margin_pct)}</div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Average Labor %</div>
+        <div class="roi-value">
+          ${fmtPct(k.avg_labor_pct)}
+          <span class="roi-delta ${tone(dirs.labor_pct)}">${fmtSigned(d.labor_pct_delta_pp, "pp")}</span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Revenue per Labor Hour</div>
+        <div class="roi-value">
+          ${fmtMoney(k.avg_revenue_per_labor_hour_cents)}
+          <span class="roi-delta ${tone(dirs.revenue_per_labor_hour)}">${fmtSigned(d.revenue_per_labor_hour_delta_pct, "%")}</span>
+        </div>
+      </div>
+      <div class="roi-item">
+        <div class="roi-label">Efficiency Score (Current vs Prior)</div>
+        <div class="roi-value">
+          ${score((t.current_window || {}).efficiency_score)}
+          <span class="roi-delta ${tone(dirs.efficiency_score)}">${fmtSigned(d.efficiency_score_delta_pp, "pp")}</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  html += `
+    <h3 class="efficiency-subhead">Realized Impact Attribution</h3>
+    <div class="efficiency-summary">
+      <span class="staffing-chip">Recommendations: ${actions.recommendations_generated ?? 0}</span>
+      <span class="staffing-chip">Adopted: ${actions.recommendations_adopted ?? 0}</span>
+      <span class="staffing-chip">Adoption rate: ${actions.adoption_rate != null ? `${Math.round(actions.adoption_rate * 100)}%` : "--"}</span>
+      <span class="staffing-chip">Realized actions: ${actions.realized_actions ?? 0}</span>
+      <span class="staffing-chip">Avg realized weekly profit: ${fmtMoney(actions.avg_realized_weekly_profit_delta_cents)}</span>
+      <span class="staffing-chip">Total realized weekly profit: ${fmtMoney(actions.total_realized_weekly_profit_delta_cents)}</span>
+    </div>
+  `;
+
+  const top = Array.isArray(actions.top_proven_action_types) ? actions.top_proven_action_types : [];
+  if (top.length === 0) {
+    html += '<div class="no-data">No realized action outcomes yet. Adopt and log recommendations to build attribution memory.</div>';
+  } else {
+    html += `
+      <table class="staffing-table">
+        <thead>
+          <tr>
+            <th>Action Type</th>
+            <th>Samples</th>
+            <th>Avg Weekly Profit Delta</th>
+            <th>Total Weekly Profit Delta</th>
+            <th>Labor % Delta</th>
+            <th>Rev/Labor Hr Delta</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${top.map((r) => `
+            <tr>
+              <td>${typeLabel(r.action_type)}</td>
+              <td>${r.realized_count ?? 0}</td>
+              <td>${fmtMoney(r.avg_realized_weekly_profit_delta_cents)}</td>
+              <td>${fmtMoney(r.total_realized_weekly_profit_delta_cents)}</td>
+              <td>${fmtSigned(r.avg_realized_labor_pct_delta_pp, "pp")}</td>
+              <td>${fmtSigned(r.avg_realized_rev_per_labor_hour_delta_pct, "%")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  el.innerHTML = html;
+}
+
 function renderStaffingVariance(data) {
   const el = $("#staffing-variance-content");
   if (!data || !Array.isArray(data.intervals) || data.intervals.length === 0) {
@@ -446,11 +584,34 @@ function renderDailyEfficiency(data) {
 function renderNextActions(data) {
   const el = $("#next-actions-content");
   if (!data || !Array.isArray(data.actions) || data.actions.length === 0) {
+    const gate = (data && data.summary && data.summary.proven_gate) ? data.summary.proven_gate : null;
+    if (gate && (gate.suppressed_count || 0) > 0) {
+      const blocked = Array.isArray(gate.suppressed_action_types) ? gate.suppressed_action_types.join(", ") : "--";
+      el.innerHTML = `
+        <div class="efficiency-summary">
+          <span class="staffing-chip">Proven gate suppressed: ${gate.suppressed_count}</span>
+          <span class="staffing-chip">Blocked types: ${blocked || "--"}</span>
+        </div>
+        <div class="no-data">No actionable recommendations passed the proven-impact gate for this date.</div>
+      `;
+      return;
+    }
     el.innerHTML = '<div class="no-data">No actionable recommendations yet for this date.</div>';
     return;
   }
 
-  let html = '<div class="next-actions-list">';
+  const summary = data.summary || {};
+  const gate = summary.proven_gate || {};
+  let html = `
+    <div class="efficiency-summary">
+      <span class="staffing-chip">Generated: ${summary.actions_generated ?? data.actions.length}</span>
+      <span class="staffing-chip">Phase: ${summary.optimization_phase || "--"}</span>
+      <span class="staffing-chip">Proven-gate suppressed: ${gate.suppressed_count ?? 0}</span>
+      <span class="staffing-chip">Data health: ${summary.data_health_status || "--"}</span>
+    </div>
+    ${summary.phase_reason ? `<div class="no-data">${summary.phase_reason}</div>` : ""}
+    <div class="next-actions-list">
+  `;
   for (const action of data.actions) {
     const conf = action.confidence != null ? `${Math.round(action.confidence * 100)}%` : "--";
     const uplift = fmtMoney(action.expected_weekly_profit_uplift_cents);
@@ -464,6 +625,7 @@ function renderNextActions(data) {
         <div class="next-action-metrics">
           <span class="staffing-chip">Type: ${action.action_type || "--"}</span>
           <span class="staffing-chip">Est. weekly impact: ${uplift}</span>
+          <span class="staffing-chip">Realized samples: ${action.realized_samples ?? 0}</span>
           ${action.window_start ? `<span class="staffing-chip">Window: ${fmtTime(action.window_start)}</span>` : ""}
           ${action.item ? `<span class="staffing-chip">Item: ${action.item}</span>` : ""}
         </div>
@@ -546,6 +708,7 @@ function renderDataHealth(data) {
     if (c.source === "square_orders") notes = `today_orders=${c.today_orders ?? 0}`;
     if (c.source === "deputy_rosters") notes = `next_14d_shifts=${c.next_14d_shifts ?? 0}`;
     if (c.source === "xero_cogs") notes = `connected=${c.connected ? "yes" : "no"}, xero_items=${c.xero_cost_items ?? 0}`;
+    if (c.source === "xero_financial_facts") notes = `connected=${c.connected ? "yes" : "no"}, days_14d=${c.days_14d ?? 0}`;
     if (c.source === "data_quality_flags") notes = `active_flags=${Array.isArray(c.active_flags) ? c.active_flags.length : 0}`;
     html += `
       <tr>
@@ -559,6 +722,64 @@ function renderDataHealth(data) {
   }
 
   html += "</tbody></table>";
+  el.innerHTML = html;
+}
+
+function renderInventoryAlerts(data) {
+  const el = $("#inventory-alerts-content");
+  const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
+  if (!data) {
+    el.innerHTML = '<div class="no-data">Inventory alerts unavailable.</div>';
+    return;
+  }
+
+  let html = `
+    <div class="staffing-summary">
+      <span class="staffing-chip">Alerts: ${data.alerts_total ?? alerts.length}</span>
+      <span class="staffing-chip under">Warnings: ${data.warning_count ?? 0}</span>
+      <span class="staffing-chip balance">Reorder soon: ${data.opportunity_count ?? 0}</span>
+      <span class="staffing-chip">Lookback: ${data.lookback_days ?? "--"} days</span>
+    </div>
+  `;
+
+  if (alerts.length === 0) {
+    html += '<div class="no-data">No active stock alerts. Add inventory items, usage rules, and counts to enable tracking.</div>';
+    html += '<div class="no-data">API: POST /analysis/inventory/items, POST /analysis/inventory/rules, POST /analysis/inventory/items/{inventory_item_id}/count</div>';
+    html += '<div class="no-data">Quick start: POST /analysis/inventory/bootstrap-default-rules</div>';
+    el.innerHTML = html;
+    return;
+  }
+
+  const unitFmt = (n, unit) => (n == null ? "--" : `${Number(n).toFixed(1)} ${unit || "units"}`);
+  const daysFmt = (n) => (n == null ? "--" : `${Number(n).toFixed(1)}d`);
+
+  html += `
+    <table class="staffing-table">
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>Status</th>
+          <th>On Hand</th>
+          <th>Reorder Point</th>
+          <th>Days Remaining</th>
+          <th>Reorder Qty</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${alerts.map((a) => `
+          <tr>
+            <td>${a.item_name || "--"}</td>
+            <td><span class="status-pill status-${a.severity === "warning" ? "red" : "yellow"}">${a.status || "--"}</span></td>
+            <td>${unitFmt(a.effective_on_hand, a.unit)}</td>
+            <td>${unitFmt(a.reorder_point, a.unit)}</td>
+            <td>${daysFmt(a.days_remaining)}</td>
+            <td>${unitFmt(a.recommended_reorder_units, a.unit)}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+
   el.innerHTML = html;
 }
 
@@ -749,6 +970,11 @@ async function loadDashboard() {
     .then(renderROI)
     .catch(() => renderROI(null));
 
+  // Fetch bottom-line scorecard (profitability + realized impact memory)
+  fetchJSON(`${API}/analysis/bottom-line-scorecard?days=30&compare_days=7`)
+    .then(renderBottomLineScorecard)
+    .catch(() => renderBottomLineScorecard(null));
+
   // Fetch staffing variance windows for today
   fetchJSON(`${API}/analysis/staffing-variance`)
     .then(renderStaffingVariance)
@@ -773,6 +999,11 @@ async function loadDashboard() {
   fetchJSON(`${API}/analysis/data-health`)
     .then(renderDataHealth)
     .catch(() => renderDataHealth(null));
+
+  // Fetch inventory alerts
+  fetchJSON(`${API}/analysis/inventory/alerts?lookback_days=21`)
+    .then(renderInventoryAlerts)
+    .catch(() => renderInventoryAlerts(null));
 
   // Fetch active data-quality flags + today diagnostics
   Promise.all([

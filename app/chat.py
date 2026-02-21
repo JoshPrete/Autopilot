@@ -18,6 +18,7 @@ from config.database import engine
 from config.settings import settings
 from data.storage import (
     get_all_xero_mappings,
+    get_bottom_line_scorecard,
     get_cogs_source_summary,
     get_daily_efficiency_snapshot,
     get_daily_profitability,
@@ -27,6 +28,9 @@ from data.storage import (
     get_efficiency_gap_range,
     get_events_range,
     get_intelligence_summary,
+    get_inventory_alerts,
+    list_inventory_items,
+    list_inventory_usage_rules,
     get_item_costs,
     get_item_costs_detailed,
     get_learned_patterns,
@@ -893,6 +897,14 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: bottom-line scorecard (30d with 7d trend compare) ---
+    try:
+        scorecard = get_bottom_line_scorecard(site_id, days=30, compare_days=7, top_actions_limit=5)
+        if scorecard and scorecard.get("kpis"):
+            context["bottom_line_scorecard"] = scorecard
+    except Exception:
+        pass
+
     # --- Always: recent documents ---
     try:
         recent_docs = get_recent_documents(site_id, limit=5)
@@ -1139,6 +1151,24 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         except Exception:
             pass
 
+    # --- Conditional: inventory / stock ---
+    if _keyword_match(question, ["inventory", "stock", "low stock", "out of stock",
+                                  "restock", "cups", "lids", "milk", "beans",
+                                  "consumable", "reorder", "on hand"]):
+        try:
+            alerts = get_inventory_alerts(site_id, lookback_days=21, include_ok=False)
+            context["inventory_alerts"] = alerts
+        except Exception:
+            context["inventory_alerts"] = []
+        try:
+            context["inventory_items"] = list_inventory_items(site_id, active_only=True)
+        except Exception:
+            pass
+        try:
+            context["inventory_usage_rules"] = list_inventory_usage_rules(site_id, active_only=True)
+        except Exception:
+            pass
+
     # --- Conditional: Xero / supplier detail ---
     if _keyword_match(question, ["xero", "supplier", "mapping", "sync", "invoice"]):
         try:
@@ -1360,10 +1390,12 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         # Detail: by-day breakdown table
         by_day = eg.get("by_day", [])
         if by_day:
+            rev_source_map = {"xero": "X", "square_csv": "C", "square_api": "S", "none": "?"}
             sections.append("### Staffing Efficiency — Daily Breakdown (7d)")
-            sections.append("| Date | Day | Eff % | Actual Labor | Min Labor | Excess | Deficit | Revenue | Over/Under |")
-            sections.append("|------|-----|-------|-------------|-----------|--------|---------|---------|------------|")
+            sections.append("| Date | Day | Eff % | Actual Labor | Min Labor | Excess | Deficit | Revenue | Src | Over/Under |")
+            sections.append("|------|-----|-------|-------------|-----------|--------|---------|---------|-----|------------|")
             for d in by_day:
+                src = rev_source_map.get(d.get("revenue_source", "none"), "?")
                 sections.append(
                     f"| {d['date']} | {d['day_name'][:3]} "
                     f"| {round(d['efficiency_score'] * 100)}% "
@@ -1372,9 +1404,80 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                     f"| ${d['excess_labor_cents'] / 100:,.0f} "
                     f"| ${d.get('deficit_labor_cents', 0) / 100:,.0f} "
                     f"| ${d['total_revenue_cents'] / 100:,.0f} "
+                    f"| {src} "
                     f"| +{d['overstaffed_intervals']}/-{d.get('understaffed_intervals', 0)}/{d['intervals']} |"
                 )
+            sections.append("_Revenue source: X=Xero (verified), C=Square CSV, S=Square API, ?=none_")
             sections.append("")
+
+    # --- Bottom-Line Scorecard (trend + realized impact attribution) ---
+    if "bottom_line_scorecard" in context:
+        sc = context["bottom_line_scorecard"]
+        kpis = sc.get("kpis", {})
+        trend = sc.get("trend", {})
+        deltas = trend.get("deltas", {})
+        directions = trend.get("directions", {})
+        actions = sc.get("actions", {})
+        financial_truth = sc.get("financial_truth", {})
+
+        sections.append("## Bottom-Line Scorecard (30d)")
+        sections.append(f"- Headline: {sc.get('headline', 'N/A')}")
+        sections.append(
+            f"- Net profit: ${int(kpis.get('total_net_profit_cents') or 0) / 100:,.0f} "
+            f"({int(deltas.get('net_profit_cents') or 0) / 100:+,.0f} vs prior 7d)"
+        )
+        net_margin = kpis.get("net_margin_pct")
+        labor_pct = kpis.get("avg_labor_pct")
+        rev_labor = kpis.get("avg_revenue_per_labor_hour_cents")
+        net_margin_text = f"{float(net_margin):.1f}%" if net_margin is not None else "N/A"
+        labor_pct_text = f"{float(labor_pct):.1f}%" if labor_pct is not None else "N/A"
+        rev_labor_text = f"${int(rev_labor) / 100:,.0f}" if rev_labor is not None else "N/A"
+        sections.append(
+            f"- Net margin: {net_margin_text} | "
+            f"Labor %: {labor_pct_text} ({(deltas.get('labor_pct_delta_pp') or 0):+.1f}pp) | "
+            f"Rev/labor-hour: {rev_labor_text} "
+            f"({(deltas.get('revenue_per_labor_hour_delta_pct') or 0):+.1f}%)"
+        )
+        sections.append(
+            f"- Direction: profit={directions.get('net_profit', 'unknown')}, "
+            f"labor%={directions.get('labor_pct', 'unknown')}, "
+            f"rev/labor-hour={directions.get('revenue_per_labor_hour', 'unknown')}"
+        )
+        if financial_truth:
+            sections.append(
+                f"- Financial truth source: {financial_truth.get('mode', 'estimated_fallback')} "
+                f"(coverage {int(financial_truth.get('coverage_days') or 0)}/"
+                f"{int(financial_truth.get('window_days') or 0)} days)"
+            )
+            sections.append(
+                f"- Factual incoming/outgoing/net: "
+                f"${int(financial_truth.get('income_cents') or 0) / 100:,.0f} / "
+                f"${int(financial_truth.get('expense_cents') or 0) / 100:,.0f} / "
+                f"${int(financial_truth.get('net_cash_cents') or 0) / 100:,.0f}"
+            )
+            sections.append(
+                "- Rule: use Square for sales breakdowns and mix; use Xero financial facts for actual incoming/outgoing totals when available."
+            )
+
+        if actions:
+            sections.append(
+                f"- Recommendation memory: {actions.get('recommendations_generated', 0)} generated, "
+                f"{actions.get('recommendations_adopted', 0)} adopted, "
+                f"{actions.get('realized_actions', 0)} with realized outcomes"
+            )
+            avg_realized = actions.get("avg_realized_weekly_profit_delta_cents")
+            if avg_realized is not None:
+                sections.append(f"- Avg realized weekly profit delta: ${int(avg_realized) / 100:+,.0f}")
+            top_proven = actions.get("top_proven_action_types") or []
+            if top_proven:
+                sections.append("### Proven Action Types")
+                for row in top_proven[:5]:
+                    sections.append(
+                        f"- {str(row.get('action_type', 'unknown')).replace('_', ' ')}: "
+                        f"samples={int(row.get('realized_count') or 0)}, "
+                        f"avg weekly profit delta=${int(row.get('avg_realized_weekly_profit_delta_cents') or 0) / 100:+,.0f}"
+                    )
+        sections.append("")
 
     # --- Intelligence Engine ---
     if "active_insights" in context or "intelligence_summary" in context:
@@ -1439,6 +1542,37 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 f"- **{p.get('pattern_key', '?')}**: {p.get('description', '')} "
                 f"(confidence: {conf:.0%}, samples: {samples}, "
                 f"cumulative impact: ${impact / 100:+,.0f})"
+            )
+        sections.append("")
+
+    if "inventory_alerts" in context:
+        alerts = context.get("inventory_alerts") or []
+        sections.append("## Inventory Alerts")
+        if not alerts:
+            sections.append("- No active low-stock alerts based on current rules and count snapshots.")
+        else:
+            sections.append(f"- Active alerts: {len(alerts)}")
+            for a in alerts[:10]:
+                unit = a.get("unit") or "units"
+                on_hand = a.get("effective_on_hand")
+                on_hand_text = f"{on_hand:.1f} {unit}" if isinstance(on_hand, (int, float)) else "unknown"
+                rp = a.get("reorder_point")
+                rp_text = f"{rp:.1f} {unit}" if isinstance(rp, (int, float)) else "n/a"
+                days_remaining = a.get("days_remaining")
+                days_text = (
+                    f"{days_remaining:.1f}d"
+                    if isinstance(days_remaining, (int, float))
+                    else "n/a"
+                )
+                sections.append(
+                    f"- {a.get('item_name', '?')}: status={a.get('status', '?')}, "
+                    f"on_hand={on_hand_text}, reorder_point={rp_text}, "
+                    f"days_remaining={days_text}"
+                )
+
+            sections.append(
+                "- Usage is computed from order_items using inventory usage rules "
+                "(including modifier-based milk variants)."
             )
         sections.append("")
 
@@ -1711,16 +1845,34 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if "next_actions_live" in context:
         payload = context["next_actions_live"]
         actions = payload.get("actions") or []
+        summary = payload.get("summary") or {}
+        gate = (payload.get("summary") or {}).get("proven_gate") or {}
+        suppressed = int(gate.get("suppressed_count") or 0)
         if actions:
             sections.append("\n## Recommended Next Actions (live)")
+            if summary.get("optimization_phase"):
+                sections.append(
+                    f"- Optimization phase: {summary.get('optimization_phase')} "
+                    f"({summary.get('phase_reason', 'no reason provided')})"
+                )
+            if suppressed > 0:
+                blocked_types = gate.get("suppressed_action_types") or []
+                if blocked_types:
+                    sections.append(
+                        f"- Proven-impact gate suppressed {suppressed} action type(s): "
+                        + ", ".join(str(t).replace("_", " ") for t in blocked_types)
+                    )
             for a in actions[:5]:
                 expected = int(a.get("expected_weekly_profit_uplift_cents") or 0)
                 proven = a.get("proven_weekly_impact_cents")
                 proven_text = f", proven {int(proven) / 100:+,.0f}/wk" if proven is not None else ""
                 conf = a.get("confidence")
                 conf_text = f", conf {round(float(conf) * 100)}%" if conf is not None else ""
+                realized_samples = int(a.get("realized_samples") or 0)
+                gate_status = a.get("proven_gate_status")
+                gate_text = f", gate={gate_status}, samples={realized_samples}" if gate_status else ""
                 sections.append(
-                    f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}"
+                    f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}{gate_text}"
                 )
 
     # --- Recently persisted recommendations ---
@@ -1818,12 +1970,33 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     # --- Xero Supplier Mappings ---
     if "xero_mappings" in context:
         mappings = context["xero_mappings"]
-        confirmed = sum(1 for m in mappings if float(m.get("confidence", 0)) >= 0.8)
+
+        def _confidence_value(raw) -> float:
+            if raw is None:
+                return 0.0
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            token = str(raw).strip().lower()
+            lookup = {
+                "high": 0.9,
+                "medium": 0.6,
+                "low": 0.3,
+                "confirmed": 0.95,
+                "unconfirmed": 0.4,
+            }
+            if token in lookup:
+                return lookup[token]
+            try:
+                return float(token)
+            except ValueError:
+                return 0.0
+
+        confirmed = sum(1 for m in mappings if _confidence_value(m.get("confidence", 0)) >= 0.8)
         unconfirmed = len(mappings) - confirmed
         sections.append(f"\n## Xero Supplier Mappings")
         sections.append(f"{len(mappings)} items mapped ({confirmed} confirmed, {unconfirmed} unconfirmed)")
         for m in mappings[:15]:
-            conf = float(m.get("confidence", 0))
+            conf = _confidence_value(m.get("confidence", 0))
             conf_label = "confirmed" if conf >= 0.8 else "unconfirmed"
             units = f", {m['units_per_pack']} units/pack" if m.get("units_per_pack") else ""
             sections.append(

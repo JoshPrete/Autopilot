@@ -286,6 +286,12 @@ def send_system_alert(site_id: str, alert_type: str, **kwargs) -> list[dict]:
         message = sms_prompts.system_alert_ingestion_failed(
             site_name, kwargs.get("error", "")
         )
+    elif alert_type == "prediction_blocked_data_quality":
+        message = sms_prompts.system_alert_prediction_blocked(
+            site_name=site_name,
+            run_date=kwargs.get("run_date", ""),
+            reasons=kwargs.get("reasons", []),
+        )
     elif alert_type == "sms_failed":
         message = sms_prompts.system_alert_sms_failed(site_name)
     else:

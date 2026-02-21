@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import uuid as _uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from config.database import engine
@@ -486,6 +486,24 @@ def get_prediction(site_id: str, forecast_date: date) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def get_prediction_by_id(site_id: str, prediction_id: str) -> Optional[dict]:
+    """Retrieve a prediction by prediction_id scoped to site."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT prediction_id, forecast_date, generated_at, "
+                "recent_baseline, yoy_baseline, dow_factor, event_factor, "
+                "composite_baseline, forecast_data, rush_windows, "
+                "confidence_score, actual_accuracy "
+                "FROM predictions "
+                "WHERE site_id = :sid AND prediction_id = :pid"
+            ),
+            {"sid": site_id, "pid": prediction_id},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
 # ============================================================
 # Recommendations
 # ============================================================
@@ -759,6 +777,9 @@ def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 
                 SELECT
                     COUNT(*) FILTER (WHERE al.adopted = TRUE) AS adopted_count,
                     COUNT(*) AS total_count,
+                    COUNT(DISTINCT al.rec_id) FILTER (
+                        WHERE r.outcome_data->'realized' IS NOT NULL
+                    ) AS realized_count,
                     AVG(al.helpfulness_rating) AS helpfulness_avg,
                     AVG(
                         NULLIF(r.outcome_data->'realized'->>'weekly_net_profit_delta_cents', '')::numeric
@@ -778,12 +799,14 @@ def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 
 
     adopted = int((row or {}).get("adopted_count") or 0)
     total = int((row or {}).get("total_count") or 0)
+    realized_count = int((row or {}).get("realized_count") or 0)
     helpfulness = (row or {}).get("helpfulness_avg")
     avg_realized_weekly = (row or {}).get("avg_realized_weekly_profit_delta_cents")
     avg_realized_daily = (row or {}).get("avg_realized_daily_net_profit_delta_cents")
     return {
         "adopted_count": adopted,
         "total_count": total,
+        "realized_count": realized_count,
         "adoption_rate": round(adopted / total, 3) if total > 0 else None,
         "helpfulness_avg": round(float(helpfulness), 2) if helpfulness is not None else None,
         "avg_realized_weekly_profit_delta_cents": (
@@ -1055,6 +1078,50 @@ def store_daily_sales(site_id: str, sale_date: date, summary: dict, source: str 
     logger.info("Stored daily sales for %s: $%.2f, %d items (source=%s)",
                 sale_date, total_revenue / 100 if total_revenue else 0,
                 items_count, source)
+
+
+def _ensure_daily_sales_xero_columns(conn) -> None:
+    """Backwards-safe migration: add Xero revenue cross-check columns."""
+    conn.execute(
+        _text(
+            "ALTER TABLE daily_sales_history "
+            "ADD COLUMN IF NOT EXISTS xero_revenue_cents INT"
+        )
+    )
+    conn.execute(
+        _text(
+            "ALTER TABLE daily_sales_history "
+            "ADD COLUMN IF NOT EXISTS xero_synced_at TIMESTAMP"
+        )
+    )
+
+
+def store_xero_daily_revenue(site_id: str, sale_date: date, xero_revenue_cents: int) -> None:
+    """
+    Store Xero-sourced revenue for a specific day.
+
+    Updates only the xero_revenue_cents and xero_synced_at columns,
+    preserving the existing Square-sourced gross_sales_cents for comparison.
+    If no daily_sales_history row exists for this day, creates one with
+    source='xero'.
+    """
+    with engine.connect() as conn:
+        _ensure_daily_sales_xero_columns(conn)
+        conn.execute(
+            _text("""
+                INSERT INTO daily_sales_history
+                    (site_id, sale_date, xero_revenue_cents, xero_synced_at, source)
+                VALUES
+                    (:sid, :sale_date, :xero_rev, NOW(), 'xero')
+                ON CONFLICT (site_id, sale_date) DO UPDATE SET
+                    xero_revenue_cents = :xero_rev,
+                    xero_synced_at = NOW()
+            """),
+            {"sid": site_id, "sale_date": sale_date, "xero_rev": xero_revenue_cents},
+        )
+        conn.commit()
+
+    logger.info("Stored Xero revenue for %s: $%.2f", sale_date, xero_revenue_cents / 100)
 
 
 # ============================================================
@@ -1575,79 +1642,246 @@ def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
 
 def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> dict:
     """
-    Compute staffing efficiency gap across a date range.
+    Compute staffing efficiency gap across a date range using real Deputy costs.
 
-    Single SQL query joins workload_timeline + deputy_rosters + orders_raw
-    to get per-interval: workload_units, staff_on, revenue_cents.
-    Python computes min_staff, excess cost, and efficiency score.
+    All revenue figures are **ex-GST** (true cash position). GST is a
+    pass-through to the ATO and excluded from business decisions.
+    Square figures are divided by (1 + GST_RATE); Xero P&L is already ex-GST.
+
+    Uses actual roster cost_dollars (incl. casual loading, weekend rates, age-based
+    award rates) for the "actual" side. Computes minimum viable cost using real
+    per-day rates with the constraint that at least 1 senior (>=18yo, hourly rate
+    >= JUNIOR_HOURLY_RATE_THRESHOLD) must always be on shift.
+
+    Cheapest valid team for N staff = 1 × cheapest_senior + (N-1) × cheapest_available.
+    All staff are casual — Deputy cost_dollars already includes casual loading but
+    NOT super. We add SUPERANNUATION_RATE on top for true cost.
+    Owner shifts use OWNER_HOURLY_RATE_CENTS instead of Deputy's understated rate.
     """
-    from config.constants import LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+    from config.constants import (
+        GST_RATE,
+        JUNIOR_HOURLY_RATE_THRESHOLD,
+        OWNER_DEPUTY_NAME,
+        OWNER_HOURLY_RATE_CENTS,
+        SUPERANNUATION_RATE,
+    )
     from config.workflow_profiles import minimum_viable_staff
 
-    cost_per = LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+    junior_threshold_dollars = JUNIOR_HOURLY_RATE_THRESHOLD / 100
+    super_mult = 1 + SUPERANNUATION_RATE  # 1.115
+    gst_divisor = 1 + GST_RATE  # 1.10 — Square is inc-GST, we report ex-GST
+    owner_interval_cost_cents = round(OWNER_HOURLY_RATE_CENTS * 0.25)  # per 15-min
 
     with engine.connect() as conn:
-        rows = conn.execute(
+        # 1. Per-interval: workload + per-staff details (name, rate) for true cost calc
+        interval_rows = conn.execute(
             _text(
                 """
-                WITH intervals AS (
-                    SELECT
-                        wt.interval_start,
-                        DATE(wt.interval_start) AS day,
-                        wt.workload_units,
-                        (
-                            SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text))
-                            FROM deputy_rosters dr
-                            WHERE dr.site_id = :sid
-                              AND dr.shift_date = DATE(wt.interval_start)
-                              AND dr.start_time <= wt.interval_start
-                              AND dr.end_time > wt.interval_start
-                        ) AS staff_on
-                    FROM workload_timeline wt
-                    WHERE wt.site_id = :sid
-                      AND wt.interval_start >= :s
-                      AND wt.interval_start < :e ::date + interval '1 day'
-                ),
-                trade AS (
-                    SELECT
-                        date_trunc('hour', closed_at)
-                        + (floor(extract(minute from closed_at) / 15) * interval '15 minutes')
-                        AS interval_start,
-                        COALESCE(SUM(total_money_cents), 0) AS revenue_cents
-                    FROM orders_raw
-                    WHERE site_id = :sid
-                      AND closed_at IS NOT NULL
-                      AND DATE(closed_at) >= :s
-                      AND DATE(closed_at) <= :e
-                    GROUP BY 1
-                )
                 SELECT
-                    i.interval_start,
-                    i.day,
-                    i.workload_units,
-                    i.staff_on,
-                    COALESCE(t.revenue_cents, 0) AS revenue_cents
-                FROM intervals i
-                LEFT JOIN trade t ON t.interval_start = i.interval_start
-                WHERE i.staff_on > 0
-                ORDER BY i.interval_start
+                    wt.interval_start,
+                    DATE(wt.interval_start) AS day,
+                    wt.workload_units,
+                    (
+                        SELECT COUNT(DISTINCT COALESCE(dr.employee_id::text, dr.employee_name, dr.deputy_id::text))
+                        FROM deputy_rosters dr
+                        WHERE dr.site_id = :sid
+                          AND dr.shift_date = DATE(wt.interval_start)
+                          AND dr.start_time <= wt.interval_start
+                          AND dr.end_time > wt.interval_start
+                    ) AS staff_on,
+                    (
+                        SELECT COALESCE(SUM(
+                            CASE WHEN dr.employee_name = :owner_name
+                                 THEN 0
+                                 ELSE dr.cost_dollars / NULLIF(dr.total_hours, 0) * 0.25
+                            END
+                        ), 0)
+                        FROM deputy_rosters dr
+                        WHERE dr.site_id = :sid
+                          AND dr.shift_date = DATE(wt.interval_start)
+                          AND dr.start_time <= wt.interval_start
+                          AND dr.end_time > wt.interval_start
+                          AND dr.total_hours > 0
+                    ) AS staff_cost_dollars,
+                    (
+                        SELECT COUNT(*)
+                        FROM deputy_rosters dr
+                        WHERE dr.site_id = :sid
+                          AND dr.shift_date = DATE(wt.interval_start)
+                          AND dr.start_time <= wt.interval_start
+                          AND dr.end_time > wt.interval_start
+                          AND dr.employee_name = :owner_name
+                    ) AS owner_on
+                FROM workload_timeline wt
+                WHERE wt.site_id = :sid
+                  AND wt.interval_start >= :s
+                  AND wt.interval_start < :e ::date + interval '1 day'
+                ORDER BY wt.interval_start
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date, "owner_name": OWNER_DEPUTY_NAME},
+        ).mappings().all()
+
+        # 2a. Revenue from daily_sales_history (may include Xero cross-check columns).
+        try:
+            _ensure_daily_sales_xero_columns(conn)
+            history_rows = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        sale_date AS day,
+                        gross_sales_cents,
+                        xero_revenue_cents,
+                        source
+                    FROM daily_sales_history
+                    WHERE site_id = :sid
+                      AND sale_date >= :s
+                      AND sale_date <= :e
+                    """
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            ).mappings().all()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("daily_sales_history xero columns unavailable (non-fatal): %s", e)
+            history_rows = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        sale_date AS day,
+                        gross_sales_cents,
+                        NULL::INT AS xero_revenue_cents,
+                        source
+                    FROM daily_sales_history
+                    WHERE site_id = :sid
+                      AND sale_date >= :s
+                      AND sale_date <= :e
+                    """
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            ).mappings().all()
+
+        # 2b. Revenue from orders_raw as fallback
+        orders_raw_rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    DATE(closed_at) AS day,
+                    COUNT(*) AS order_count,
+                    COALESCE(SUM(total_money_cents), 0) AS revenue_cents
+                FROM orders_raw
+                WHERE site_id = :sid
+                  AND closed_at IS NOT NULL
+                  AND DATE(closed_at) >= :s
+                  AND DATE(closed_at) <= :e
+                GROUP BY DATE(closed_at)
                 """
             ),
             {"sid": site_id, "s": start_date, "e": end_date},
         ).mappings().all()
 
+        # 3. Per-day cheapest senior & junior rates (for min viable cost)
+        rate_rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    shift_date,
+                    cost_dollars / NULLIF(total_hours, 0) AS hourly_rate
+                FROM deputy_rosters
+                WHERE site_id = :sid
+                  AND shift_date >= :s AND shift_date <= :e
+                  AND total_hours > 0 AND cost_dollars > 0
+                ORDER BY shift_date
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        ).mappings().all()
+
+    # Build daily revenue lookup — ALL figures ex-GST (true cash position).
+    # GST is a pass-through to the ATO, not real revenue.
+    # Priority: xero (already ex-GST) > daily_sales_history > orders_raw
+    # Square sources are inc-GST and must be divided by gst_divisor.
+    revenue_by_day: dict[str, int] = {}
+    revenue_source_by_day: dict[str, str] = {}
+    for row in orders_raw_rows:
+        day_str = str(row["day"])
+        inc_gst = int(row["revenue_cents"] or 0)
+        revenue_by_day[day_str] = round(inc_gst / gst_divisor)
+        revenue_source_by_day[day_str] = "square_api"
+
+    # Override with daily_sales_history (CSV imports may be more complete)
+    for row in history_rows:
+        day_str = str(row["day"])
+        gross = int(row["gross_sales_cents"] or 0)
+        xero_rev = row["xero_revenue_cents"]
+        source = row["source"] or "unknown"
+
+        if xero_rev is not None and int(xero_rev) > 0:
+            # Xero P&L income is already ex-GST — use directly
+            revenue_by_day[day_str] = int(xero_rev)
+            revenue_source_by_day[day_str] = "xero"
+        elif gross > 0 and source == "csv":
+            # CSV-imported Square Dashboard data is inc-GST — strip GST
+            revenue_by_day[day_str] = round(gross / gst_divisor)
+            revenue_source_by_day[day_str] = "square_csv"
+
+    # Build per-day cheapest senior and junior rates (excl. owner, incl. super)
+    day_rates: dict[str, dict] = {}
+    for row in rate_rows:
+        day_str = str(row["shift_date"])
+        rate = float(row["hourly_rate"] or 0)
+        if rate <= 0:
+            continue
+        if day_str not in day_rates:
+            day_rates[day_str] = {"cheapest_senior": None, "cheapest_junior": None}
+        dr = day_rates[day_str]
+        # Apply super to get true cost rate
+        true_rate = rate * super_mult
+        if rate >= junior_threshold_dollars:
+            if dr["cheapest_senior"] is None or true_rate < dr["cheapest_senior"]:
+                dr["cheapest_senior"] = true_rate
+        else:
+            if dr["cheapest_junior"] is None or true_rate < dr["cheapest_junior"]:
+                dr["cheapest_junior"] = true_rate
+
     # Aggregate per-day
     day_data: dict[str, dict] = {}
-    for row in rows:
+    for row in interval_rows:
+        staff_on = int(row["staff_on"] or 0)
+        if staff_on <= 0:
+            continue
+
         day_str = str(row["day"])
         wu = float(row["workload_units"] or 0)
-        staff_on = int(row["staff_on"] or 0)
-        rev = int(row["revenue_cents"] or 0)
+        owner_on = int(row["owner_on"] or 0)
         min_staff = minimum_viable_staff(wu)
-        actual_cost = staff_on * cost_per
-        min_cost = min_staff * cost_per
-        excess = max(0, staff_on - min_staff) * cost_per
-        deficit = max(0, min_staff - staff_on) * cost_per
+
+        # Actual cost: Deputy staff cost (+ super) + owner cost (salary-based)
+        staff_cost_cents = round(float(row["staff_cost_dollars"] or 0) * 100 * super_mult)
+        owner_cost_cents = owner_interval_cost_cents * owner_on
+        actual_cost_cents = staff_cost_cents + owner_cost_cents
+
+        # Minimum viable cost using real rates + senior constraint
+        rates = day_rates.get(day_str, {})
+        cheapest_senior = rates.get("cheapest_senior")
+        cheapest_junior = rates.get("cheapest_junior")
+
+        if cheapest_senior is not None and min_staff > 0:
+            fill_rate = cheapest_junior if cheapest_junior is not None else cheapest_senior
+            min_cost_cents = round(
+                (cheapest_senior * 0.25 + max(0, min_staff - 1) * fill_rate * 0.25) * 100
+            )
+        elif min_staff > 0:
+            from config.constants import LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+            min_cost_cents = min_staff * LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+        else:
+            min_cost_cents = 0
+
+        excess = max(0, actual_cost_cents - min_cost_cents)
+        deficit = max(0, min_cost_cents - actual_cost_cents)
 
         if day_str not in day_data:
             day_data[day_str] = {
@@ -1655,17 +1889,15 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                 "min_labor_cents": 0,
                 "excess_labor_cents": 0,
                 "deficit_labor_cents": 0,
-                "total_revenue_cents": 0,
                 "intervals": 0,
                 "overstaffed_intervals": 0,
                 "understaffed_intervals": 0,
             }
         d = day_data[day_str]
-        d["actual_labor_cents"] += actual_cost
-        d["min_labor_cents"] += min_cost
+        d["actual_labor_cents"] += actual_cost_cents
+        d["min_labor_cents"] += min_cost_cents
         d["excess_labor_cents"] += excess
         d["deficit_labor_cents"] += deficit
-        d["total_revenue_cents"] += rev
         d["intervals"] += 1
         if staff_on > min_staff:
             d["overstaffed_intervals"] += 1
@@ -1696,33 +1928,43 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             "excess_labor_cents": d["excess_labor_cents"],
             "deficit_labor_cents": d["deficit_labor_cents"],
             "efficiency_score": round(eff, 4),
-            "total_revenue_cents": d["total_revenue_cents"],
+            "total_revenue_cents": revenue_by_day.get(day_str, 0),
+            "revenue_source": revenue_source_by_day.get(day_str, "none"),
             "intervals": d["intervals"],
             "overstaffed_intervals": d["overstaffed_intervals"],
             "understaffed_intervals": d["understaffed_intervals"],
         })
 
-    # Aggregate by day-of-week
+    # Aggregate by day-of-week — dollar-weighted efficiency
     dow_agg: dict[int, dict] = {}
     for entry in by_day:
         dow = entry["dow"]
         if dow not in dow_agg:
-            dow_agg[dow] = {"excess_list": [], "deficit_list": [], "eff_list": [], "day_name": entry["day_name"]}
-        dow_agg[dow]["excess_list"].append(entry["excess_labor_cents"])
-        dow_agg[dow]["deficit_list"].append(entry["deficit_labor_cents"])
-        dow_agg[dow]["eff_list"].append(entry["efficiency_score"])
+            dow_agg[dow] = {
+                "total_actual": 0, "total_min": 0,
+                "total_excess": 0, "total_deficit": 0,
+                "days": 0, "day_name": entry["day_name"],
+            }
+        a = dow_agg[dow]
+        a["total_actual"] += entry["actual_labor_cents"]
+        a["total_min"] += entry["min_labor_cents"]
+        a["total_excess"] += entry["excess_labor_cents"]
+        a["total_deficit"] += entry["deficit_labor_cents"]
+        a["days"] += 1
 
     by_dow = []
     for dow in sorted(dow_agg):
-        agg = dow_agg[dow]
-        n = len(agg["excess_list"])
+        a = dow_agg[dow]
+        n = a["days"]
+        # Dollar-weighted efficiency: total_min / total_actual across all days for this DOW
+        weighted_eff = min(1.0, round(a["total_min"] / a["total_actual"], 4)) if a["total_actual"] > 0 else 1.0
         by_dow.append({
             "dow": dow,
-            "day_name": agg["day_name"],
+            "day_name": a["day_name"],
             "sample_days": n,
-            "avg_excess_labor_cents": round(sum(agg["excess_list"]) / n) if n else 0,
-            "avg_deficit_labor_cents": round(sum(agg["deficit_list"]) / n) if n else 0,
-            "avg_efficiency_score": round(sum(agg["eff_list"]) / n, 4) if n else 1.0,
+            "avg_excess_labor_cents": round(a["total_excess"] / n) if n else 0,
+            "avg_deficit_labor_cents": round(a["total_deficit"] / n) if n else 0,
+            "avg_efficiency_score": weighted_eff,
         })
 
     # Totals
@@ -1798,6 +2040,897 @@ def get_item_costs(site_id: str) -> dict[str, int]:
             {"sid": site_id},
         )
         return {row[0]: int(row[1]) for row in result}
+
+
+# ============================================================
+# Inventory (stock items, usage rules, counts, receipts)
+# ============================================================
+
+
+def upsert_inventory_item(
+    site_id: str,
+    item_name: str,
+    unit: str,
+    reorder_point: float,
+    par_level: float = None,
+    lead_time_days: int = 2,
+    active: bool = True,
+    score_key: str = None,
+    metadata: dict = None,
+) -> str:
+    """
+    Upsert an inventory item by (site_id, item_name).
+    Returns inventory_item_id.
+    """
+    normalized_name = (item_name or "").strip()
+    if not normalized_name:
+        raise ValueError("item_name is required")
+
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                """
+                INSERT INTO inventory_items
+                    (site_id, item_name, score_key, unit, reorder_point, par_level,
+                     lead_time_days, active, metadata, updated_at)
+                VALUES
+                    (:sid, :name, :sk, :unit, :rp, :pl, :ltd, :active, :meta, NOW())
+                ON CONFLICT (site_id, item_name) DO UPDATE SET
+                    score_key = EXCLUDED.score_key,
+                    unit = EXCLUDED.unit,
+                    reorder_point = EXCLUDED.reorder_point,
+                    par_level = EXCLUDED.par_level,
+                    lead_time_days = EXCLUDED.lead_time_days,
+                    active = EXCLUDED.active,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+                RETURNING inventory_item_id
+                """
+            ),
+            {
+                "sid": site_id,
+                "name": normalized_name,
+                "sk": (score_key or "").strip() or None,
+                "unit": (unit or "units").strip() or "units",
+                "rp": max(0.0, float(reorder_point or 0)),
+                "pl": float(par_level) if par_level is not None else None,
+                "ltd": max(0, int(lead_time_days or 0)),
+                "active": bool(active),
+                "meta": _json_dumps(metadata) if metadata is not None else None,
+            },
+        )
+        item_id = str(result.scalar())
+        conn.commit()
+    return item_id
+
+
+def get_inventory_item_by_score_key(site_id: str, score_key: str) -> Optional[dict]:
+    """
+    Resolve inventory item by score_key.
+    Returns None when inventory tables are unavailable or no match exists.
+    """
+    if not score_key:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                _text(
+                    """
+                    SELECT inventory_item_id, site_id, item_name, score_key, unit,
+                           reorder_point, par_level, lead_time_days, active
+                    FROM inventory_items
+                    WHERE site_id = :sid AND score_key = :sk
+                    LIMIT 1
+                    """
+                ),
+                {"sid": site_id, "sk": score_key},
+            ).mappings().first()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.warning("get_inventory_item_by_score_key unavailable (non-fatal): %s", e)
+        return None
+
+
+def list_inventory_items(site_id: str, active_only: bool = True) -> list[dict]:
+    """List inventory items with latest physical count snapshot."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        ii.inventory_item_id,
+                        ii.item_name,
+                        ii.score_key,
+                        ii.unit,
+                        ii.reorder_point,
+                        ii.par_level,
+                        ii.lead_time_days,
+                        ii.active,
+                        ii.metadata,
+                        ii.updated_at,
+                        lc.quantity_on_hand,
+                        lc.counted_at
+                    FROM inventory_items ii
+                    LEFT JOIN LATERAL (
+                        SELECT quantity_on_hand, counted_at
+                        FROM inventory_counts ic
+                        WHERE ic.site_id = ii.site_id
+                          AND ic.inventory_item_id = ii.inventory_item_id
+                        ORDER BY counted_at DESC
+                        LIMIT 1
+                    ) lc ON TRUE
+                    WHERE ii.site_id = :sid
+                      AND (:active_only = FALSE OR ii.active = TRUE)
+                    ORDER BY ii.item_name
+                    """
+                ),
+                {"sid": site_id, "active_only": active_only},
+            ).mappings().all()
+
+        out = []
+        for r in rows:
+            metadata = r.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (ValueError, TypeError):
+                    metadata = {}
+            out.append(
+                {
+                    "inventory_item_id": str(r["inventory_item_id"]),
+                    "item_name": r["item_name"],
+                    "score_key": r.get("score_key"),
+                    "unit": r.get("unit") or "units",
+                    "reorder_point": float(r.get("reorder_point") or 0),
+                    "par_level": (
+                        float(r.get("par_level"))
+                        if r.get("par_level") is not None
+                        else None
+                    ),
+                    "lead_time_days": int(r.get("lead_time_days") or 0),
+                    "active": bool(r.get("active")),
+                    "metadata": metadata or {},
+                    "updated_at": str(r.get("updated_at")) if r.get("updated_at") else None,
+                    "last_count_on_hand": (
+                        float(r.get("quantity_on_hand"))
+                        if r.get("quantity_on_hand") is not None
+                        else None
+                    ),
+                    "last_counted_at": (
+                        str(r.get("counted_at")) if r.get("counted_at") else None
+                    ),
+                }
+            )
+        return out
+    except Exception as e:
+        logger.warning("list_inventory_items unavailable (non-fatal): %s", e)
+        return []
+
+
+def store_inventory_count(
+    site_id: str,
+    inventory_item_id: str,
+    quantity_on_hand: float,
+    counted_at: datetime = None,
+    source: str = "manual",
+    notes: str = None,
+) -> Optional[str]:
+    """
+    Store a physical count snapshot for one inventory item.
+    Returns count_id, or None when inventory tables are unavailable.
+    """
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                _text(
+                    """
+                    INSERT INTO inventory_counts
+                        (site_id, inventory_item_id, counted_at, quantity_on_hand, source, notes)
+                    VALUES
+                        (:sid, :iid, :counted_at, :qty, :source, :notes)
+                    RETURNING count_id
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "iid": inventory_item_id,
+                    "counted_at": counted_at or datetime.utcnow(),
+                    "qty": max(0.0, float(quantity_on_hand or 0)),
+                    "source": (source or "manual").strip() or "manual",
+                    "notes": notes,
+                },
+            )
+            count_id = str(result.scalar())
+            conn.commit()
+        return count_id
+    except Exception as e:
+        logger.warning("store_inventory_count unavailable (non-fatal): %s", e)
+        return None
+
+
+def _normalize_terms(raw_terms: str) -> str:
+    if not raw_terms:
+        return ""
+    terms = [
+        t.strip().lower()
+        for t in str(raw_terms).split(",")
+        if t and t.strip()
+    ]
+    return ",".join(terms)
+
+
+def upsert_inventory_usage_rule(
+    site_id: str,
+    inventory_item_id: str,
+    trigger_item_name: str,
+    units_per_sale: float,
+    required_modifier_terms: str = None,
+    excluded_modifier_terms: str = None,
+    priority: int = 100,
+    active: bool = True,
+) -> str:
+    """
+    Upsert a consumption rule for an inventory item.
+    Returns rule_id.
+    """
+    trigger_norm = (trigger_item_name or "").strip().lower()
+    if not trigger_norm:
+        raise ValueError("trigger_item_name is required")
+
+    req_norm = _normalize_terms(required_modifier_terms)
+    exc_norm = _normalize_terms(excluded_modifier_terms)
+
+    with engine.connect() as conn:
+        existing = conn.execute(
+            _text(
+                """
+                SELECT rule_id
+                FROM inventory_usage_rules
+                WHERE site_id = :sid
+                  AND inventory_item_id = :iid
+                  AND LOWER(trigger_item_name) = :trigger
+                  AND COALESCE(LOWER(required_modifier_terms), '') = :req
+                  AND COALESCE(LOWER(excluded_modifier_terms), '') = :exc
+                LIMIT 1
+                """
+            ),
+            {
+                "sid": site_id,
+                "iid": inventory_item_id,
+                "trigger": trigger_norm,
+                "req": req_norm,
+                "exc": exc_norm,
+            },
+        ).mappings().first()
+
+        if existing:
+            rule_id = str(existing["rule_id"])
+            conn.execute(
+                _text(
+                    """
+                    UPDATE inventory_usage_rules
+                    SET units_per_sale = :ups,
+                        priority = :priority,
+                        active = :active,
+                        updated_at = NOW()
+                    WHERE rule_id = :rid
+                    """
+                ),
+                {
+                    "rid": rule_id,
+                    "ups": max(0.0, float(units_per_sale or 0)),
+                    "priority": int(priority or 100),
+                    "active": bool(active),
+                },
+            )
+        else:
+            result = conn.execute(
+                _text(
+                    """
+                    INSERT INTO inventory_usage_rules
+                        (site_id, inventory_item_id, trigger_item_name,
+                         required_modifier_terms, excluded_modifier_terms,
+                         units_per_sale, priority, active)
+                    VALUES
+                        (:sid, :iid, :trigger, :req, :exc, :ups, :priority, :active)
+                    RETURNING rule_id
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "iid": inventory_item_id,
+                    "trigger": trigger_norm,
+                    "req": req_norm or None,
+                    "exc": exc_norm or None,
+                    "ups": max(0.0, float(units_per_sale or 0)),
+                    "priority": int(priority or 100),
+                    "active": bool(active),
+                },
+            )
+            rule_id = str(result.scalar())
+
+        conn.commit()
+    return rule_id
+
+
+def list_inventory_usage_rules(site_id: str, active_only: bool = True) -> list[dict]:
+    """List inventory consumption rules with target item names."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        r.rule_id,
+                        r.inventory_item_id,
+                        i.item_name AS inventory_item_name,
+                        i.unit AS inventory_unit,
+                        r.trigger_item_name,
+                        r.required_modifier_terms,
+                        r.excluded_modifier_terms,
+                        r.units_per_sale,
+                        r.priority,
+                        r.active,
+                        r.updated_at
+                    FROM inventory_usage_rules r
+                    JOIN inventory_items i
+                      ON i.inventory_item_id = r.inventory_item_id
+                     AND i.site_id = r.site_id
+                    WHERE r.site_id = :sid
+                      AND (:active_only = FALSE OR r.active = TRUE)
+                    ORDER BY r.priority ASC, r.trigger_item_name ASC
+                    """
+                ),
+                {"sid": site_id, "active_only": active_only},
+            ).mappings().all()
+
+        return [
+            {
+                "rule_id": str(r["rule_id"]),
+                "inventory_item_id": str(r["inventory_item_id"]),
+                "inventory_item_name": r["inventory_item_name"],
+                "inventory_unit": r.get("inventory_unit") or "units",
+                "trigger_item_name": r["trigger_item_name"],
+                "required_modifier_terms": r.get("required_modifier_terms"),
+                "excluded_modifier_terms": r.get("excluded_modifier_terms"),
+                "units_per_sale": float(r.get("units_per_sale") or 0),
+                "priority": int(r.get("priority") or 100),
+                "active": bool(r.get("active")),
+                "updated_at": str(r.get("updated_at")) if r.get("updated_at") else None,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning("list_inventory_usage_rules unavailable (non-fatal): %s", e)
+        return []
+
+
+def store_inventory_receipt(
+    site_id: str,
+    inventory_item_id: str,
+    quantity_units: float,
+    received_at: datetime = None,
+    unit_cost_cents: int = None,
+    supplier_name: str = None,
+    source: str = "xero",
+    external_ref: str = None,
+    raw_line_description: str = None,
+) -> Optional[str]:
+    """
+    Store stock receipt movement (idempotent by external_ref).
+    Returns receipt_id (or existing row id) when possible.
+    """
+    if not external_ref:
+        raise ValueError("external_ref is required for idempotent receipts")
+
+    try:
+        with engine.connect() as conn:
+            # Try insert; if already present, return existing id.
+            inserted = conn.execute(
+                _text(
+                    """
+                    INSERT INTO inventory_receipts
+                        (site_id, inventory_item_id, received_at, quantity_units,
+                         unit_cost_cents, supplier_name, source, external_ref, raw_line_description)
+                    VALUES
+                        (:sid, :iid, :ra, :qty, :cost, :supplier, :source, :eref, :raw)
+                    ON CONFLICT (site_id, external_ref) DO NOTHING
+                    RETURNING receipt_id
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "iid": inventory_item_id,
+                    "ra": received_at or datetime.utcnow(),
+                    "qty": max(0.0, float(quantity_units or 0)),
+                    "cost": int(unit_cost_cents) if unit_cost_cents is not None else None,
+                    "supplier": supplier_name,
+                    "source": (source or "xero").strip() or "xero",
+                    "eref": external_ref,
+                    "raw": raw_line_description,
+                },
+            ).mappings().first()
+
+            if inserted:
+                conn.commit()
+                return str(inserted["receipt_id"])
+
+            existing = conn.execute(
+                _text(
+                    """
+                    SELECT receipt_id
+                    FROM inventory_receipts
+                    WHERE site_id = :sid AND external_ref = :eref
+                    LIMIT 1
+                    """
+                ),
+                {"sid": site_id, "eref": external_ref},
+            ).mappings().first()
+            conn.commit()
+        return str(existing["receipt_id"]) if existing else None
+    except Exception as e:
+        logger.warning("store_inventory_receipt unavailable (non-fatal): %s", e)
+        return None
+
+
+def _parse_modifier_tokens(raw_modifiers) -> list[str]:
+    """
+    Normalize order_item.modifiers payload into lowercase tokens.
+    """
+    data = raw_modifiers
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (ValueError, TypeError):
+            data = [data]
+
+    tokens = []
+    if isinstance(data, list):
+        for m in data:
+            if isinstance(m, dict):
+                name = m.get("name") or m.get("modifier_name") or m.get("label")
+                if name:
+                    tokens.append(str(name).lower())
+            elif m is not None:
+                tokens.append(str(m).lower())
+    elif isinstance(data, dict):
+        for value in data.values():
+            if value is not None:
+                tokens.append(str(value).lower())
+    elif data is not None:
+        tokens.append(str(data).lower())
+    return tokens
+
+
+def _to_naive_utc(dt_val: datetime) -> Optional[datetime]:
+    if not isinstance(dt_val, datetime):
+        return None
+    if dt_val.tzinfo is not None:
+        return dt_val.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt_val
+
+
+def _terms_match(tokens: list[str], terms_csv: str, require: bool) -> bool:
+    """
+    CSV term matching helper used by inventory usage rules.
+    require=True  => at least one term must match token text.
+    require=False => no term may match token text.
+    """
+    terms = [t.strip().lower() for t in str(terms_csv or "").split(",") if t.strip()]
+    if not terms:
+        return True
+    token_text = " ".join(tokens)
+    matched = any(term in token_text for term in terms)
+    return matched if require else (not matched)
+
+
+def get_inventory_alerts(
+    site_id: str,
+    lookback_days: int = 21,
+    include_ok: bool = False,
+) -> list[dict]:
+    """
+    Compute live inventory position and low-stock alerts.
+
+    Formula per item:
+      effective_on_hand =
+        latest_physical_count
+        + receipts_since_count
+        - consumed_since_count (derived from order_items + usage rules)
+    """
+    items = list_inventory_items(site_id, active_only=True)
+    if not items:
+        return []
+
+    now = datetime.utcnow()
+    default_start = now - timedelta(days=max(1, int(lookback_days or 21)))
+
+    item_by_id = {it["inventory_item_id"]: it for it in items}
+    item_start: dict[str, datetime] = {}
+    for it in items:
+        counted_at = it.get("last_counted_at")
+        if counted_at:
+            try:
+                parsed = datetime.fromisoformat(str(counted_at).replace("Z", "+00:00"))
+                start_dt = _to_naive_utc(parsed) or default_start
+            except ValueError:
+                start_dt = default_start
+        else:
+            start_dt = default_start
+        item_start[it["inventory_item_id"]] = start_dt
+
+    global_start = min(item_start.values()) if item_start else default_start
+
+    # Receipts since earliest relevant start.
+    receipts_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
+    try:
+        with engine.connect() as conn:
+            receipt_rows = conn.execute(
+                _text(
+                    """
+                    SELECT inventory_item_id, received_at, quantity_units
+                    FROM inventory_receipts
+                    WHERE site_id = :sid
+                      AND received_at >= :start_at
+                      AND received_at <= :end_at
+                    """
+                ),
+                {"sid": site_id, "start_at": global_start, "end_at": now},
+            ).mappings().all()
+
+        for r in receipt_rows:
+            item_id = str(r["inventory_item_id"])
+            if item_id not in item_by_id:
+                continue
+            received_at = _to_naive_utc(r.get("received_at"))
+            if received_at and received_at < item_start[item_id]:
+                continue
+            receipts_by_item[item_id] += float(r.get("quantity_units") or 0)
+    except Exception as e:
+        logger.warning("Inventory receipts query unavailable (non-fatal): %s", e)
+
+    # Usage since earliest relevant start (computed from rules + orders).
+    usage_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
+    rules = list_inventory_usage_rules(site_id, active_only=True)
+    if rules:
+        rules_by_trigger: dict[str, list[dict]] = {}
+        for rule in rules:
+            trigger = (rule.get("trigger_item_name") or "").strip().lower()
+            if not trigger:
+                continue
+            rules_by_trigger.setdefault(trigger, []).append(rule)
+
+        if rules_by_trigger:
+            try:
+                with engine.connect() as conn:
+                    order_rows = conn.execute(
+                        _text(
+                            """
+                            SELECT item_name, quantity, modifiers, created_at
+                            FROM order_items
+                            WHERE site_id = :sid
+                              AND created_at >= :start_at
+                              AND created_at <= :end_at
+                            """
+                        ),
+                        {"sid": site_id, "start_at": global_start, "end_at": now},
+                    ).mappings().all()
+            except Exception as e:
+                logger.warning("Inventory usage order query unavailable (non-fatal): %s", e)
+                order_rows = []
+
+            for row in order_rows:
+                trigger_key = (row.get("item_name") or "").strip().lower()
+                if not trigger_key:
+                    continue
+                candidates = rules_by_trigger.get(trigger_key) or []
+                if not candidates:
+                    continue
+
+                created_at = _to_naive_utc(row.get("created_at")) or now
+                qty = max(0, int(row.get("quantity") or 0))
+                if qty <= 0:
+                    continue
+                tokens = _parse_modifier_tokens(row.get("modifiers"))
+
+                for rule in candidates:
+                    item_id = rule.get("inventory_item_id")
+                    if item_id not in item_by_id:
+                        continue
+                    if created_at < item_start[item_id]:
+                        continue
+                    if not _terms_match(tokens, rule.get("required_modifier_terms"), require=True):
+                        continue
+                    if not _terms_match(tokens, rule.get("excluded_modifier_terms"), require=False):
+                        continue
+
+                    usage_by_item[item_id] += qty * float(rule.get("units_per_sale") or 0)
+
+    # Build positions and alert payloads.
+    alerts = []
+    for item_id, item in item_by_id.items():
+        base_count = item.get("last_count_on_hand")
+        reorder_point = float(item.get("reorder_point") or 0)
+        par_level = item.get("par_level")
+        lead_time_days = int(item.get("lead_time_days") or 0)
+        start_dt = item_start[item_id]
+        days_observed = max(1, (now.date() - start_dt.date()).days + 1)
+
+        received_units = float(receipts_by_item.get(item_id) or 0)
+        consumed_units = float(usage_by_item.get(item_id) or 0)
+
+        effective_on_hand = None
+        if base_count is not None:
+            effective_on_hand = float(base_count) + received_units - consumed_units
+
+        daily_usage_units = consumed_units / days_observed if consumed_units > 0 else 0.0
+        days_remaining = (
+            (effective_on_hand / daily_usage_units)
+            if effective_on_hand is not None and daily_usage_units > 0
+            else None
+        )
+
+        if base_count is None:
+            status = "needs_count"
+            severity = "warning"
+        elif effective_on_hand <= 0:
+            status = "out_of_stock"
+            severity = "warning"
+        elif effective_on_hand <= reorder_point:
+            status = "low_stock"
+            severity = "warning"
+        elif days_remaining is not None and days_remaining <= max(1, lead_time_days):
+            status = "reorder_soon"
+            severity = "opportunity"
+        else:
+            status = "ok"
+            severity = "info"
+
+        target_level = (
+            float(par_level) if par_level is not None else max(reorder_point, 0.0)
+        )
+        recommended_reorder_units = (
+            max(0.0, target_level - float(effective_on_hand))
+            if effective_on_hand is not None and target_level > 0
+            else None
+        )
+
+        payload = {
+            "inventory_item_id": item_id,
+            "item_name": item.get("item_name"),
+            "score_key": item.get("score_key"),
+            "unit": item.get("unit") or "units",
+            "status": status,
+            "severity": severity,
+            "effective_on_hand": (
+                round(float(effective_on_hand), 3)
+                if effective_on_hand is not None
+                else None
+            ),
+            "last_count_on_hand": (
+                round(float(base_count), 3) if base_count is not None else None
+            ),
+            "receipts_since_count": round(received_units, 3),
+            "consumed_since_count": round(consumed_units, 3),
+            "daily_usage_units": round(daily_usage_units, 3),
+            "days_remaining": (
+                round(float(days_remaining), 2)
+                if days_remaining is not None
+                else None
+            ),
+            "reorder_point": reorder_point,
+            "par_level": float(par_level) if par_level is not None else None,
+            "lead_time_days": lead_time_days,
+            "recommended_reorder_units": (
+                round(float(recommended_reorder_units), 3)
+                if recommended_reorder_units is not None
+                else None
+            ),
+            "last_counted_at": item.get("last_counted_at"),
+            "window_start": start_dt.isoformat(),
+            "window_days": days_observed,
+        }
+        if include_ok or status != "ok":
+            alerts.append(payload)
+
+    severity_rank = {"warning": 0, "opportunity": 1, "info": 2}
+    alerts.sort(
+        key=lambda a: (
+            severity_rank.get(a.get("severity"), 9),
+            a.get("days_remaining") if a.get("days_remaining") is not None else 9999,
+            a.get("item_name") or "",
+        )
+    )
+    return alerts
+
+
+def bootstrap_default_inventory_rules(site_id: str) -> dict:
+    """
+    Bootstrap a practical default consumables model for cafe beverages:
+      - 12oz cup + 90mm lid per hot coffee sold
+      - 20g coffee beans per espresso-based coffee
+      - 355ml milk per milk-based drink with modifier-based milk variants
+    """
+    items = [
+        {
+            "item_name": "12oz cups",
+            "score_key": "cup_12oz",
+            "unit": "each",
+            "reorder_point": 300,
+            "par_level": 1200,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "90mm lids",
+            "score_key": "lid_90mm",
+            "unit": "each",
+            "reorder_point": 300,
+            "par_level": 1200,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "coffee beans",
+            "score_key": "coffee_beans_g",
+            "unit": "g",
+            "reorder_point": 2500,
+            "par_level": 12000,
+            "lead_time_days": 3,
+        },
+        {
+            "item_name": "full cream milk",
+            "score_key": "full_cream_milk_ml",
+            "unit": "ml",
+            "reorder_point": 5000,
+            "par_level": 30000,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "skim milk",
+            "score_key": "skim_milk_ml",
+            "unit": "ml",
+            "reorder_point": 2000,
+            "par_level": 12000,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "almond milk",
+            "score_key": "almond_milk_ml",
+            "unit": "ml",
+            "reorder_point": 2000,
+            "par_level": 12000,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "soy milk",
+            "score_key": "soy_milk_ml",
+            "unit": "ml",
+            "reorder_point": 2000,
+            "par_level": 12000,
+            "lead_time_days": 2,
+        },
+        {
+            "item_name": "oat milk",
+            "score_key": "oat_milk_ml",
+            "unit": "ml",
+            "reorder_point": 4000,
+            "par_level": 20000,
+            "lead_time_days": 2,
+        },
+    ]
+
+    item_ids: dict[str, str] = {}
+    for spec in items:
+        item_id = upsert_inventory_item(
+            site_id=site_id,
+            item_name=spec["item_name"],
+            score_key=spec["score_key"],
+            unit=spec["unit"],
+            reorder_point=spec["reorder_point"],
+            par_level=spec["par_level"],
+            lead_time_days=spec["lead_time_days"],
+            active=True,
+            metadata={"bootstrap": "coffee_defaults_v1"},
+        )
+        item_ids[spec["score_key"]] = item_id
+
+    # Trigger names should match order_items.item_name (case-insensitive).
+    hot_12oz = ["latte", "cappuccino", "flat white", "mocha"]
+    espresso_based = ["espresso", "long black", "latte", "cappuccino", "flat white", "mocha"]
+    milk_based = ["latte", "cappuccino", "flat white", "mocha"]
+
+    rules_count = 0
+
+    for trigger in hot_12oz:
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["cup_12oz"],
+            trigger_item_name=trigger,
+            units_per_sale=1,
+            priority=10,
+            active=True,
+        )
+        rules_count += 1
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["lid_90mm"],
+            trigger_item_name=trigger,
+            units_per_sale=1,
+            priority=10,
+            active=True,
+        )
+        rules_count += 1
+
+    for trigger in espresso_based:
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["coffee_beans_g"],
+            trigger_item_name=trigger,
+            units_per_sale=20,
+            priority=20,
+            active=True,
+        )
+        rules_count += 1
+
+    for trigger in milk_based:
+        # Default milk allocation: full cream unless alt modifier present.
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["full_cream_milk_ml"],
+            trigger_item_name=trigger,
+            units_per_sale=355,
+            excluded_modifier_terms="oat,soy,almond,skim",
+            priority=30,
+            active=True,
+        )
+        rules_count += 1
+
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["oat_milk_ml"],
+            trigger_item_name=trigger,
+            units_per_sale=355,
+            required_modifier_terms="oat",
+            priority=31,
+            active=True,
+        )
+        rules_count += 1
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["soy_milk_ml"],
+            trigger_item_name=trigger,
+            units_per_sale=355,
+            required_modifier_terms="soy",
+            priority=31,
+            active=True,
+        )
+        rules_count += 1
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["almond_milk_ml"],
+            trigger_item_name=trigger,
+            units_per_sale=355,
+            required_modifier_terms="almond",
+            priority=31,
+            active=True,
+        )
+        rules_count += 1
+        upsert_inventory_usage_rule(
+            site_id=site_id,
+            inventory_item_id=item_ids["skim_milk_ml"],
+            trigger_item_name=trigger,
+            units_per_sale=355,
+            required_modifier_terms="skim",
+            priority=31,
+            active=True,
+        )
+        rules_count += 1
+
+    return {
+        "items_upserted": len(item_ids),
+        "rules_upserted": rules_count,
+        "inventory_item_ids_by_score_key": item_ids,
+    }
 
 
 # ============================================================
@@ -2514,6 +3647,139 @@ def get_all_xero_mappings(site_id: str) -> list[dict]:
         return [dict(row) for row in result.mappings()]
 
 
+def _ensure_xero_financial_facts_table(conn) -> None:
+    """Create daily Xero financial facts table lazily for backward compatibility."""
+    conn.execute(
+        _text(
+            """
+            CREATE TABLE IF NOT EXISTS xero_financial_facts (
+                fact_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                site_id UUID NOT NULL REFERENCES sites(site_id),
+                fact_date DATE NOT NULL,
+                income_cents INT NOT NULL DEFAULT 0,
+                expense_cents INT NOT NULL DEFAULT 0,
+                payroll_cents INT,
+                net_cash_cents INT NOT NULL DEFAULT 0,
+                txn_count INT NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'xero_bank_transactions',
+                completeness TEXT NOT NULL DEFAULT 'partial',
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(site_id, fact_date)
+            )
+            """
+        )
+    )
+    conn.execute(
+        _text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_xero_financial_facts_site_date
+            ON xero_financial_facts(site_id, fact_date DESC)
+            """
+        )
+    )
+
+
+def upsert_xero_financial_fact(
+    site_id: str,
+    fact_date: date,
+    income_cents: int,
+    expense_cents: int,
+    payroll_cents: Optional[int] = None,
+    txn_count: int = 0,
+    source: str = "xero_bank_transactions",
+    completeness: str = "partial",
+) -> None:
+    """
+    Upsert one day of factual Xero cashflow.
+    """
+    income = int(income_cents or 0)
+    expense = int(expense_cents or 0)
+    payroll = int(payroll_cents) if payroll_cents is not None else None
+    net_cash = income - expense
+    txns = int(txn_count or 0)
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                _text(
+                    """
+                    INSERT INTO xero_financial_facts
+                        (site_id, fact_date, income_cents, expense_cents, payroll_cents,
+                         net_cash_cents, txn_count, source, completeness, updated_at)
+                    VALUES
+                        (:sid, :d, :income, :expense, :payroll,
+                         :net_cash, :txns, :src, :comp, NOW())
+                    ON CONFLICT (site_id, fact_date) DO UPDATE SET
+                        income_cents = EXCLUDED.income_cents,
+                        expense_cents = EXCLUDED.expense_cents,
+                        payroll_cents = EXCLUDED.payroll_cents,
+                        net_cash_cents = EXCLUDED.net_cash_cents,
+                        txn_count = EXCLUDED.txn_count,
+                        source = EXCLUDED.source,
+                        completeness = EXCLUDED.completeness,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "d": fact_date,
+                    "income": income,
+                    "expense": expense,
+                    "payroll": payroll,
+                    "net_cash": net_cash,
+                    "txns": txns,
+                    "src": source,
+                    "comp": completeness,
+                },
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning("Skipping xero_financial_facts upsert (non-fatal): %s", e)
+
+
+def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: date) -> dict:
+    """
+    Aggregate factual Xero cashflow for a date window.
+    """
+    row = None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        COUNT(*) AS days_covered,
+                        COALESCE(SUM(income_cents), 0) AS income_cents,
+                        COALESCE(SUM(expense_cents), 0) AS expense_cents,
+                        COALESCE(SUM(payroll_cents), 0) AS payroll_cents,
+                        COALESCE(SUM(net_cash_cents), 0) AS net_cash_cents,
+                        COALESCE(SUM(txn_count), 0) AS txn_count,
+                        MAX(fact_date) AS latest_fact_date,
+                        MAX(updated_at)::date AS latest_update_date,
+                        COALESCE(SUM(CASE WHEN completeness = 'full' THEN 1 ELSE 0 END), 0) AS full_days
+                    FROM xero_financial_facts
+                    WHERE site_id = :sid
+                      AND fact_date BETWEEN :s AND :e
+                    """
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            ).mappings().first()
+    except Exception as e:
+        logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", e)
+
+    return {
+        "days_covered": int((row or {}).get("days_covered") or 0),
+        "income_cents": int((row or {}).get("income_cents") or 0),
+        "expense_cents": int((row or {}).get("expense_cents") or 0),
+        "payroll_cents": int((row or {}).get("payroll_cents") or 0),
+        "net_cash_cents": int((row or {}).get("net_cash_cents") or 0),
+        "txn_count": int((row or {}).get("txn_count") or 0),
+        "latest_fact_date": (row or {}).get("latest_fact_date"),
+        "latest_update_date": (row or {}).get("latest_update_date"),
+        "full_days": int((row or {}).get("full_days") or 0),
+    }
+
+
 def get_data_freshness(site_id: str) -> Optional[str]:
     """Get the most recent closed_at date from orders_raw."""
     with engine.connect() as conn:
@@ -2984,6 +4250,478 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
     }
 
 
+def _profitability_summary(site_id: str, start_date: date, end_date: date) -> dict:
+    """Aggregate daily_profitability KPIs for a date range."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            _text(
+                """
+                SELECT
+                    COUNT(*) AS days_count,
+                    SUM(revenue_cents) AS total_revenue_cents,
+                    SUM(labor_cost_cents) AS total_labor_cost_cents,
+                    SUM(cogs_cents) AS total_cogs_cents,
+                    SUM(net_profit_cents) AS total_net_profit_cents,
+                    AVG(labor_pct) AS avg_labor_pct,
+                    AVG(revenue_per_labor_hour) AS avg_revenue_per_labor_hour_cents
+                FROM daily_profitability
+                WHERE site_id = :sid
+                  AND profit_date BETWEEN :s AND :e
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        ).mappings().first()
+
+    total_revenue = int((row or {}).get("total_revenue_cents") or 0)
+    total_net = int((row or {}).get("total_net_profit_cents") or 0)
+    return {
+        "days_count": int((row or {}).get("days_count") or 0),
+        "total_revenue_cents": total_revenue,
+        "total_labor_cost_cents": int((row or {}).get("total_labor_cost_cents") or 0),
+        "total_cogs_cents": int((row or {}).get("total_cogs_cents") or 0),
+        "total_net_profit_cents": total_net,
+        "net_margin_pct": round((total_net / total_revenue) * 100, 2) if total_revenue > 0 else None,
+        "avg_labor_pct": (
+            round(float(row["avg_labor_pct"]), 2)
+            if row and row.get("avg_labor_pct") is not None
+            else None
+        ),
+        "avg_revenue_per_labor_hour_cents": (
+            round(float(row["avg_revenue_per_labor_hour_cents"]))
+            if row and row.get("avg_revenue_per_labor_hour_cents") is not None
+            else None
+        ),
+    }
+
+
+def _pct_change(current: Optional[float], previous: Optional[float]) -> Optional[float]:
+    if current is None or previous is None or previous == 0:
+        return None
+    return round(((current - previous) / previous) * 100, 2)
+
+
+def _trend_direction(delta: Optional[float], inverse: bool = False, epsilon: float = 0.01) -> str:
+    if delta is None:
+        return "unknown"
+    adj = -delta if inverse else delta
+    if abs(adj) <= epsilon:
+        return "stable"
+    return "improving" if adj > 0 else "declining"
+
+
+def get_bottom_line_scorecard(
+    site_id: str,
+    days: int = 30,
+    compare_days: int = 7,
+    top_actions_limit: int = 6,
+) -> dict:
+    """
+    Unified bottom-line view for dashboard/chat grounding.
+
+    Includes:
+      - trailing profitability window KPIs
+      - current vs previous short-window trend deltas
+      - staffing efficiency delta from workload/deputy model
+      - recommendation adoption + realized impact attribution
+    """
+    window_days = max(7, min(days, 120))
+    compare_window_days = max(3, min(compare_days, 28))
+    top_limit = max(1, min(top_actions_limit, 12))
+
+    with engine.connect() as conn:
+        anchor_row = conn.execute(
+            _text(
+                """
+                SELECT MAX(profit_date) AS latest_date
+                FROM daily_profitability
+                WHERE site_id = :sid
+                """
+            ),
+            {"sid": site_id},
+        ).mappings().first()
+
+    anchor_date = (anchor_row or {}).get("latest_date")
+    if not anchor_date:
+        return {
+            "site_id": site_id,
+            "window": {
+                "days": window_days,
+                "compare_days": compare_window_days,
+                "start_date": None,
+                "end_date": None,
+            },
+            "headline": "No profitability data available yet.",
+            "kpis": {},
+            "trend": {"current_window": {}, "previous_window": {}, "deltas": {}, "directions": {}},
+            "actions": {
+                "recommendations_generated": 0,
+                "recommendations_adopted": 0,
+                "adoption_rate": None,
+                "realized_actions": 0,
+                "avg_realized_weekly_profit_delta_cents": None,
+                "total_realized_weekly_profit_delta_cents": None,
+                "avg_realized_labor_pct_delta_pp": None,
+                "avg_realized_rev_per_labor_hour_delta_pct": None,
+                "top_proven_action_types": [],
+            },
+            "financial_truth": {
+                "mode": "estimated_fallback",
+                "reporting_breakdown_source": "square_orders",
+                "factual_source": "unavailable",
+                "coverage_days": 0,
+                "coverage_ratio": 0.0,
+                "window_days": window_days,
+                "income_cents": 0,
+                "expense_cents": 0,
+                "payroll_cents": None,
+                "net_cash_cents": 0,
+                "txn_count": 0,
+                "latest_fact_date": None,
+                "latest_update_date": None,
+                "full_days": 0,
+                "estimated_fallback": True,
+            },
+        }
+
+    end_date = anchor_date
+    start_date = end_date - timedelta(days=window_days - 1)
+    current_start = end_date - timedelta(days=compare_window_days - 1)
+    previous_end = current_start - timedelta(days=1)
+    previous_start = previous_end - timedelta(days=compare_window_days - 1)
+
+    overall = _profitability_summary(site_id, start_date, end_date)
+    current = _profitability_summary(site_id, current_start, end_date)
+    previous = _profitability_summary(site_id, previous_start, previous_end)
+
+    current_efficiency = None
+    previous_efficiency = None
+    current_excess = None
+    previous_excess = None
+    try:
+        current_gap = get_efficiency_gap_range(site_id, current_start, end_date)
+        current_totals = current_gap.get("totals", {})
+        current_efficiency = current_totals.get("efficiency_score")
+        current_excess = int(current_totals.get("excess_labor_cents") or 0)
+    except Exception:
+        logger.exception("Unable to compute current efficiency for scorecard")
+
+    try:
+        previous_gap = get_efficiency_gap_range(site_id, previous_start, previous_end)
+        previous_totals = previous_gap.get("totals", {})
+        previous_efficiency = previous_totals.get("efficiency_score")
+        previous_excess = int(previous_totals.get("excess_labor_cents") or 0)
+    except Exception:
+        logger.exception("Unable to compute previous efficiency for scorecard")
+
+    with engine.connect() as conn:
+        action_summary = conn.execute(
+            _text(
+                """
+                WITH recs AS (
+                    SELECT rec_id
+                    FROM recommendations
+                    WHERE site_id = :sid
+                      AND DATE(created_at) BETWEEN :s AND :e
+                ),
+                adopted AS (
+                    SELECT DISTINCT al.rec_id
+                    FROM adoption_logs al
+                    JOIN recs r ON r.rec_id = al.rec_id
+                    WHERE al.site_id = :sid
+                      AND al.adopted = TRUE
+                      AND al.log_date BETWEEN :s AND :e
+                ),
+                realized AS (
+                    SELECT
+                        r.rec_id,
+                        NULLIF(r.outcome_data->'realized'->>'weekly_net_profit_delta_cents', '')::numeric
+                            AS weekly_profit_delta_cents,
+                        NULLIF(r.outcome_data->'realized'->>'labor_pct_delta_pp', '')::numeric
+                            AS labor_pct_delta_pp,
+                        NULLIF(r.outcome_data->'realized'->>'rev_per_labor_hour_delta_pct', '')::numeric
+                            AS rev_per_labor_hour_delta_pct
+                    FROM recommendations r
+                    JOIN adopted a ON a.rec_id = r.rec_id
+                    WHERE r.site_id = :sid
+                      AND r.outcome_data->'realized' IS NOT NULL
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM recs) AS recommendations_generated,
+                    (SELECT COUNT(*) FROM adopted) AS recommendations_adopted,
+                    (SELECT COUNT(*) FROM realized) AS realized_actions,
+                    (SELECT AVG(weekly_profit_delta_cents) FROM realized)
+                        AS avg_realized_weekly_profit_delta_cents,
+                    (SELECT SUM(weekly_profit_delta_cents) FROM realized)
+                        AS total_realized_weekly_profit_delta_cents,
+                    (SELECT AVG(labor_pct_delta_pp) FROM realized)
+                        AS avg_realized_labor_pct_delta_pp,
+                    (SELECT AVG(rev_per_labor_hour_delta_pct) FROM realized)
+                        AS avg_realized_rev_per_labor_hour_delta_pct
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date},
+        ).mappings().first()
+
+        top_actions = conn.execute(
+            _text(
+                """
+                WITH adopted AS (
+                    SELECT DISTINCT rec_id
+                    FROM adoption_logs
+                    WHERE site_id = :sid
+                      AND adopted = TRUE
+                      AND log_date BETWEEN :s AND :e
+                ),
+                realized AS (
+                    SELECT
+                        r.action_type,
+                        NULLIF(r.outcome_data->'realized'->>'weekly_net_profit_delta_cents', '')::numeric
+                            AS weekly_profit_delta_cents,
+                        NULLIF(r.outcome_data->'realized'->>'labor_pct_delta_pp', '')::numeric
+                            AS labor_pct_delta_pp,
+                        NULLIF(r.outcome_data->'realized'->>'rev_per_labor_hour_delta_pct', '')::numeric
+                            AS rev_per_labor_hour_delta_pct
+                    FROM recommendations r
+                    JOIN adopted a ON a.rec_id = r.rec_id
+                    WHERE r.site_id = :sid
+                      AND r.outcome_data->'realized' IS NOT NULL
+                )
+                SELECT
+                    action_type,
+                    COUNT(*) AS realized_count,
+                    AVG(weekly_profit_delta_cents) AS avg_realized_weekly_profit_delta_cents,
+                    SUM(weekly_profit_delta_cents) AS total_realized_weekly_profit_delta_cents,
+                    AVG(labor_pct_delta_pp) AS avg_realized_labor_pct_delta_pp,
+                    AVG(rev_per_labor_hour_delta_pct) AS avg_realized_rev_per_labor_hour_delta_pct
+                FROM realized
+                GROUP BY action_type
+                ORDER BY
+                    COALESCE(SUM(weekly_profit_delta_cents), 0) DESC,
+                    COUNT(*) DESC
+                LIMIT :lim
+                """
+            ),
+            {"sid": site_id, "s": start_date, "e": end_date, "lim": top_limit},
+        ).mappings().all()
+
+        try:
+            insights_summary = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        COUNT(*) AS insights_generated,
+                        COUNT(*) FILTER (WHERE severity IN ('warning', 'opportunity')) AS high_priority_insights
+                    FROM insights
+                    WHERE site_id = :sid
+                      AND cycle_date BETWEEN :s AND :e
+                    """
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            ).mappings().first()
+        except Exception as e:
+            logger.warning("insights summary unavailable for scorecard (non-fatal): %s", e)
+            insights_summary = {"insights_generated": 0, "high_priority_insights": 0}
+
+    profit_delta = (
+        current["total_net_profit_cents"] - previous["total_net_profit_cents"]
+        if previous["days_count"] > 0
+        else None
+    )
+    labor_pct_delta = (
+        round(current["avg_labor_pct"] - previous["avg_labor_pct"], 2)
+        if current["avg_labor_pct"] is not None and previous["avg_labor_pct"] is not None
+        else None
+    )
+    rev_per_labor_delta_pct = _pct_change(
+        current["avg_revenue_per_labor_hour_cents"],
+        previous["avg_revenue_per_labor_hour_cents"],
+    )
+    efficiency_delta = (
+        round((current_efficiency - previous_efficiency) * 100, 2)
+        if current_efficiency is not None and previous_efficiency is not None
+        else None
+    )
+
+    if current["days_count"] == 0:
+        headline = "No profitability data available yet."
+    elif profit_delta is None:
+        headline = "Baseline established; waiting for prior comparison window."
+    elif profit_delta >= 0 and (labor_pct_delta is None or labor_pct_delta <= 0):
+        headline = "Net profit and labor efficiency are improving versus prior window."
+    elif profit_delta >= 0:
+        headline = "Net profit is improving, but labor efficiency is mixed."
+    else:
+        headline = "Net profit declined versus prior window; prioritize proven actions."
+
+    generated = int((action_summary or {}).get("recommendations_generated") or 0)
+    adopted = int((action_summary or {}).get("recommendations_adopted") or 0)
+    action_payload = {
+        "recommendations_generated": generated,
+        "recommendations_adopted": adopted,
+        "adoption_rate": round(adopted / generated, 3) if generated > 0 else None,
+        "realized_actions": int((action_summary or {}).get("realized_actions") or 0),
+        "avg_realized_weekly_profit_delta_cents": (
+            round(float(action_summary["avg_realized_weekly_profit_delta_cents"]))
+            if action_summary and action_summary.get("avg_realized_weekly_profit_delta_cents") is not None
+            else None
+        ),
+        "total_realized_weekly_profit_delta_cents": (
+            round(float(action_summary["total_realized_weekly_profit_delta_cents"]))
+            if action_summary and action_summary.get("total_realized_weekly_profit_delta_cents") is not None
+            else None
+        ),
+        "avg_realized_labor_pct_delta_pp": (
+            round(float(action_summary["avg_realized_labor_pct_delta_pp"]), 2)
+            if action_summary and action_summary.get("avg_realized_labor_pct_delta_pp") is not None
+            else None
+        ),
+        "avg_realized_rev_per_labor_hour_delta_pct": (
+            round(float(action_summary["avg_realized_rev_per_labor_hour_delta_pct"]), 2)
+            if action_summary and action_summary.get("avg_realized_rev_per_labor_hour_delta_pct") is not None
+            else None
+        ),
+        "top_proven_action_types": [
+            {
+                "action_type": r.get("action_type"),
+                "realized_count": int(r.get("realized_count") or 0),
+                "avg_realized_weekly_profit_delta_cents": (
+                    round(float(r["avg_realized_weekly_profit_delta_cents"]))
+                    if r.get("avg_realized_weekly_profit_delta_cents") is not None
+                    else None
+                ),
+                "total_realized_weekly_profit_delta_cents": (
+                    round(float(r["total_realized_weekly_profit_delta_cents"]))
+                    if r.get("total_realized_weekly_profit_delta_cents") is not None
+                    else None
+                ),
+                "avg_realized_labor_pct_delta_pp": (
+                    round(float(r["avg_realized_labor_pct_delta_pp"]), 2)
+                    if r.get("avg_realized_labor_pct_delta_pp") is not None
+                    else None
+                ),
+                "avg_realized_rev_per_labor_hour_delta_pct": (
+                    round(float(r["avg_realized_rev_per_labor_hour_delta_pct"]), 2)
+                    if r.get("avg_realized_rev_per_labor_hour_delta_pct") is not None
+                    else None
+                ),
+            }
+            for r in top_actions
+        ],
+    }
+
+    xero_financial = None
+    try:
+        xero_financial = get_xero_financial_facts_summary(site_id, start_date, end_date)
+    except Exception:
+        logger.exception("Unable to compute Xero financial truth summary for scorecard")
+
+    coverage_days = int((xero_financial or {}).get("days_covered") or 0)
+    coverage_ratio = round(coverage_days / window_days, 3) if window_days > 0 else 0.0
+    fallback_expense = int(overall["total_labor_cost_cents"] or 0) + int(overall["total_cogs_cents"] or 0)
+    fallback_income = int(overall["total_revenue_cents"] or 0)
+    financial_truth = {
+        "mode": "xero_factual" if coverage_days > 0 else "estimated_fallback",
+        "reporting_breakdown_source": "square_orders",
+        "factual_source": "xero_bank_transactions" if coverage_days > 0 else "unavailable",
+        "coverage_days": coverage_days,
+        "coverage_ratio": coverage_ratio,
+        "window_days": window_days,
+        "income_cents": (
+            int((xero_financial or {}).get("income_cents") or 0)
+            if coverage_days > 0
+            else fallback_income
+        ),
+        "expense_cents": (
+            int((xero_financial or {}).get("expense_cents") or 0)
+            if coverage_days > 0
+            else fallback_expense
+        ),
+        "payroll_cents": (
+            int((xero_financial or {}).get("payroll_cents") or 0)
+            if coverage_days > 0 and (xero_financial or {}).get("payroll_cents") is not None
+            else None
+        ),
+        "net_cash_cents": (
+            int((xero_financial or {}).get("net_cash_cents") or 0)
+            if coverage_days > 0
+            else fallback_income - fallback_expense
+        ),
+        "txn_count": int((xero_financial or {}).get("txn_count") or 0),
+        "latest_fact_date": (
+            str((xero_financial or {}).get("latest_fact_date"))
+            if (xero_financial or {}).get("latest_fact_date")
+            else None
+        ),
+        "latest_update_date": (
+            str((xero_financial or {}).get("latest_update_date"))
+            if (xero_financial or {}).get("latest_update_date")
+            else None
+        ),
+        "full_days": int((xero_financial or {}).get("full_days") or 0),
+        "estimated_fallback": coverage_days <= 0,
+    }
+
+    return {
+        "site_id": site_id,
+        "window": {
+            "days": window_days,
+            "compare_days": compare_window_days,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "anchor_date": end_date.isoformat(),
+        },
+        "headline": headline,
+        "kpis": overall,
+        "trend": {
+            "current_window": {
+                "start_date": current_start.isoformat(),
+                "end_date": end_date.isoformat(),
+                **current,
+                "efficiency_score": current_efficiency,
+                "excess_labor_cents": current_excess,
+            },
+            "previous_window": {
+                "start_date": previous_start.isoformat(),
+                "end_date": previous_end.isoformat(),
+                **previous,
+                "efficiency_score": previous_efficiency,
+                "excess_labor_cents": previous_excess,
+            },
+            "deltas": {
+                "net_profit_cents": profit_delta,
+                "labor_pct_delta_pp": labor_pct_delta,
+                "revenue_per_labor_hour_delta_pct": rev_per_labor_delta_pct,
+                "efficiency_score_delta_pp": efficiency_delta,
+                "excess_labor_cents_delta": (
+                    current_excess - previous_excess
+                    if current_excess is not None and previous_excess is not None
+                    else None
+                ),
+            },
+            "directions": {
+                "net_profit": _trend_direction(profit_delta),
+                "labor_pct": _trend_direction(labor_pct_delta, inverse=True),
+                "revenue_per_labor_hour": _trend_direction(rev_per_labor_delta_pct),
+                "efficiency_score": _trend_direction(efficiency_delta),
+                "excess_labor": _trend_direction(
+                    (
+                        current_excess - previous_excess
+                        if current_excess is not None and previous_excess is not None
+                        else None
+                    ),
+                    inverse=True,
+                ),
+            },
+        },
+        "actions": action_payload,
+        "financial_truth": financial_truth,
+        "intelligence": {
+            "insights_generated": int((insights_summary or {}).get("insights_generated") or 0),
+            "high_priority_insights": int((insights_summary or {}).get("high_priority_insights") or 0),
+        },
+    }
+
+
 def _freshness_component(latest: Optional[date], max_green_days: int, max_yellow_days: int) -> tuple[str, Optional[int]]:
     if latest is None:
         return "red", None
@@ -3001,7 +4739,6 @@ def get_data_health(site_id: str) -> dict:
     Used as a gate for recommendation confidence.
     """
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
         # Square/orders freshness + today volume.
         orders_row = conn.execute(
             _text(
@@ -3061,7 +4798,7 @@ def get_data_health(site_id: str) -> dict:
                 SELECT
                     EXISTS(SELECT 1 FROM xero_tokens xt WHERE xt.site_id = :sid) AS connected,
                     COUNT(*) FILTER (WHERE source = 'xero') AS xero_cost_items,
-                    MAX(updated_at)::date FILTER (WHERE source = 'xero') AS xero_latest_date
+                    MAX(updated_at) FILTER (WHERE source = 'xero')::date AS xero_latest_date
                 FROM item_costs
                 WHERE site_id = :sid
                 """
@@ -3069,20 +4806,51 @@ def get_data_health(site_id: str) -> dict:
             {"sid": site_id},
         ).mappings().first()
 
-        quality_flags = conn.execute(
-            _text(
-                """
-                SELECT flag_date, flag_type, severity, source, reason
-                FROM data_quality_flags
-                WHERE site_id = :sid
-                  AND active = TRUE
-                  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')
-                  AND flag_date >= (CURRENT_DATE - INTERVAL '14 days')
-                ORDER BY flag_date DESC
-                """
-            ),
-            {"sid": site_id},
-        ).mappings().all()
+        try:
+            xero_financial_row = conn.execute(
+                _text(
+                    """
+                    SELECT
+                        MAX(fact_date) AS latest_date,
+                        COUNT(*) FILTER (
+                            WHERE fact_date BETWEEN CURRENT_DATE - INTERVAL '14 days' AND CURRENT_DATE
+                        ) AS days_14d
+                    FROM xero_financial_facts
+                    WHERE site_id = :sid
+                    """
+                ),
+                {"sid": site_id},
+            ).mappings().first()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("xero_financial_facts data-health component unavailable (non-fatal): %s", e)
+            xero_financial_row = {"latest_date": None, "days_14d": 0}
+
+        try:
+            quality_flags = conn.execute(
+                _text(
+                    """
+                    SELECT flag_date, flag_type, severity, source, reason
+                    FROM data_quality_flags
+                    WHERE site_id = :sid
+                      AND active = TRUE
+                      AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')
+                      AND flag_date >= (CURRENT_DATE - INTERVAL '14 days')
+                    ORDER BY flag_date DESC
+                    """
+                ),
+                {"sid": site_id},
+            ).mappings().all()
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("data_quality_flags unavailable for data health (non-fatal): %s", e)
+            quality_flags = []
 
     components = []
 
@@ -3151,6 +4919,28 @@ def get_data_health(site_id: str) -> dict:
             "latest_date": str(xero_latest) if xero_latest else None,
             "age_days": xero_age,
             "xero_cost_items": xero_items,
+        }
+    )
+
+    xero_fin_latest = (xero_financial_row or {}).get("latest_date")
+    xero_fin_days_14d = int((xero_financial_row or {}).get("days_14d") or 0)
+    if not xero_connected:
+        xero_fin_status = "yellow"
+        xero_fin_age = None
+    else:
+        xero_fin_status, xero_fin_age = _freshness_component(
+            xero_fin_latest, max_green_days=2, max_yellow_days=7
+        )
+        if xero_fin_days_14d <= 0:
+            xero_fin_status = "yellow"
+    components.append(
+        {
+            "source": "xero_financial_facts",
+            "status": xero_fin_status,
+            "connected": xero_connected,
+            "latest_date": str(xero_fin_latest) if xero_fin_latest else None,
+            "age_days": xero_fin_age,
+            "days_14d": xero_fin_days_14d,
         }
     )
 

@@ -101,6 +101,36 @@ class WeeklyReviewParams(BaseModel):
     week_end: Optional[date] = None
 
 
+# --- Inventory ---
+
+class InventoryItemUpsertRequest(BaseModel):
+    item_name: str
+    score_key: Optional[str] = None
+    unit: str = "units"
+    reorder_point: float = Field(default=0, ge=0)
+    par_level: Optional[float] = Field(default=None, ge=0)
+    lead_time_days: int = Field(default=2, ge=0, le=30)
+    active: bool = True
+    metadata: Optional[dict] = None
+
+
+class InventoryCountRequest(BaseModel):
+    quantity_on_hand: float = Field(..., ge=0)
+    counted_at: Optional[datetime] = None
+    source: str = "manual"
+    notes: Optional[str] = None
+
+
+class InventoryUsageRuleUpsertRequest(BaseModel):
+    inventory_item_id: str
+    trigger_item_name: str
+    units_per_sale: float = Field(..., ge=0)
+    required_modifier_terms: Optional[str] = None
+    excluded_modifier_terms: Optional[str] = None
+    priority: int = Field(default=100, ge=1, le=1000)
+    active: bool = True
+
+
 # --- Tomorrow Plan ---
 
 class TomorrowPlanParams(BaseModel):

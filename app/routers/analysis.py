@@ -3,12 +3,19 @@ from datetime import date
 from typing import Optional
 
 from app.dependencies import get_validated_site
+from app.schemas import (
+    InventoryCountRequest,
+    InventoryItemUpsertRequest,
+    InventoryUsageRuleUpsertRequest,
+)
 from analysis.accuracy import get_rolling_accuracy, get_adoption_metrics
 from analysis.next_actions import generate_next_actions, persist_next_actions
 from analysis.shift_optimizer import optimize_shifts, optimize_shifts_range
 from analysis.workflow import analyze_workflow, generate_roster_change_plan
 from analysis.reporting import generate_weekly_review, generate_weekly_roi_report
 from data.storage import (
+    bootstrap_default_inventory_rules,
+    get_bottom_line_scorecard,
     get_day_ingest_diagnostics,
     get_data_quality_flags,
     backfill_realized_impacts,
@@ -16,9 +23,15 @@ from data.storage import (
     upsert_data_quality_flag,
     get_data_health,
     get_daily_efficiency_snapshot,
+    get_inventory_alerts,
+    list_inventory_items,
+    list_inventory_usage_rules,
     get_pipeline_health,
     get_recent_pipeline_runs,
     get_staffing_variance_intervals,
+    store_inventory_count,
+    upsert_inventory_item,
+    upsert_inventory_usage_rule,
 )
 
 router = APIRouter(prefix="/api/sites/{site_id}/analysis", tags=["analysis"])
@@ -74,6 +87,19 @@ def weekly_roi(
     )
 
 
+@router.get("/bottom-line-scorecard")
+def bottom_line_scorecard(
+    site: dict = Depends(get_validated_site),
+    days: int = Query(default=30, ge=7, le=120),
+    compare_days: int = Query(default=7, ge=3, le=28),
+):
+    return get_bottom_line_scorecard(
+        site_id=site["site_id"],
+        days=days,
+        compare_days=compare_days,
+    )
+
+
 @router.get("/staffing-variance")
 def staffing_variance(
     site: dict = Depends(get_validated_site),
@@ -99,6 +125,120 @@ def daily_efficiency(
 @router.get("/data-health")
 def data_health(site: dict = Depends(get_validated_site)):
     return get_data_health(site_id=site["site_id"])
+
+
+@router.get("/inventory/items")
+def inventory_items(
+    site: dict = Depends(get_validated_site),
+    active_only: bool = Query(default=True),
+):
+    return {
+        "site_id": site["site_id"],
+        "items": list_inventory_items(site["site_id"], active_only=active_only),
+    }
+
+
+@router.post("/inventory/items")
+def inventory_item_upsert(
+    payload: InventoryItemUpsertRequest,
+    site: dict = Depends(get_validated_site),
+):
+    inventory_item_id = upsert_inventory_item(
+        site_id=site["site_id"],
+        item_name=payload.item_name,
+        score_key=payload.score_key,
+        unit=payload.unit,
+        reorder_point=payload.reorder_point,
+        par_level=payload.par_level,
+        lead_time_days=payload.lead_time_days,
+        active=payload.active,
+        metadata=payload.metadata,
+    )
+    return {"status": "ok", "site_id": site["site_id"], "inventory_item_id": inventory_item_id}
+
+
+@router.post("/inventory/items/{inventory_item_id}/count")
+def inventory_item_count(
+    inventory_item_id: str,
+    payload: InventoryCountRequest,
+    site: dict = Depends(get_validated_site),
+):
+    count_id = store_inventory_count(
+        site_id=site["site_id"],
+        inventory_item_id=inventory_item_id,
+        quantity_on_hand=payload.quantity_on_hand,
+        counted_at=payload.counted_at,
+        source=payload.source,
+        notes=payload.notes,
+    )
+    alerts = get_inventory_alerts(site["site_id"], lookback_days=30, include_ok=False)
+    item_alert = next(
+        (a for a in alerts if a.get("inventory_item_id") == inventory_item_id),
+        None,
+    )
+    return {
+        "status": "ok",
+        "site_id": site["site_id"],
+        "count_id": count_id,
+        "inventory_item_id": inventory_item_id,
+        "alert": item_alert,
+    }
+
+
+@router.get("/inventory/rules")
+def inventory_rules(
+    site: dict = Depends(get_validated_site),
+    active_only: bool = Query(default=True),
+):
+    return {
+        "site_id": site["site_id"],
+        "rules": list_inventory_usage_rules(site["site_id"], active_only=active_only),
+    }
+
+
+@router.post("/inventory/rules")
+def inventory_rule_upsert(
+    payload: InventoryUsageRuleUpsertRequest,
+    site: dict = Depends(get_validated_site),
+):
+    rule_id = upsert_inventory_usage_rule(
+        site_id=site["site_id"],
+        inventory_item_id=payload.inventory_item_id,
+        trigger_item_name=payload.trigger_item_name,
+        units_per_sale=payload.units_per_sale,
+        required_modifier_terms=payload.required_modifier_terms,
+        excluded_modifier_terms=payload.excluded_modifier_terms,
+        priority=payload.priority,
+        active=payload.active,
+    )
+    return {"status": "ok", "site_id": site["site_id"], "rule_id": rule_id}
+
+
+@router.post("/inventory/bootstrap-default-rules")
+def inventory_bootstrap_defaults(site: dict = Depends(get_validated_site)):
+    summary = bootstrap_default_inventory_rules(site["site_id"])
+    return {"status": "ok", "site_id": site["site_id"], **summary}
+
+
+@router.get("/inventory/alerts")
+def inventory_alerts(
+    site: dict = Depends(get_validated_site),
+    lookback_days: int = Query(default=21, ge=7, le=120),
+    include_ok: bool = Query(default=False),
+):
+    alerts = get_inventory_alerts(
+        site_id=site["site_id"],
+        lookback_days=lookback_days,
+        include_ok=include_ok,
+    )
+    return {
+        "site_id": site["site_id"],
+        "lookback_days": lookback_days,
+        "alerts_total": len(alerts),
+        "warning_count": sum(1 for a in alerts if a.get("severity") == "warning"),
+        "opportunity_count": sum(1 for a in alerts if a.get("severity") == "opportunity"),
+        "alerts": alerts,
+    }
 
 
 @router.get("/pipeline-runs")
