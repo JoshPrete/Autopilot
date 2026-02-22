@@ -239,27 +239,32 @@ def get_recent_pattern(
     cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
 
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
-        result = conn.execute(
-            _text(
-                "SELECT workload_units FROM workload_timeline "
-                "WHERE site_id = :sid "
-                "AND EXTRACT(DOW FROM interval_start) = :dow "
-                "AND EXTRACT(HOUR FROM interval_start) = :hr "
-                "AND interval_start >= :cutoff "
+        has_flags = bool(
+            conn.execute(
+                _text("SELECT to_regclass('public.data_quality_flags') IS NOT NULL")
+            ).scalar()
+        )
+        where_clause = (
+            "WHERE site_id = :sid "
+            "AND EXTRACT(DOW FROM interval_start) = :dow "
+            "AND EXTRACT(HOUR FROM interval_start) = :hr "
+            "AND interval_start >= :cutoff "
+        )
+        if has_flags:
+            where_clause += (
                 "AND DATE(interval_start) NOT IN ("
                 "  SELECT flag_date FROM data_quality_flags "
                 "  WHERE site_id = :sid AND active = TRUE "
                 "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
                 ") "
+            )
+        result = conn.execute(
+            _text(
+                "SELECT workload_units FROM workload_timeline "
+                f"{where_clause}"
                 "ORDER BY interval_start"
             ),
-            {
-                "sid": site_id,
-                "dow": day_of_week,
-                "hr": hour,
-                "cutoff": cutoff,
-            },
+            {"sid": site_id, "dow": day_of_week, "hr": hour, "cutoff": cutoff},
         )
         values = [float(row[0]) for row in result]
 
@@ -299,25 +304,31 @@ def get_yoy_pattern(
         return []
 
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
-        result = conn.execute(
-            _text(
-                "SELECT workload_units FROM workload_timeline "
-                "WHERE site_id = :sid "
-                "AND EXTRACT(WEEK FROM interval_start) = :week "
-                "AND EXTRACT(YEAR FROM interval_start) = ANY(:years) "
+        has_flags = bool(
+            conn.execute(
+                _text("SELECT to_regclass('public.data_quality_flags') IS NOT NULL")
+            ).scalar()
+        )
+        where_clause = (
+            "WHERE site_id = :sid "
+            "AND EXTRACT(WEEK FROM interval_start) = :week "
+            "AND EXTRACT(YEAR FROM interval_start) = ANY(:years) "
+        )
+        if has_flags:
+            where_clause += (
                 "AND DATE(interval_start) NOT IN ("
                 "  SELECT flag_date FROM data_quality_flags "
                 "  WHERE site_id = :sid AND active = TRUE "
                 "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
                 ") "
+            )
+        result = conn.execute(
+            _text(
+                "SELECT workload_units FROM workload_timeline "
+                f"{where_clause}"
                 "ORDER BY interval_start"
             ),
-            {
-                "sid": site_id,
-                "week": week_number,
-                "years": past_years,
-            },
+            {"sid": site_id, "week": week_number, "years": past_years},
         )
         values = [float(row[0]) for row in result]
 
@@ -341,20 +352,30 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
                  "Thursday", "Friday", "Saturday"]
 
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
+        has_flags = bool(
+            conn.execute(
+                _text("SELECT to_regclass('public.data_quality_flags') IS NOT NULL")
+            ).scalar()
+        )
+        where_clause = (
+            "WHERE site_id = :sid "
+            "AND interval_start >= :cutoff "
+        )
+        if has_flags:
+            where_clause += (
+                "AND DATE(interval_start) NOT IN ("
+                "  SELECT flag_date FROM data_quality_flags "
+                "  WHERE site_id = :sid AND active = TRUE "
+                "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
+                ") "
+            )
         result = conn.execute(
             _text(
                 "SELECT "
                 "EXTRACT(DOW FROM interval_start) as day_of_week, "
                 "AVG(workload_units) as avg_workload "
                 "FROM workload_timeline "
-                "WHERE site_id = :sid "
-                "AND interval_start >= :cutoff "
-                "AND DATE(interval_start) NOT IN ("
-                "  SELECT flag_date FROM data_quality_flags "
-                "  WHERE site_id = :sid AND active = TRUE "
-                "  AND flag_type IN ('partial_ingest', 'manual_exclude_forecast')"
-                ") "
+                f"{where_clause}"
                 "GROUP BY EXTRACT(DOW FROM interval_start)"
             ),
             {"sid": site_id, "cutoff": cutoff},
@@ -3961,34 +3982,38 @@ def get_data_quality_flags(
     limit: int = 200,
 ) -> list[dict]:
     lim = max(1, min(limit, 1000))
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(
-                _text(
-                    """
-                    SELECT
-                        flag_id, site_id, flag_date, flag_type, severity, source,
-                        reason, metadata, active, created_at, resolved_at
-                    FROM data_quality_flags
-                    WHERE site_id = :sid
-                      AND (:active_only = FALSE OR active = TRUE)
-                      AND (:s IS NULL OR flag_date >= :s)
-                      AND (:e IS NULL OR flag_date <= :e)
-                    ORDER BY flag_date DESC, created_at DESC
-                    LIMIT :lim
-                    """
-                ),
-                {
-                    "sid": site_id,
-                    "active_only": active_only,
-                    "s": start_date,
-                    "e": end_date,
-                    "lim": lim,
-                },
-            ).mappings().all()
-    except Exception as e:
-        logger.warning("data_quality_flags unavailable (non-fatal): %s", e)
-        return []
+    with engine.connect() as conn:
+        has_flags = bool(
+            conn.execute(
+                _text("SELECT to_regclass('public.data_quality_flags') IS NOT NULL")
+            ).scalar()
+        )
+        if not has_flags:
+            return []
+
+        rows = conn.execute(
+            _text(
+                """
+                SELECT
+                    flag_id, site_id, flag_date, flag_type, severity, source,
+                    reason, metadata, active, created_at, resolved_at
+                FROM data_quality_flags
+                WHERE site_id = :sid
+                  AND (:active_only = FALSE OR active = TRUE)
+                  AND (:s IS NULL OR flag_date >= :s)
+                  AND (:e IS NULL OR flag_date <= :e)
+                ORDER BY flag_date DESC, created_at DESC
+                LIMIT :lim
+                """
+            ),
+            {
+                "sid": site_id,
+                "active_only": active_only,
+                "s": start_date,
+                "e": end_date,
+                "lim": lim,
+            },
+        ).mappings().all()
     return [dict(r) for r in rows]
 
 

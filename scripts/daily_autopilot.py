@@ -57,6 +57,7 @@ from data.storage import (
     store_daily_pipeline,
     store_daily_sales,
     store_deputy_rosters,
+    store_prediction_plan_snapshot,
 )
 from delivery.sender import (
     send_system_alert,
@@ -182,12 +183,13 @@ def _print_summary(
     results: dict,
 ) -> None:
     """Print operator-friendly pipeline summary to stdout."""
+    site_id_text = str(site_id)
     print()
     print("=" * 60)
     print("DAILY AUTOPILOT SUMMARY")
     print("=" * 60)
     print(f"  Date:     {run_date.isoformat()}")
-    print(f"  Site:     {site_name} ({site_id[:8]}...)")
+    print(f"  Site:     {site_name} ({site_id_text[:8]}...)")
     print(f"  Step:     {step}")
     if dry_run:
         print("  Mode:     DRY RUN (no DB writes, no SMS)")
@@ -213,9 +215,9 @@ def _print_summary(
             print(f"         Reason: {reason}")
             if reason == "data_quality_flag":
                 print(f"         Rerun:  .venv/bin/python scripts/daily_autopilot.py"
-                      f" --site-id {site_id} --step ingest --date {run_date.isoformat()}")
+                      f" --site-id {site_id_text} --step ingest --date {run_date.isoformat()}")
                 print(f"         Then:   .venv/bin/python scripts/daily_autopilot.py"
-                      f" --site-id {site_id} --step predict --date {run_date.isoformat()}")
+                      f" --site-id {site_id_text} --step predict --date {run_date.isoformat()}")
             skipped_downstream = step_result.get("downstream_skipped", [])
             if skipped_downstream:
                 print(f"         Skipped downstream: {', '.join(skipped_downstream)}")
@@ -546,6 +548,16 @@ def step_predict(
         generated_at=plan_generated_at,
     )
 
+    # Persist exact plan text for deterministic regeneration by prediction_id.
+    if not dry_run and prediction_id and prediction_id != "dry-run":
+        try:
+            store_prediction_plan_snapshot(site_id, str(prediction_id), plan_text)
+        except Exception:
+            logger.exception(
+                "Failed to persist plan snapshot for prediction %s (non-fatal)",
+                prediction_id,
+            )
+
     # Print plan to stdout (for review / piping to printer)
     print("\n" + plan_text + "\n")
 
@@ -600,13 +612,17 @@ def step_predict_from_prediction_id(
 
     plan_prediction = _normalize_prediction_record(row)
     plan_generated_at = row.get("generated_at")
-    plan_text = generate_tomorrow_plan(
-        site_name=site_name,
-        site_id=site_id,
-        prediction=plan_prediction,
-        staff_names=staff_names,
-        generated_at=plan_generated_at,
-    )
+    snapshot_text = plan_prediction.get("plan_snapshot_text")
+    if isinstance(snapshot_text, str) and snapshot_text.strip():
+        plan_text = snapshot_text
+    else:
+        plan_text = generate_tomorrow_plan(
+            site_name=site_name,
+            site_id=site_id,
+            prediction=plan_prediction,
+            staff_names=staff_names,
+            generated_at=plan_generated_at,
+        )
     print("\n" + plan_text + "\n")
 
     logger.info(
@@ -660,14 +676,17 @@ def step_replan(
     prediction_id = str(stored.get("prediction_id", "unknown"))
     plan_prediction = _normalize_prediction_record(stored)
     plan_generated_at = stored.get("generated_at")
-
-    plan_text = generate_tomorrow_plan(
-        site_name=site_name,
-        site_id=site_id,
-        prediction=plan_prediction,
-        staff_names=staff_names,
-        generated_at=plan_generated_at,
-    )
+    snapshot_text = plan_prediction.get("plan_snapshot_text")
+    if isinstance(snapshot_text, str) and snapshot_text.strip():
+        plan_text = snapshot_text
+    else:
+        plan_text = generate_tomorrow_plan(
+            site_name=site_name,
+            site_id=site_id,
+            prediction=plan_prediction,
+            staff_names=staff_names,
+            generated_at=plan_generated_at,
+        )
     print("\n" + plan_text + "\n")
 
     logger.info("Replanned from prediction %s (no recomputation)", prediction_id)
