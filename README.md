@@ -8,16 +8,16 @@ It focuses on the daily spine:
 - generate tomorrow staffing/ops plan
 - deliver operator-facing alerts and plan output
 
-Voice ordering has been removed from this repository.
-
 ## Requirements
 
 - Python 3.11+
 - PostgreSQL 14+
 - Square API credentials
-- Deputy credentials (optional)
-- Xero credentials (optional)
-- Twilio credentials (optional for SMS)
+- Deputy credentials (optional, fail-quiet)
+- Xero credentials (optional, fail-quiet)
+- Twilio credentials (optional, fail-quiet)
+- OpenWeatherMap API key (optional, fail-quiet)
+- Anthropic API key (optional, for intelligence LLM synthesis)
 
 ## Install
 
@@ -34,100 +34,154 @@ Create schema:
 psql "$DATABASE_URL" -f schema.sql
 ```
 
-## Daily Runner
+## Architecture
 
-Show CLI:
+### Pipeline Steps
 
-```bash
-.venv/bin/python scripts/daily_autopilot.py --help
+The daily pipeline runs 6 steps in sequence. Each step is independently runnable via `--step`.
+
+```
+5:00pm   INGEST ──────→ orders_raw, order_items, workload_timeline, daily_sales_history
+5:15pm   DEPUTY ──────→ deputy_rosters
+5:20pm   PROFITABILITY → daily_profitability  (reads: orders + rosters + item_costs)
+5:25pm   XERO ────────→ item_costs, xero_financial_facts, daily_sales_history
+6:00pm   PREDICT ─────→ predictions, recommendations  (sends: Tomorrow Plan SMS)
+6:15pm   INTELLIGENCE → insights, learned_patterns     (sends: digest SMS)
 ```
 
-Run full pipeline:
+| Step | Source | Writes To | Failure Mode |
+|------|--------|-----------|--------------|
+| `ingest` | Square API | `orders_raw`, `order_items`, `workload_timeline`, `daily_sales_history` | Fatal — blocks pipeline |
+| `deputy` | Deputy API | `deputy_rosters` | Fail-quiet — logs warning, continues |
+| `profitability` | DB (orders + rosters + Xero costs) | `daily_profitability` | Fail-quiet |
+| `xero` | Xero API (OAuth) | `item_costs`, `xero_financial_facts`, `inventory_receipts` | Fail-quiet |
+| `predict` | DB (historical patterns + events + weather) | `predictions`, `recommendations` + SMS | Fail-closed if data-quality flag active |
+| `intelligence` | DB (profitability + patterns + insights) | `insights`, `learned_patterns`, `recommendations` + SMS | Fail-quiet |
 
-```bash
-.venv/bin/python scripts/daily_autopilot.py --site-id <SITE_UUID> --step all
+### Data Flow
+
+```
+Square API ──→ INGEST ──→ workload_timeline ──┐
+                  │                            │
+                  └─→ daily_sales_history       │
+                                               ▼
+Deputy API ──→ DEPUTY ──→ deputy_rosters ──→ PROFITABILITY ──→ daily_profitability
+                                               ▲                       │
+Xero API ────→ XERO ───→ item_costs ──────────┘                       │
+                  │                                                    │
+                  └─→ xero_financial_facts                             ▼
+                                                                 INTELLIGENCE
+Historical patterns + special_events + weather ──→ PREDICT          │
+         │                                            │              │
+         │                                            ▼              ▼
+         │                                     predictions      insights
+         │                                     recommendations  learned_patterns
+         │                                            │
+         │                                            ▼
+         │                                     Tomorrow Plan (stdout + SMS)
+         │
+         └──────────────────────────────────→ CHAT (always-on context)
 ```
 
-Run dry-run:
+### Data Sources
 
-```bash
-.venv/bin/python scripts/daily_autopilot.py --site-id <SITE_UUID> --step all --dry-run
-```
+| System | Purpose | Credentials |
+|--------|---------|-------------|
+| Square API | Orders, items, revenue | `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID` |
+| Deputy API | Rosters, labor hours, staff names | `DEPUTY_ACCESS_TOKEN`, `DEPUTY_BASE_URL` |
+| Xero API | Bills (COGS), P&L revenue reconciliation | `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET` (OAuth) |
+| OpenWeatherMap | Weather forecasts for demand adjustment | `WEATHER_API_KEY` |
+| Anthropic (Claude) | Intelligence synthesis, chat | `ANTHROPIC_API_KEY` |
+| Twilio | SMS delivery (plan, alerts, digest) | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` |
 
-## Deterministic Tomorrow Plan Regeneration
+### Key Database Tables
 
-Regenerate a previously stored tomorrow plan from a prediction record without recalculating forecast/recommendations:
+| Table | Role |
+|-------|------|
+| `orders_raw` | Raw Square order payloads |
+| `order_items` | Parsed line items with workload_units per item |
+| `workload_timeline` | 15-minute aggregated workload intervals |
+| `daily_sales_history` | Daily revenue totals (Square + Xero columns) |
+| `deputy_rosters` | Staff shifts: employee, hours, cost |
+| `item_costs` | COGS per score_key (from Xero bills) |
+| `daily_profitability` | Daily P&L: revenue, labor, COGS, net profit, labor % |
+| `predictions` | Forecast output: layers, rush windows, confidence, plan snapshot |
+| `recommendations` | Timed actions per role (P1/P2/P3/MANAGER) |
+| `data_quality_flags` | Partial ingest markers — blocks predict step |
+| `insights` | Intelligence observations with severity |
+| `learned_patterns` | Recursive pattern memory with confidence + cumulative P&L impact |
+| `special_events` | Market days, holidays, etc. (manual) |
+| `xero_financial_facts` | Xero P&L revenue by date |
 
-```bash
-.venv/bin/python scripts/daily_autopilot.py \
-  --site-id <SITE_UUID> \
-  --step predict \
-  --prediction-id <PREDICTION_UUID>
-```
+## Pipeline Steps — Detail
 
-Behavior:
-- uses stored `predictions` row by `prediction_id`
-- prefers an exact persisted plan snapshot when available
-- otherwise renders from persisted forecast/rush data
-- does not re-run model forecast or recommendation generation
+### Step 1: Ingest
 
-## Operator Data-Quality Guard
+Fetches completed orders from Square API, calculates workload scores using a 4-layer model:
 
-If ingest is flagged partial, the predict step is blocked and emits:
-- impacted site and date
-- blocking reason(s)
-- copy/paste rerun commands
-- explicit note that downstream plan/SMS/intelligence were skipped
+1. Base drink scores (flat_white=1.0, latte=1.1, etc.)
+2. Modifier adjustments (extra shot=+0.3, large milk=+0.2)
+3. Multi-drink position penalties (2nd drink=x0.8, 3rd+=x0.7)
+4. 15-minute timeline aggregation
 
-Alert type used for manager escalation: `prediction_blocked_data_quality`.
+Also updates yesterday's prediction accuracy (forecast vs actuals).
 
-## Formatting and Lint
+Applies **data-quality guard** — flags partial ingestions so the predict step is blocked.
 
-Use helper scripts:
+### Step 2: Deputy Roster Sync
 
-```bash
-./scripts/format.sh
-./scripts/lint.sh
-```
+Fetches rosters for today + next 14 days from Deputy API. Enriches with employee names. Stored in `deputy_rosters` with shift hours and cost.
 
-Or Make targets:
+### Step 3: Profitability
 
-```bash
-make format
-make lint
-```
+Cross-correlates Square orders, Deputy labor costs, and Xero COGS to produce daily P&L:
 
-Configured in `pyproject.toml`:
-- Black (formatting)
-- Ruff (lint)
+- Revenue from order totals
+- Labor cost from roster hours x rate
+- COGS from `item_costs` x quantity sold
+- Gross/net profit, labor % of revenue, revenue per labor hour
 
-## Xero Revenue Sync
+### Step 4: Xero Sync
 
-Xero is the source of truth for verified revenue. The system reconciles Xero P&L income against Square POS data weekly.
+Syncs supplier bills (COGS) and P&L revenue from Xero.
 
-**Revenue priority:** Xero (verified, ex-GST) > Square CSV (stripped to ex-GST) > Square API (stripped to ex-GST)
+**Revenue reconciliation:** Weekly Xero P&L income vs Square known days. Delta allocated to missing/partial days using DOW-weighted historical patterns. Priority: Xero (verified) > Square CSV > Square API.
 
 **GST handling:** All financial figures are ex-GST (true cash position). Xero P&L is already ex-GST. Square totals are divided by 1.10 to strip Australian GST.
 
-**Scheduled sync:** Runs daily at 5:25pm AEST via `scheduled_xero_sync()` in `app/main.py`. Syncs both bills and revenue.
-
-**Manual trigger:**
+Requires completed OAuth flow via `/api/xero/auth`. Manual trigger:
 
 ```bash
-# Sync last 2 months (default)
 curl -X POST http://localhost:8080/api/xero/sync-revenue
-
-# Sync last 4 months
-curl -X POST http://localhost:8080/api/xero/sync-revenue?months_back=4
 ```
 
-**Reconciliation approach:**
-1. Fetch weekly Xero P&L income totals (ex-GST)
-2. Sum Square known days for the same week (converted to ex-GST)
-3. Allocate delta to missing/partial days using DOW-weighted historical patterns
-4. Store `xero_revenue_cents` and `xero_synced_at` on `daily_sales_history`
+### Step 5: Predict
 
-Requires `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, and a completed OAuth flow via `/api/xero/auth`.
+**Pre-flight:** Checks `data_quality_flags` for active partial_ingest. If found, **blocks prediction entirely** — sends alert SMS to manager, skips downstream plan/intelligence.
+
+**Forecast:** 4-layer composite model:
+- Layer 1 — Recent baseline: last 6-8 weeks same DOW average
+- Layer 2 — Year-over-year: same date last year
+- Layer 3 — Special events: multiplier from `special_events` table
+- Layer 4 — Demand trends: recent pattern deviations
+
+**Rush detection:** Identifies 2-4 hour windows where workload peaks. Each rush includes start/end time, predicted drinks, workload units, confidence.
+
+**Recommendations:** State-machine-driven actions per role (P1/P2/P3/MANAGER).
+
+**Tomorrow Plan:** Rendered to stdout (thermal-printer compatible, 59-char wide) and persisted to `predictions.plan_snapshot_text`. Sent via SMS to staff.
+
+### Step 6: Intelligence
+
+5-phase recursive engine:
+
+1. **Measure** — Query past recommendation outcomes against profitability
+2. **Learn** — Update pattern confidence scores (positive=+0.05, negative=-0.10, suppress if < 0.15)
+3. **Observe** — Run signal detectors: staffing, efficiency gap, margins, demand, prediction accuracy, revenue, profitability, inventory
+4. **Analyze** — LLM synthesis (Claude API) of signals into top 5 insights
+5. **Recommend** — Convert warning/opportunity insights into actionable recommendations
+
+High-severity insights sent as SMS digest to manager.
 
 ## Staffing Efficiency Gap Engine
 
@@ -138,16 +192,38 @@ Quantifies the dollar cost of overstaffing by comparing actual staff on shift ag
 - `excess_labor_cents` = (actual_staff - min_viable_staff) x cost_per_interval
 - Rollups by day and day-of-week
 
-**Intelligence signals** (generated in `analysis/intelligence.py`):
+**Intelligence signals:**
 - Overall low efficiency: triggers when score < 0.80
 - Per-DOW recurring excess: triggers when a day averages > $13/day excess
 - Efficiency trend: compares first/second halves of a 28-day window
 
-**Chat visibility:** Always-visible 7-day efficiency summary in the chat prompt. Ask "how efficient is our staffing?" for detailed breakdown.
+**Chat visibility:** Always-visible 7-day efficiency summary. Ask "how efficient is our staffing?" for detailed breakdown.
 
-## Replan (Deterministic Plan Regeneration)
+## Chat System
 
-Regenerate tomorrow's plan from the most recent stored prediction without recomputing the forecast:
+Endpoint: `POST /api/sites/{site_id}/chat/message` (SSE streaming via Claude API).
+
+Context loaded on every message:
+- Latest prediction + today's ingest summary
+- 7-day staffing efficiency (score, excess labor, worst DOW)
+- 14-day profitability trend + item-level margins
+- Recent insights + high-confidence learned patterns
+- Deputy rosters (today + 14 days)
+- Inventory alerts (if configured)
+- Uploaded documents (OCR/PDF extracts)
+
+## Data-Quality Guard
+
+If ingest is flagged partial, the predict step is fail-closed:
+
+- Blocks prediction entirely
+- Prints operator message: reasons + copy/paste rerun commands
+- Sends system alert to manager (`prediction_blocked_data_quality`)
+- Downstream plan/SMS/intelligence all skipped
+
+## Replan
+
+Regenerate tomorrow's plan from stored prediction without recomputing forecast:
 
 ```bash
 .venv/bin/python scripts/daily_autopilot.py --step replan --date 2026-02-20
@@ -155,13 +231,8 @@ Regenerate tomorrow's plan from the most recent stored prediction without recomp
 # With updated staff names
 .venv/bin/python scripts/daily_autopilot.py --step replan --date 2026-02-20 \
   --staff-names "P1:Sarah,P2:Tom"
-```
 
-Looks up the latest prediction for `run_date + 1 day` and renders the plan. No model forecast or recommendation generation occurs.
-
-Alternatively, use `--prediction-id` for a specific prediction UUID:
-
-```bash
+# By specific prediction UUID
 .venv/bin/python scripts/daily_autopilot.py --step predict --prediction-id <UUID>
 ```
 
@@ -169,16 +240,87 @@ Alternatively, use `--prediction-id` for a specific prediction UUID:
 
 | Time (AEST) | Job | Description |
 |-------------|-----|-------------|
-| 5:00pm | `daily_autopilot.py --step ingest` | Pull today's Square orders |
-| 5:25pm | `scheduled_xero_sync()` | Sync Xero bills + revenue |
-| 6:00pm | `daily_autopilot.py --step all` | Full pipeline: predict + plan + SMS |
-| 8:30am | Rush reminder | Pre-rush SMS to staff |
-| Monday 8am | Weekly review | Weekly performance report |
+| 9:00am | `scheduled_ingest()` | Morning ingest (Square orders so far) |
+| 5:00pm | `scheduled_ingest()` | Full day ingest |
+| 5:15pm | `scheduled_deputy()` | Deputy roster sync |
+| 5:20pm | `scheduled_profitability()` | Daily P&L computation |
+| 5:25pm | `scheduled_xero_sync()` | Xero bills + revenue sync |
+| 6:00pm | `scheduled_predict()` | Forecast + Tomorrow Plan + SMS |
+| 6:15pm | `scheduled_intelligence()` | Intelligence cycle + digest SMS |
+| Monday 8:00am | `scheduled_weekly_kpi_snapshot()` | KPI snapshot to `analysis_outputs/` |
+| Monday 8:05am | `scheduled_weekly_roi()` | Weekly ROI SMS to manager |
+
+All jobs use APScheduler with `Australia/Brisbane` timezone.
+
+## CLI Usage
+
+```bash
+# Full pipeline
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step all
+
+# Individual steps
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step ingest
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step deputy
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step xero
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step profitability
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step predict
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step intelligence
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step replan
+
+# Dry run (no SMS, no DB writes)
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step all --dry-run
+
+# Specific date
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --date 2026-02-20
+
+# With staff names
+.venv/bin/python scripts/daily_autopilot.py --site-id <UUID> --step predict \
+  --staff-names "P1:Sarah,P2:Tom,P3:Jessica"
+```
+
+## Formatting and Lint
+
+```bash
+make format    # black + ruff --fix
+make lint      # ruff check + black --check
+make check     # py_compile all entry points
+make test      # pytest tests/ -x -q
+```
+
+Configured in `pyproject.toml`: Black (line-length=100) + Ruff (conservative E9/F rules).
+
+Pre-commit hooks: `.pre-commit-config.yaml`.
 
 ## Key Paths
 
-- `scripts/daily_autopilot.py` - primary daily pipeline runner
-- `data/storage.py` - persistence + data quality controls
-- `delivery/tomorrow_plan.py` - plan rendering
-- `delivery/sender.py` - SMS dispatch and system alerts
-- `schema.sql` - database schema
+| Path | Purpose |
+|------|---------|
+| `scripts/daily_autopilot.py` | Primary daily pipeline runner (CLI + step functions) |
+| `data/storage.py` | All DB operations, data quality controls, migrations |
+| `data/ingestion.py` | Square API order fetching |
+| `data/processing.py` | Workload score calculation (drink scores, modifiers) |
+| `data/xero.py` | Xero API client + revenue reconciliation |
+| `models/prediction.py` | 4-layer composite forecast model |
+| `models/workload.py` | Workload engine (timeline aggregation) |
+| `models/recommendations.py` | State machine recommendation generator |
+| `analysis/intelligence.py` | 5-phase intelligence cycle |
+| `analysis/accuracy.py` | Prediction vs actual comparison |
+| `analysis/reporting.py` | Weekly ROI report generation |
+| `delivery/tomorrow_plan.py` | Plan rendering (text + HTML) |
+| `delivery/sender.py` | Twilio SMS dispatch + system alerts |
+| `delivery/sms_prompts.py` | SMS template library |
+| `app/main.py` | FastAPI app + APScheduler job registration |
+| `app/chat.py` | Chat endpoint (SSE streaming, context gathering) |
+| `config/constants.py` | Business logic constants (rates, thresholds, weights) |
+| `config/workflow_profiles.py` | Workload-per-person thresholds, minimum viable staff |
+| `config/settings.py` | Environment variable loading |
+| `schema.sql` | PostgreSQL schema |
+
+## Design Principles
+
+1. **Fail-quiet** — Non-critical integrations (Deputy, Xero, Weather) never block the pipeline
+2. **Fail-closed on data quality** — Partial ingestions block prediction entirely
+3. **Deterministic regeneration** — Plans reproducible from stored prediction records
+4. **Recursive learning** — Learned patterns gain/lose confidence from measured P&L outcomes
+5. **Step atomicity** — Each step is independently runnable and idempotent
+6. **Ex-GST financials** — All dollar figures are true cash position (GST is ATO pass-through)
