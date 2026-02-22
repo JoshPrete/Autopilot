@@ -163,9 +163,12 @@ STAFFING_WU_PER_PERSON_LOW = 1.8
 # ------------------------------------------------------------
 # Staffing Efficiency Gap Engine
 # ------------------------------------------------------------
-LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS = 650  # ~$26/hr per 15-min
+LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS = 650  # ~$26/hr per 15-min (fallback)
 EFFICIENCY_SCORE_TARGET = 0.85   # 85% = 15% buffer acceptable
 EFFICIENCY_SCORE_WARNING = 0.70  # Below this = critical
+JUNIOR_HOURLY_RATE_THRESHOLD = 2100  # cents — under this = under-18 junior (Aus award proxy)
+SUPERANNUATION_RATE = 0.115  # 11.5% from 1 Jul 2025
+GST_RATE = 0.10  # Australian GST — Xero P&L is ex-GST, Square is inc-GST
 
 # ------------------------------------------------------------
 # Day-of-Week Pattern Defaults (Section 5.5)
@@ -192,8 +195,10 @@ DOW_PATTERN_DEFAULT = {
 # ------------------------------------------------------------
 # Owner Salary — amortised daily into labor costs
 # ------------------------------------------------------------
+OWNER_DEPUTY_NAME = "Josh Prete"  # Must match Deputy roster employee_name
 OWNER_ANNUAL_SALARY_CENTS = 10_000_000  # $100,000 AUD
 OWNER_DAILY_SALARY_CENTS = round(OWNER_ANNUAL_SALARY_CENTS / 365)  # ~$273.97/day
+OWNER_HOURLY_RATE_CENTS = round(OWNER_ANNUAL_SALARY_CENTS / (52 * 40))  # ~$48.08/hr based on 40hr weeks
 
 DEFAULT_ITEM_COSTS = {
     # Drinks — cost = beans + milk + cup + lid

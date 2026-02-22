@@ -170,7 +170,7 @@ def scheduled_profitability():
 
 def scheduled_xero_sync():
     """5:25pm AEST — Sync Xero supplier bills into item COGS (if connected)."""
-    from data.xero import is_xero_configured, sync_xero_bills
+    from data.xero import is_xero_configured, sync_xero_bills, sync_xero_revenue
 
     site = _resolve_site_id()
     if not site:
@@ -185,8 +185,14 @@ def scheduled_xero_sync():
             logger.info("Scheduled Xero sync skipped: Xero not connected for site %s", site_id)
             result = {"status": "skipped", "reason": "not_configured"}
             return
-        result = sync_xero_bills(site_id, days_back=7)
-        logger.info("Scheduled Xero sync: %s", result)
+        bills_result = sync_xero_bills(site_id, days_back=7)
+        logger.info("Scheduled Xero bill sync: %s", bills_result)
+
+        # Cross-check Square revenue against Xero P&L
+        revenue_result = sync_xero_revenue(site_id, months_back=2)
+        logger.info("Scheduled Xero revenue sync: %s", revenue_result)
+
+        result = {"bills": bills_result, "revenue": revenue_result}
     except Exception as e:
         error_text = str(e)
         logger.exception("Scheduled Xero sync failed")

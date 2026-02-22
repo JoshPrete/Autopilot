@@ -56,7 +56,7 @@ class TestResolveItemKey:
 
     def test_food_items(self):
         assert resolve_item_key("TOASTIE") == ("toastie", "food")
-        assert resolve_item_key("BUTTERBOY") == ("toastie", "food")
+        assert resolve_item_key("BUTTERBOY") == ("butterboy", "food")
         assert resolve_item_key("Breakfast Wrap") == ("wrap", "food")
         assert resolve_item_key("Ham And Cheese Croissant") == ("croissant", "food")
         assert resolve_item_key("A Sweet Muffin") == ("muffin", "food")

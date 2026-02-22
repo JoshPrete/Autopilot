@@ -5,7 +5,7 @@ Handles connect flow, callback, and status/sync triggers.
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import requests
@@ -16,6 +16,7 @@ from config.settings import settings
 from data.storage import (
     consume_xero_oauth_state,
     get_all_xero_mappings,
+    get_xero_financial_facts_summary,
     get_site,
     store_xero_oauth_state,
     get_xero_tokens,
@@ -154,6 +155,11 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
 
     mappings = get_all_xero_mappings(site_id)
     confirmed = sum(1 for m in mappings if m.get("confidence") == "confirmed")
+    fact_window = get_xero_financial_facts_summary(
+        site_id,
+        start_date=date.today() - timedelta(days=29),
+        end_date=date.today(),
+    )
 
     return {
         "connected": True,
@@ -164,6 +170,12 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
         "last_refreshed": str(tokens.get("updated_at", "")),
         "mappings_total": len(mappings),
         "mappings_confirmed": confirmed,
+        "financial_facts_days_30d": int(fact_window.get("days_covered") or 0),
+        "financial_facts_latest_date": (
+            str(fact_window.get("latest_fact_date"))
+            if fact_window.get("latest_fact_date")
+            else None
+        ),
     }
 
 
@@ -184,6 +196,29 @@ def xero_sync(site_id: str = Query(..., description="Site UUID")):
         return {"status": "ok", **result}
     except XeroError as e:
         logger.error("Manual Xero sync failed: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/sync-revenue")
+def xero_sync_revenue(
+    site_id: str = Query(..., description="Site UUID"),
+    months_back: int = Query(2, description="How many months to cross-check"),
+):
+    """Cross-check Square revenue against Xero P&L and store adjusted daily figures."""
+    site = get_site(site_id)
+    if not site:
+        raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found")
+
+    from data.xero import XeroError, is_xero_configured, sync_xero_revenue
+
+    if not is_xero_configured(site_id):
+        raise HTTPException(status_code=400, detail="Xero not connected for this site")
+
+    try:
+        result = sync_xero_revenue(site_id, months_back=months_back)
+        return {"status": "ok", **result}
+    except XeroError as e:
+        logger.error("Xero revenue sync failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
 
 

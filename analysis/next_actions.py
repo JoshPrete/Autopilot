@@ -22,6 +22,12 @@ from analysis.profitability import compute_item_margins
 from analysis.workflow import analyze_workflow
 
 logger = logging.getLogger("autopilot.next_actions")
+PROVEN_IMPACT_MIN_REALIZED_SAMPLES = 2
+LABOR_PCT_TARGET_LOW = 24.0
+LABOR_PCT_TARGET_HIGH = 28.0
+SERVICE_RISK_CAP_RATIO = 0.12
+OVERSTAFFED_WASTE_RATIO_TRIGGER = 0.18
+PHASE_MIN_WORKING_INTERVALS = 8
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -42,14 +48,152 @@ def _confidence_with_memory(site_id: str, action_type: str, base: float) -> tupl
     return round(adjusted, 2), stats
 
 
-def _rank_score(action: dict) -> int:
+def _phase_priority_bonus(action: dict, optimization_phase: str) -> int:
+    """
+    Strategy switch:
+      - labor_efficiency mode prioritizes labor-saving and bottleneck fixes.
+      - revenue_growth mode prioritizes throughput/revenue levers.
+    """
+    action_type = action.get("action_type")
+    labor_delta = int(action.get("expected_weekly_labor_change_cents") or 0)
+    profit_uplift = int(action.get("expected_weekly_profit_uplift_cents") or 0)
+
+    if optimization_phase == "labor_efficiency":
+        if action_type == "CUT_STAFF_BLOCK":
+            return 2200
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return 1400 if labor_delta < 0 else 550
+        if action_type == "ADD_STAFF_BLOCK":
+            return -250
+        if action_type == "PRICE_TEST_UP":
+            return -700
+        return 0
+
+    if action_type == "PRICE_TEST_UP":
+        return 2200
+    if action_type == "ADD_STAFF_BLOCK":
+        return 950
+    if action_type == "WORKFLOW_SHIFT_REALLOC":
+        return 800 if profit_uplift > 0 else 300
+    if action_type == "CUT_STAFF_BLOCK":
+        return -2600
+    return 0
+
+
+def _rank_score(action: dict, optimization_phase: str) -> int:
     """
     Composite ranking:
       expected impact + weighted proven historical impact for action type.
     """
     expected = int(action.get("expected_weekly_profit_uplift_cents") or 0)
     proven = int(action.get("proven_weekly_impact_cents") or 0)
-    return round(expected + (proven * 0.7))
+    confidence = float(action.get("confidence") or 0.0)
+    realized_samples = int(action.get("realized_samples") or 0)
+    proven_weight = 1.1 if realized_samples >= PROVEN_IMPACT_MIN_REALIZED_SAMPLES else 0.35
+    confidence_bonus = round(confidence * 1200)
+    exploration_penalty = (
+        -250 if action.get("proven_gate_status") == "insufficient_realized_history" else 0
+    )
+    phase_bonus = _phase_priority_bonus(action, optimization_phase)
+    return round(
+        expected + (proven * proven_weight) + confidence_bonus + exploration_penalty + phase_bonus
+    )
+
+
+def _staffing_risk_metrics(intervals: list[dict]) -> dict:
+    """Compute normalized staffing risk ratios from interval statuses."""
+    working = [
+        row for row in intervals
+        if (row.get("status") or "no_workload") != "no_workload"
+    ]
+    total = len(working)
+    if total == 0:
+        return {
+            "working_intervals": 0,
+            "critical_understaffed_intervals": 0,
+            "overstaffed_intervals": 0,
+            "critical_understaff_ratio": 0.0,
+            "overstaffed_ratio": 0.0,
+        }
+
+    critical_under = sum(
+        1 for row in working
+        if row.get("status") in ("understaffed", "no_staff")
+    )
+    overstaffed = sum(1 for row in working if row.get("status") == "overstaffed")
+    return {
+        "working_intervals": total,
+        "critical_understaffed_intervals": critical_under,
+        "overstaffed_intervals": overstaffed,
+        "critical_understaff_ratio": round(critical_under / total, 3),
+        "overstaffed_ratio": round(overstaffed / total, 3),
+    }
+
+
+def _determine_optimization_phase(summary: dict, risk: dict) -> tuple[str, str]:
+    """
+    Switch logic:
+      1) Reduce labor until efficient frontier.
+      2) Once near frontier, shift to revenue growth.
+    """
+    labor_pct = summary.get("labor_pct")
+    if labor_pct is None:
+        return "labor_efficiency", "Labor % unavailable; defaulting to labor efficiency mode."
+
+    critical_ratio = float(risk.get("critical_understaff_ratio") or 0.0)
+    over_ratio = float(risk.get("overstaffed_ratio") or 0.0)
+    working = int(risk.get("working_intervals") or 0)
+
+    if critical_ratio > SERVICE_RISK_CAP_RATIO:
+        return (
+            "revenue_growth",
+            "Service-risk cap exceeded; avoid further labor cuts and prioritize throughput/revenue actions.",
+        )
+    if labor_pct > LABOR_PCT_TARGET_HIGH:
+        return (
+            "labor_efficiency",
+            f"Labor % above target band ({LABOR_PCT_TARGET_LOW:.0f}-{LABOR_PCT_TARGET_HIGH:.0f}%).",
+        )
+    if over_ratio >= OVERSTAFFED_WASTE_RATIO_TRIGGER:
+        return (
+            "labor_efficiency",
+            "Overstaffed interval ratio indicates remaining labor waste opportunity.",
+        )
+    if labor_pct <= LABOR_PCT_TARGET_LOW and over_ratio <= 0.10:
+        return (
+            "revenue_growth",
+            "Labor % at/under efficient floor; shift focus to revenue growth.",
+        )
+    if (
+        working >= PHASE_MIN_WORKING_INTERVALS
+        and labor_pct <= LABOR_PCT_TARGET_HIGH
+        and over_ratio <= 0.12
+    ):
+        return (
+            "revenue_growth",
+            "Labor efficiency near frontier with low overstaffing; prioritize revenue growth.",
+        )
+    return "labor_efficiency", "Continue labor-efficiency tuning."
+
+
+def _passes_proven_impact_gate(memory: dict) -> tuple[bool, str]:
+    """
+    Fail-closed on action types with enough realized samples but non-positive outcomes.
+    """
+    if not isinstance(memory, dict):
+        return True, "insufficient_realized_history"
+
+    realized_count = int(memory.get("realized_count") or 0)
+    if realized_count < PROVEN_IMPACT_MIN_REALIZED_SAMPLES:
+        return True, "insufficient_realized_history"
+
+    proven_weekly = memory.get("avg_realized_weekly_profit_delta_cents")
+    if proven_weekly is None:
+        return True, "incomplete_realized_history"
+
+    if float(proven_weekly) <= 0:
+        return False, "non_positive_realized_impact"
+    return True, "positive_realized_impact"
 
 
 def _apply_data_health_gate(action: dict, data_health: dict | None) -> dict:
@@ -86,6 +230,8 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
     intervals = snapshot.get("intervals", [])
     margins = compute_item_margins(site_id, days=30)
     workflow = analyze_workflow(site_id, target_date)
+    risk_metrics = _staffing_risk_metrics(intervals)
+    optimization_phase, phase_reason = _determine_optimization_phase(summary, risk_metrics)
 
     actions: list[dict] = []
     labor_cost_per_hour = 0.0
@@ -118,6 +264,7 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                 "proven_weekly_impact_cents": memory.get("avg_realized_weekly_profit_delta_cents"),
                 "confidence": confidence,
                 "memory": memory,
+                "optimization_phase": optimization_phase,
             }
         )
 
@@ -143,6 +290,7 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                 "proven_weekly_impact_cents": memory.get("avg_realized_weekly_profit_delta_cents"),
                 "confidence": confidence,
                 "memory": memory,
+                "optimization_phase": optimization_phase,
             }
         )
 
@@ -182,6 +330,7 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                     "proven_weekly_impact_cents": memory.get("avg_realized_weekly_profit_delta_cents"),
                     "confidence": confidence,
                     "memory": memory,
+                    "optimization_phase": optimization_phase,
                 }
             )
 
@@ -210,16 +359,46 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                 "proven_weekly_impact_cents": memory.get("avg_realized_weekly_profit_delta_cents"),
                 "confidence": confidence,
                 "memory": memory,
+                "optimization_phase": optimization_phase,
             }
         )
 
     # Rebuild list with gated actions and filter extremely weak actions in red-health mode.
     gated_actions = [_apply_data_health_gate(a, data_health) for a in actions]
+    suppressed_by_proven_gate = []
+    proven_filtered_actions = []
+
+    for action in gated_actions:
+        memory = action.get("memory") if isinstance(action.get("memory"), dict) else {}
+        action["realized_samples"] = int((memory or {}).get("realized_count") or 0)
+        allow, gate_status = _passes_proven_impact_gate(memory or {})
+        action["proven_gate_status"] = gate_status
+        if not allow:
+            suppressed_by_proven_gate.append(
+                {
+                    "action_type": action.get("action_type"),
+                    "title": action.get("title"),
+                    "reason": gate_status,
+                    "realized_samples": action.get("realized_samples"),
+                    "avg_realized_weekly_profit_delta_cents": action.get("proven_weekly_impact_cents"),
+                }
+            )
+            continue
+        proven_filtered_actions.append(action)
+
+    gated_actions = proven_filtered_actions
     if isinstance(data_health, dict) and data_health.get("status") == "red":
         gated_actions = [a for a in gated_actions if float(a.get("confidence") or 0) >= 0.45]
 
+    # In revenue_growth mode, suppress pure labor-cut actions when higher-leverage
+    # revenue/throughput actions are available.
+    if optimization_phase == "revenue_growth":
+        preferred = [a for a in gated_actions if a.get("action_type") != "CUT_STAFF_BLOCK"]
+        if preferred:
+            gated_actions = preferred
+
     for action in gated_actions:
-        action["ranking_score_cents"] = _rank_score(action)
+        action["ranking_score_cents"] = _rank_score(action, optimization_phase)
         action["data_health"] = {
             "status": data_health.get("status") if isinstance(data_health, dict) else None,
             "score": data_health.get("score") if isinstance(data_health, dict) else None,
@@ -236,7 +415,30 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
             "labor_pct": summary.get("labor_pct"),
             "data_health_status": data_health.get("status") if isinstance(data_health, dict) else None,
             "data_health_score": data_health.get("score") if isinstance(data_health, dict) else None,
+            "optimization_phase": optimization_phase,
+            "phase_reason": phase_reason,
+            "phase_guardrails": {
+                "labor_pct_target_low": LABOR_PCT_TARGET_LOW,
+                "labor_pct_target_high": LABOR_PCT_TARGET_HIGH,
+                "service_risk_cap_ratio": SERVICE_RISK_CAP_RATIO,
+                "overstaffed_waste_trigger_ratio": OVERSTAFFED_WASTE_RATIO_TRIGGER,
+            },
+            "phase_metrics": risk_metrics,
             "impact_refresh": impact_refresh,
+            "proven_gate": {
+                "min_realized_samples": PROVEN_IMPACT_MIN_REALIZED_SAMPLES,
+                "suppressed_count": len(suppressed_by_proven_gate),
+                "suppressed_action_types": sorted(
+                    list(
+                        {
+                            s.get("action_type")
+                            for s in suppressed_by_proven_gate
+                            if s.get("action_type")
+                        }
+                    )
+                ),
+                "suppressed_actions": suppressed_by_proven_gate,
+            },
         },
         "actions": actions,
     }

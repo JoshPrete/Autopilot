@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -49,14 +50,16 @@ from data.processing import process_orders_batch
 from data.storage import (
     apply_partial_ingest_guard,
     get_data_quality_flags,
+    get_prediction,
+    get_prediction_by_id,
     get_site,
     get_site_by_location_id,
     store_daily_pipeline,
     store_daily_sales,
     store_deputy_rosters,
+    store_prediction_plan_snapshot,
 )
 from delivery.sender import (
-    send_feedback_request,
     send_system_alert,
     send_tomorrow_plan_sms,
 )
@@ -71,6 +74,159 @@ REQUIRED_ENV = [
     "SQUARE_LOCATION_ID",
     "DATABASE_URL",
 ]
+
+
+def _safe_json(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _normalize_prediction_record(record: dict) -> dict:
+    """
+    Convert a predictions table row into the in-memory prediction shape expected
+    by Tomorrow Plan and SMS generators.
+    """
+    forecast_data = _safe_json(record.get("forecast_data", {}))
+    if not isinstance(forecast_data, dict):
+        forecast_data = {}
+
+    prediction = dict(forecast_data)
+
+    if "forecast" not in prediction:
+        prediction["forecast"] = {}
+    if not isinstance(prediction.get("forecast"), dict):
+        prediction["forecast"] = {}
+
+    forecast = prediction["forecast"]
+    if record.get("forecast_date"):
+        forecast["forecast_date"] = str(record["forecast_date"])
+    if "day_name" not in forecast and forecast.get("forecast_date"):
+        try:
+            forecast["day_name"] = date.fromisoformat(
+                str(forecast["forecast_date"])
+            ).strftime("%A")
+        except ValueError:
+            pass
+
+    rush_windows = prediction.get("rush_windows")
+    if rush_windows is None and record.get("rush_windows") is not None:
+        rush_windows = _safe_json(record.get("rush_windows"))
+    if not isinstance(rush_windows, list):
+        rush_windows = []
+
+    prediction["rush_windows"] = rush_windows
+    prediction["rush_count"] = prediction.get("rush_count", len(rush_windows))
+    prediction["prediction_id"] = str(record.get("prediction_id", ""))
+    prediction["event_multiplier"] = record.get("event_factor")
+    prediction["confidence"] = record.get("confidence_score")
+    prediction["actual_accuracy"] = record.get("actual_accuracy")
+    return prediction
+
+
+def _build_blocked_predict_message(
+    site_id: str,
+    run_date: date,
+    blocking_flags: list[dict],
+) -> tuple[str, list[str], str]:
+    reasons = []
+    for flag in blocking_flags:
+        flag_type = flag.get("flag_type", "unknown")
+        severity = flag.get("severity", "unknown")
+        reason = flag.get("reason") or "no reason provided"
+        reasons.append(f"{flag_type}[{severity}] {reason}")
+
+    ingest_cmd = (
+        f".venv/bin/python scripts/daily_autopilot.py --site-id {site_id} "
+        f"--step ingest --date {run_date.isoformat()}"
+    )
+    predict_cmd = (
+        f".venv/bin/python scripts/daily_autopilot.py --site-id {site_id} "
+        f"--step predict --date {run_date.isoformat()}"
+    )
+    clear_flag_cmd = (
+        f"curl -X DELETE "
+        f"\"http://localhost:8000/api/sites/{site_id}/analysis/data-quality/flags/partial-ingest"
+        f"?flag_date={run_date.isoformat()}\""
+    )
+
+    message_lines = [
+        "PREDICTION BLOCKED (partial ingest guard)",
+        f"- Site: {site_id}",
+        f"- Date: {run_date.isoformat()}",
+        "- Reasons:",
+    ]
+    message_lines.extend([f"  - {r}" for r in reasons])
+    message_lines.extend(
+        [
+            "- Downstream skipped: tomorrow plan generation, tomorrow plan SMS, intelligence step.",
+            "- Rerun commands:",
+            f"  1) {ingest_cmd}",
+            f"  2) {predict_cmd}",
+            "  If data is complete and flag persists, clear it then rerun predict:",
+            f"  3) {clear_flag_cmd}",
+        ]
+    )
+
+    return "\n".join(message_lines), reasons, predict_cmd
+
+
+def _print_summary(
+    site_id: str,
+    site_name: str,
+    run_date: date,
+    step: str,
+    dry_run: bool,
+    results: dict,
+) -> None:
+    """Print operator-friendly pipeline summary to stdout."""
+    site_id_text = str(site_id)
+    print()
+    print("=" * 60)
+    print("DAILY AUTOPILOT SUMMARY")
+    print("=" * 60)
+    print(f"  Date:     {run_date.isoformat()}")
+    print(f"  Site:     {site_name} ({site_id_text[:8]}...)")
+    print(f"  Step:     {step}")
+    if dry_run:
+        print("  Mode:     DRY RUN (no DB writes, no SMS)")
+    print("-" * 60)
+
+    for step_name, step_result in results.items():
+        if isinstance(step_result, dict):
+            status = step_result.get("status", "ok")
+        else:
+            status = "ok"
+
+        if status in ("ok", "clear", "dry_run"):
+            icon = " OK "
+        elif status == "skipped":
+            icon = "SKIP"
+        else:
+            icon = " ERR"
+
+        print(f"  [{icon}] {step_name}")
+
+        if status == "skipped" and isinstance(step_result, dict):
+            reason = step_result.get("reason", "")
+            print(f"         Reason: {reason}")
+            if reason == "data_quality_flag":
+                print(f"         Rerun:  .venv/bin/python scripts/daily_autopilot.py"
+                      f" --site-id {site_id_text} --step ingest --date {run_date.isoformat()}")
+                print(f"         Then:   .venv/bin/python scripts/daily_autopilot.py"
+                      f" --site-id {site_id_text} --step predict --date {run_date.isoformat()}")
+            skipped_downstream = step_result.get("downstream_skipped", [])
+            if skipped_downstream:
+                print(f"         Skipped downstream: {', '.join(skipped_downstream)}")
+        elif status not in ("ok", "clear", "dry_run") and isinstance(step_result, dict):
+            error = step_result.get("error", "")
+            if error:
+                print(f"         Error: {error}")
+
+    print("=" * 60)
 
 
 # ============================================================
@@ -323,18 +479,28 @@ def step_predict(
     )
     blocking_flags = [f for f in active_flags if f.get("flag_type") in ("partial_ingest",)]
     if blocking_flags:
-        reason = (
-            f"Prediction skipped for {run_date}: active data quality flag(s) "
-            + ", ".join(f"{f.get('flag_type')}[{f.get('severity')}]" for f in blocking_flags)
+        operator_message, reasons, rerun_predict_cmd = _build_blocked_predict_message(
+            site_id=site_id,
+            run_date=run_date,
+            blocking_flags=blocking_flags,
         )
-        logger.error(reason)
+        logger.error("%s", operator_message)
         if not dry_run:
             send_system_alert(
                 site_id,
                 "prediction_blocked_data_quality",
-                error=reason,
+                site_name=site_name,
+                run_date=run_date.isoformat(),
+                reasons=reasons,
             )
-        return {"status": "skipped", "reason": "data_quality_flag", "flags": blocking_flags}
+        return {
+            "status": "skipped",
+            "reason": "data_quality_flag",
+            "flags": blocking_flags,
+            "operator_message": operator_message,
+            "rerun_predict_cmd": rerun_predict_cmd,
+            "downstream_skipped": ["tomorrow_plan", "tomorrow_plan_sms", "intelligence"],
+        }
 
     # 1. Generate prediction
     prediction = generate_prediction(
@@ -365,20 +531,39 @@ def step_predict(
         recommendations = []
         logger.info("DRY RUN: Skipping recommendation storage")
 
-    # 3. Generate Tomorrow Plan
+    # 3. Generate Tomorrow Plan from stored prediction record when available.
+    plan_prediction = prediction
+    plan_generated_at = None
+    if not dry_run:
+        stored_row = get_prediction(site_id, tomorrow)
+        if stored_row:
+            plan_prediction = _normalize_prediction_record(stored_row)
+            plan_generated_at = stored_row.get("generated_at")
+
     plan_text = generate_tomorrow_plan(
         site_name=site_name,
         site_id=site_id,
-        prediction=prediction,
+        prediction=plan_prediction,
         staff_names=staff_names,
+        generated_at=plan_generated_at,
     )
+
+    # Persist exact plan text for deterministic regeneration by prediction_id.
+    if not dry_run and prediction_id and prediction_id != "dry-run":
+        try:
+            store_prediction_plan_snapshot(site_id, str(prediction_id), plan_text)
+        except Exception:
+            logger.exception(
+                "Failed to persist plan snapshot for prediction %s (non-fatal)",
+                prediction_id,
+            )
 
     # Print plan to stdout (for review / piping to printer)
     print("\n" + plan_text + "\n")
 
     # 4. Send SMS
     if not dry_run:
-        sms_results = send_tomorrow_plan_sms(site_id, prediction, staff_names)
+        sms_results = send_tomorrow_plan_sms(site_id, plan_prediction, staff_names)
         delivered = sum(1 for r in sms_results if r["delivered"])
         logger.info("SMS sent: %d/%d delivered", delivered, len(sms_results))
     else:
@@ -392,6 +577,125 @@ def step_predict(
         "rush_count": prediction["rush_count"],
         "recommendations": len(recommendations),
         "sms_sent": len(sms_results),
+        "plan_length": len(plan_text),
+    }
+
+
+def step_predict_from_prediction_id(
+    site_id: str,
+    site_name: str,
+    prediction_id: str,
+    staff_names: dict = None,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Deterministic tomorrow plan regeneration.
+
+    Loads a stored prediction and renders the plan without re-running model or
+    recommendation generation.
+    """
+    if staff_names is None:
+        staff_names = {}
+
+    logger.info(
+        "=== STEP: PREDICT (regenerate from prediction_id=%s) ===",
+        prediction_id,
+    )
+
+    row = get_prediction_by_id(site_id, prediction_id)
+    if not row:
+        return {
+            "status": "error",
+            "reason": "prediction_not_found",
+            "prediction_id": prediction_id,
+        }
+
+    plan_prediction = _normalize_prediction_record(row)
+    plan_generated_at = row.get("generated_at")
+    snapshot_text = plan_prediction.get("plan_snapshot_text")
+    if isinstance(snapshot_text, str) and snapshot_text.strip():
+        plan_text = snapshot_text
+    else:
+        plan_text = generate_tomorrow_plan(
+            site_name=site_name,
+            site_id=site_id,
+            prediction=plan_prediction,
+            staff_names=staff_names,
+            generated_at=plan_generated_at,
+        )
+    print("\n" + plan_text + "\n")
+
+    logger.info(
+        "Regenerated tomorrow plan from stored prediction %s without recalculation.",
+        prediction_id,
+    )
+
+    return {
+        "status": "ok",
+        "mode": "regenerated",
+        "prediction_id": prediction_id,
+        "forecast_date": str(row.get("forecast_date")),
+        "sms_sent": 0,
+        "plan_length": len(plan_text),
+        "dry_run": dry_run,
+    }
+
+
+def step_replan(
+    site_id: str,
+    site_name: str,
+    run_date: date,
+    staff_names: dict = None,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Regenerate tomorrow plan from the latest stored prediction for a date.
+
+    Unlike --prediction-id (which requires a UUID), this looks up the most
+    recent prediction for (run_date + 1 day) and regenerates the plan.
+    No forecast recomputation occurs.
+
+    Usage:
+        python scripts/daily_autopilot.py --step replan --date 2026-02-20
+        python scripts/daily_autopilot.py --step replan --date 2026-02-20 --staff-names "P1:Sarah,P2:Tom"
+    """
+    if staff_names is None:
+        staff_names = {}
+
+    tomorrow = run_date + timedelta(days=1)
+    logger.info("=== STEP: REPLAN (for: %s, from stored prediction) ===", tomorrow)
+
+    stored = get_prediction(site_id, tomorrow)
+    if not stored:
+        logger.error("No stored prediction found for %s", tomorrow)
+        return {
+            "status": "error",
+            "reason": f"No stored prediction for {tomorrow}. Run --step predict first.",
+        }
+
+    prediction_id = str(stored.get("prediction_id", "unknown"))
+    plan_prediction = _normalize_prediction_record(stored)
+    plan_generated_at = stored.get("generated_at")
+    snapshot_text = plan_prediction.get("plan_snapshot_text")
+    if isinstance(snapshot_text, str) and snapshot_text.strip():
+        plan_text = snapshot_text
+    else:
+        plan_text = generate_tomorrow_plan(
+            site_name=site_name,
+            site_id=site_id,
+            prediction=plan_prediction,
+            staff_names=staff_names,
+            generated_at=plan_generated_at,
+        )
+    print("\n" + plan_text + "\n")
+
+    logger.info("Replanned from prediction %s (no recomputation)", prediction_id)
+
+    return {
+        "status": "ok",
+        "mode": "replan",
+        "prediction_id": prediction_id,
+        "forecast_date": str(tomorrow),
         "plan_length": len(plan_text),
     }
 
@@ -443,9 +747,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "deputy", "xero", "profitability", "predict", "intelligence", "all"],
+        choices=["ingest", "deputy", "xero", "profitability", "predict", "replan", "intelligence", "all"],
         default="all",
-        help="Which pipeline step to run. Default: all.",
+        help="Which pipeline step to run. 'replan' regenerates tomorrow plan from stored prediction. Default: all.",
     )
     p.add_argument(
         "--staff",
@@ -460,6 +764,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Run without writing to DB or sending SMS.",
+    )
+    p.add_argument(
+        "--prediction-id",
+        help=(
+            "Render tomorrow plan from stored prediction_id only "
+            "(no recalculation)."
+        ),
     )
     p.add_argument(
         "--verbose", "-v",
@@ -502,6 +813,8 @@ def parse_staff_names(staff_str: str) -> dict:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.prediction_id and args.step == "all":
+        args.step = "predict"
 
     # Configure logging
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -552,25 +865,69 @@ def main(argv: list[str]) -> int:
 
         # Step 2: Predict
         if args.step in ("predict", "all"):
-            results["predict"] = step_predict(
+            if args.prediction_id:
+                results["predict"] = step_predict_from_prediction_id(
+                    site_id=site_id,
+                    site_name=site_name,
+                    prediction_id=args.prediction_id,
+                    staff_names=staff_names,
+                    dry_run=args.dry_run,
+                )
+            else:
+                results["predict"] = step_predict(
+                    site_id=site_id,
+                    site_name=site_name,
+                    run_date=run_date,
+                    staff_scheduled=args.staff,
+                    staff_names=staff_names,
+                    dry_run=args.dry_run,
+                )
+
+        # Step 2.5: Replan (regenerate plan from stored prediction)
+        if args.step == "replan":
+            results["replan"] = step_replan(
                 site_id=site_id,
                 site_name=site_name,
                 run_date=run_date,
-                staff_scheduled=args.staff,
                 staff_names=staff_names,
                 dry_run=args.dry_run,
             )
 
         # Step 3: Intelligence (after predict)
         if args.step in ("intelligence", "all"):
-            results["intelligence"] = step_intelligence(
-                site_id=site_id,
-                site_name=site_name,
-                run_date=run_date,
-                dry_run=args.dry_run,
-            )
+            if args.step == "all" and args.prediction_id:
+                logger.warning(
+                    "Skipping intelligence: --prediction-id mode renders plan only."
+                )
+                results["intelligence"] = {
+                    "status": "skipped",
+                    "reason": "prediction_id_regeneration_mode",
+                }
+            elif (
+                args.step == "all"
+                and results.get("predict", {}).get("status") == "skipped"
+                and results.get("predict", {}).get("reason") == "data_quality_flag"
+            ):
+                logger.warning(
+                    "Skipping intelligence because prediction was blocked by data-quality guard."
+                )
+                results["intelligence"] = {
+                    "status": "skipped",
+                    "reason": "blocked_by_data_quality_flag",
+                }
+            else:
+                results["intelligence"] = step_intelligence(
+                    site_id=site_id,
+                    site_name=site_name,
+                    run_date=run_date,
+                    dry_run=args.dry_run,
+                )
 
         logger.info("Pipeline complete: %s", results)
+
+        # Operator-friendly summary
+        _print_summary(site_id, site_name, run_date, args.step, args.dry_run, results)
+
         return 0
 
     except Exception:

@@ -271,6 +271,20 @@ def system_alert_sms_failed(site_name: str) -> str:
     )
 
 
+def system_alert_prediction_blocked(
+    site_name: str,
+    run_date: str,
+    reasons: list[str],
+) -> str:
+    """Alert when prediction/plan is blocked by partial ingest safeguards."""
+    reason_line = "; ".join([r for r in reasons if r])[:120] if reasons else "partial_ingest"
+    return (
+        f"Autopilot BLOCKED: {site_name} {run_date}\n"
+        f"Reason: {reason_line}\n"
+        "No tomorrow plan sent. Re-run ingest, then predict."
+    )
+
+
 # ============================================================
 # Helpers
 # ============================================================

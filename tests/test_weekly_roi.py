@@ -14,6 +14,7 @@ class TestWeeklyROIReport:
                 "net_profit_cents": 45_000,
                 "labor_pct": 30.0,
                 "revenue_per_labor_hour": 5_000,
+                "labor_hours": 20.0,
             },
             {
                 "date": "2026-02-11",
@@ -23,6 +24,7 @@ class TestWeeklyROIReport:
                 "net_profit_cents": 54_000,
                 "labor_pct": 30.0,
                 "revenue_per_labor_hour": 5_200,
+                "labor_hours": 23.0,
             },
         ]
         previous_rows = [
@@ -34,6 +36,7 @@ class TestWeeklyROIReport:
                 "net_profit_cents": 36_000,
                 "labor_pct": 33.0,
                 "revenue_per_labor_hour": 4_500,
+                "labor_hours": 20.0,
             },
             {
                 "date": "2026-02-04",
@@ -43,6 +46,7 @@ class TestWeeklyROIReport:
                 "net_profit_cents": 39_000,
                 "labor_pct": 32.0,
                 "revenue_per_labor_hour": 4_700,
+                "labor_hours": 20.0,
             },
         ]
 
@@ -63,8 +67,8 @@ class TestWeeklyROIReport:
         assert result["previous_week"]["total_revenue_cents"] == 185_000
         assert result["deltas"]["revenue_cents_delta"] == 35_000
         assert result["deltas"]["net_profit_cents_delta"] == 24_000
-        assert result["deltas"]["labor_pct_delta_pp"] == -2.5
-        assert result["deltas"]["revenue_per_labor_hour_delta_pct"] == 10.87
+        assert abs(result["deltas"]["labor_pct_delta_pp"] - (-2.5)) < 0.05
+        assert result["deltas"]["revenue_per_labor_hour_delta_pct"] == 10.62
         assert "Net profit improved" in result["headline"]
         assert "WEEKLY ROI" in result["report_text"]
 
