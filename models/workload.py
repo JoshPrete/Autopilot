@@ -72,16 +72,12 @@ class RushWindow:
     @property
     def switch_3p_time(self) -> datetime:
         """T-7 minutes before rush start (Spec Section 3.3)."""
-        return self.start - timedelta(
-            minutes=TRANSITION_2P_TO_3P["lead_time_minutes"]
-        )
+        return self.start - timedelta(minutes=TRANSITION_2P_TO_3P["lead_time_minutes"])
 
     @property
     def alert_time(self) -> datetime:
         """T-10 minutes before rush start for SMS alert."""
-        return self.start - timedelta(
-            minutes=TRANSITION_2P_TO_3P["alert_lead_minutes"]
-        )
+        return self.start - timedelta(minutes=TRANSITION_2P_TO_3P["alert_lead_minutes"])
 
     @property
     def wally_start_time(self) -> datetime:
@@ -147,10 +143,12 @@ def detect_rush_windows(
             event_multiplier=event_multiplier,
         )
 
-        hourly_predictions.append({
-            "hour": hour,
-            "prediction": prediction,
-        })
+        hourly_predictions.append(
+            {
+                "hour": hour,
+                "prediction": prediction,
+            }
+        )
 
     # Find consecutive rush hours and merge into windows
     rush_windows = []
@@ -170,7 +168,9 @@ def detect_rush_windows(
 
     logger.info(
         "Detected %d rush windows for %s (event_factor=%.2f)",
-        len(rush_windows), target_date, event_multiplier,
+        len(rush_windows),
+        target_date,
+        event_multiplier,
     )
     return rush_windows
 
@@ -262,13 +262,15 @@ def generate_daily_forecast(
 
         hourly_workload = prediction["final_prediction"] * INTERVALS_PER_HOUR
         total_day_workload += hourly_workload
-        hourly.append({
-            "hour": hour,
-            "hour_label": f"{hour}:00",
-            "predicted_workload": round(hourly_workload, 1),
-            "is_rush": prediction["is_rush"],
-            "confidence": prediction["confidence"],
-        })
+        hourly.append(
+            {
+                "hour": hour,
+                "hour_label": f"{hour}:00",
+                "predicted_workload": round(hourly_workload, 1),
+                "is_rush": prediction["is_rush"],
+                "confidence": prediction["confidence"],
+            }
+        )
 
     # Estimate drinks using observed workload-per-drink ratio from recent data
     wu_per_drink = get_avg_workload_per_drink(site_id)
@@ -419,9 +421,7 @@ def evaluate_transition_signals(signals: QueueSignals) -> list[dict]:
             f"workload {signals.workload_ratio:.1f}x > {t['workload_multiplier']}x baseline"
         )
     if signals.orders_per_5min > t["orders_per_5min"]:
-        conditions_3p.append(
-            f"orders {signals.orders_per_5min}/5min > {t['orders_per_5min']}"
-        )
+        conditions_3p.append(f"orders {signals.orders_per_5min}/5min > {t['orders_per_5min']}")
     if signals.drinks_in_progress > t["drinks_in_progress"]:
         conditions_3p.append(
             f"drinks in progress {signals.drinks_in_progress} > {t['drinks_in_progress']}"
@@ -429,13 +429,15 @@ def evaluate_transition_signals(signals: QueueSignals) -> list[dict]:
 
     # ALL conditions must be true for 2P->3P
     if len(conditions_3p) == 3 and signals.staff_on_floor == 2:
-        triggered.append({
-            "transition": "SWITCH_TO_3P",
-            "conditions_met": conditions_3p,
-            "action": "Switch to 3P workflow",
-            "owner_role": "MANAGER",
-            "lead_time_minutes": t["lead_time_minutes"],
-        })
+        triggered.append(
+            {
+                "transition": "SWITCH_TO_3P",
+                "conditions_met": conditions_3p,
+                "action": "Switch to 3P workflow",
+                "owner_role": "MANAGER",
+                "lead_time_minutes": t["lead_time_minutes"],
+            }
+        )
 
     # --- TRANSITION: Activate Wally Cycling (Section 3.3) ---
     t_wally = TRANSITION_WALLY_ACTIVATE
@@ -453,12 +455,14 @@ def evaluate_transition_signals(signals: QueueSignals) -> list[dict]:
 
     # ANY condition triggers Wally
     if wally_conditions:
-        triggered.append({
-            "transition": "WALLY_START",
-            "conditions_met": wally_conditions,
-            "action": "Start Wally cycling",
-            "owner_role": "P2",
-        })
+        triggered.append(
+            {
+                "transition": "WALLY_START",
+                "conditions_met": wally_conditions,
+                "action": "Start Wally cycling",
+                "owner_role": "P2",
+            }
+        )
 
     # --- TRANSITION: P1 Orders -> Shots (Section 3.3) ---
     t_p1 = TRANSITION_P1_TO_SHOTS
@@ -466,15 +470,17 @@ def evaluate_transition_signals(signals: QueueSignals) -> list[dict]:
         signals.orders_last_2min <= t_p1["orders_last_2min"]
         and signals.drinks_in_progress >= t_p1["drinks_in_progress_min"]
     ):
-        triggered.append({
-            "transition": "P1_TO_SHOTS",
-            "conditions_met": [
-                f"orders last 2min = {signals.orders_last_2min}",
-                f"drinks in progress = {signals.drinks_in_progress}",
-            ],
-            "action": "P1 move to shots",
-            "owner_role": "P1",
-        })
+        triggered.append(
+            {
+                "transition": "P1_TO_SHOTS",
+                "conditions_met": [
+                    f"orders last 2min = {signals.orders_last_2min}",
+                    f"drinks in progress = {signals.drinks_in_progress}",
+                ],
+                "action": "P1 move to shots",
+                "owner_role": "P1",
+            }
+        )
 
     # --- TRANSITION: Delivery Override (Section 3.3) ---
     t_del = TRANSITION_DELIVERY_OVERRIDE
@@ -482,27 +488,31 @@ def evaluate_transition_signals(signals: QueueSignals) -> list[dict]:
         signals.drinks_completed >= t_del["drinks_completed"]
         and signals.orders_waiting <= t_del["orders_waiting_max"]
     ):
-        triggered.append({
-            "transition": "DELIVERY_OVERRIDE",
-            "conditions_met": [
-                f"drinks completed {signals.drinks_completed} >= {t_del['drinks_completed']}",
-                f"orders waiting {signals.orders_waiting} <= {t_del['orders_waiting_max']}",
-            ],
-            "action": "Delivery priority NOW",
-            "owner_role": "P3",
-        })
+        triggered.append(
+            {
+                "transition": "DELIVERY_OVERRIDE",
+                "conditions_met": [
+                    f"drinks completed {signals.drinks_completed} >= {t_del['drinks_completed']}",
+                    f"orders waiting {signals.orders_waiting} <= {t_del['orders_waiting_max']}",
+                ],
+                "action": "Delivery priority NOW",
+                "owner_role": "P3",
+            }
+        )
 
     # --- TRANSITION: Rush End Reset (Section 3.3) ---
     t_end = TRANSITION_RUSH_END
     if signals.minutes_below_baseline >= t_end["below_baseline_minutes"]:
-        triggered.append({
-            "transition": "RUSH_END",
-            "conditions_met": [
-                f"below baseline for {signals.minutes_below_baseline} min "
-                f">= {t_end['below_baseline_minutes']} min"
-            ],
-            "action": "Return to 2P baseline",
-            "owner_role": "MANAGER",
-        })
+        triggered.append(
+            {
+                "transition": "RUSH_END",
+                "conditions_met": [
+                    f"below baseline for {signals.minutes_below_baseline} min "
+                    f">= {t_end['below_baseline_minutes']} min"
+                ],
+                "action": "Return to 2P baseline",
+                "owner_role": "MANAGER",
+            }
+        )
 
     return triggered

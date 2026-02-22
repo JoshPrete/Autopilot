@@ -25,12 +25,16 @@ def get_delivery_log(
     limit: int = Query(default=50, ge=1, le=200),
 ):
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT * FROM recommendations "
-                "WHERE site_id = :site_id "
-                "ORDER BY action_timing DESC LIMIT :limit"
-            ),
-            {"site_id": site["site_id"], "limit": limit},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT * FROM recommendations "
+                    "WHERE site_id = :site_id "
+                    "ORDER BY action_timing DESC LIMIT :limit"
+                ),
+                {"site_id": site["site_id"], "limit": limit},
+            )
+            .mappings()
+            .all()
+        )
     return [dict(r) for r in rows]

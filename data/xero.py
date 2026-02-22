@@ -48,6 +48,7 @@ XERO_MAX_RETRY_DELAY_SECONDS = 20.0
 
 class XeroError(Exception):
     """Raised when Xero API calls fail."""
+
     pass
 
 
@@ -122,12 +123,14 @@ class XeroClient:
         self._update_session_headers()
 
     def _update_session_headers(self):
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.access_token}",
-            "Xero-Tenant-Id": self.tenant_id,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {self.access_token}",
+                "Xero-Tenant-Id": self.tenant_id,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
 
     def _ensure_valid_token(self):
         """Refresh the access token if it has expired or is about to."""
@@ -234,7 +237,9 @@ class XeroClient:
                 raise XeroError(f"Xero API returned non-JSON response for {endpoint}") from e
 
         if last_error is not None:
-            raise XeroError(f"Xero API error after {XERO_MAX_RETRIES} attempts: {last_error}") from last_error
+            raise XeroError(
+                f"Xero API error after {XERO_MAX_RETRIES} attempts: {last_error}"
+            ) from last_error
         raise XeroError(f"Xero API error after {XERO_MAX_RETRIES} attempts for {endpoint}")
 
     def fetch_bank_transactions(self, since_date: date = None) -> list[dict]:
@@ -300,7 +305,8 @@ class XeroClient:
         # 1. Get list of invoice IDs
         try:
             data = self._request(
-                "GET", "Invoices",
+                "GET",
+                "Invoices",
                 params=params,
                 headers=headers,
             )
@@ -330,7 +336,8 @@ class XeroClient:
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(
                     "Skipping malformed bill %s: %s",
-                    raw.get("InvoiceNumber", "?"), e,
+                    raw.get("InvoiceNumber", "?"),
+                    e,
                 )
                 continue
             except XeroError as e:
@@ -347,13 +354,15 @@ class XeroClient:
             description = (li.get("Description") or "").strip()
             if not description:
                 continue
-            line_items.append({
-                "description": description,
-                "unit_amount": li.get("UnitAmount", 0),
-                "quantity": li.get("Quantity", 1),
-                "line_amount": li.get("LineAmount", 0),
-                "account_code": li.get("AccountCode"),
-            })
+            line_items.append(
+                {
+                    "description": description,
+                    "unit_amount": li.get("UnitAmount", 0),
+                    "quantity": li.get("Quantity", 1),
+                    "line_amount": li.get("LineAmount", 0),
+                    "account_code": li.get("AccountCode"),
+                }
+            )
 
         bill_date = _parse_xero_date(raw.get("DateString") or raw.get("Date"))
 
@@ -426,7 +435,9 @@ class XeroClient:
 
         logger.info(
             "Xero P&L %s to %s: Total Income = $%.2f",
-            from_date, to_date, total_income,
+            from_date,
+            to_date,
+            total_income,
         )
 
         return {
@@ -479,7 +490,8 @@ def map_xero_lines_to_score_keys(
 
     logger.info(
         "Xero line mapping: %d cached, %d need LLM mapping",
-        len(cached), len(uncached),
+        len(cached),
+        len(uncached),
     )
 
     # LLM mapping for uncached items (batch in groups of 25 to avoid token limits)
@@ -487,13 +499,16 @@ def map_xero_lines_to_score_keys(
     if uncached and settings.ANTHROPIC_API_KEY:
         batch_size = 25
         for i in range(0, len(uncached), batch_size):
-            batch = uncached[i:i + batch_size]
+            batch = uncached[i : i + batch_size]
             batch_result = _llm_map_descriptions(site_id, batch)
             llm_mapped.update(batch_result)
         # Cache new mappings
         for desc, mapping in llm_mapped.items():
             store_xero_line_mapping(
-                site_id, desc, mapping["score_key"], mapping.get("confidence", "unconfirmed"),
+                site_id,
+                desc,
+                mapping["score_key"],
+                mapping.get("confidence", "unconfirmed"),
                 units_per_pack=mapping.get("units_per_pack", 1),
             )
 
@@ -524,19 +539,21 @@ def map_xero_lines_to_score_keys(
         raw_cost_cents = int(round(float(li.get("unit_amount", 0)) * 100))
         unit_cost_cents = raw_cost_cents // max(1, units_per_pack)
 
-        results.append({
-            "description": desc,
-            "score_key": score_key,
-            "category": category,
-            "unit_cost_cents": unit_cost_cents,
-            "confidence": confidence,
-            "units_per_pack": max(1, int(units_per_pack)),
-            "line_quantity": float(li.get("quantity", 1) or 1),
-            "invoice_number": li.get("_invoice_number"),
-            "supplier": li.get("_supplier"),
-            "bill_date": li.get("_bill_date"),
-            "line_index": int(li.get("_line_index", 0) or 0),
-        })
+        results.append(
+            {
+                "description": desc,
+                "score_key": score_key,
+                "category": category,
+                "unit_cost_cents": unit_cost_cents,
+                "confidence": confidence,
+                "units_per_pack": max(1, int(units_per_pack)),
+                "line_quantity": float(li.get("quantity", 1) or 1),
+                "invoice_number": li.get("_invoice_number"),
+                "supplier": li.get("_supplier"),
+                "bill_date": li.get("_bill_date"),
+                "line_index": int(li.get("_line_index", 0) or 0),
+            }
+        )
 
     return results
 
@@ -552,11 +569,7 @@ def _llm_map_descriptions(site_id: str, descriptions: list[str]) -> dict:
     existing_keys = list(existing_costs.keys())
     try:
         inventory_items = list_inventory_items(site_id, active_only=True)
-        inventory_keys = [
-            i.get("score_key")
-            for i in inventory_items
-            if i.get("score_key")
-        ]
+        inventory_keys = [i.get("score_key") for i in inventory_items if i.get("score_key")]
         existing_keys = sorted(list(set(existing_keys + inventory_keys)))
     except Exception:
         pass
@@ -723,9 +736,7 @@ def sync_xero_bills(site_id: str, days_back: int = 30) -> dict:
 
         invoice_number = item.get("invoice_number") or "unknown"
         line_index = int(item.get("line_index") or 0)
-        external_ref = (
-            f"XERO:{invoice_number}:{line_index}:{inventory_item['inventory_item_id']}"
-        )
+        external_ref = f"XERO:{invoice_number}:{line_index}:{inventory_item['inventory_item_id']}"
 
         receipt_id = store_inventory_receipt(
             site_id=site_id,
@@ -846,9 +857,10 @@ def _build_square_revenue_by_day(site_id: str, start_date: date, end_date: date)
     from data.storage import _text, engine
 
     with engine.connect() as conn:
-        orders_rows = conn.execute(
-            _text(
-                """
+        orders_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT DATE(closed_at) AS day, COALESCE(SUM(total_money_cents), 0) AS revenue_cents
                 FROM orders_raw
                 WHERE site_id = :sid
@@ -857,22 +869,29 @@ def _build_square_revenue_by_day(site_id: str, start_date: date, end_date: date)
                   AND DATE(closed_at) <= :e
                 GROUP BY DATE(closed_at)
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .all()
+        )
 
-        history_rows = conn.execute(
-            _text(
-                """
+        history_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT sale_date AS day, gross_sales_cents, source
                 FROM daily_sales_history
                 WHERE site_id = :sid
                   AND sale_date >= :s
                   AND sale_date <= :e
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .all()
+        )
 
     revenue_by_day: dict[str, int] = {}
     for row in orders_rows:
@@ -888,16 +907,19 @@ def _build_square_revenue_by_day(site_id: str, start_date: date, end_date: date)
     return revenue_by_day
 
 
-def _historical_dow_averages(site_id: str, lookback_start: date, lookback_end: date) -> dict[int, float]:
+def _historical_dow_averages(
+    site_id: str, lookback_start: date, lookback_end: date
+) -> dict[int, float]:
     """
     Return average Square revenue by SQL DOW across a historical lookback window.
     """
     from data.storage import _text, engine
 
     with engine.connect() as conn:
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 WITH daily AS (
                     SELECT DATE(closed_at) AS day, COALESCE(SUM(total_money_cents), 0) AS revenue_cents
                     FROM orders_raw
@@ -911,9 +933,12 @@ def _historical_dow_averages(site_id: str, lookback_start: date, lookback_end: d
                 FROM daily
                 GROUP BY EXTRACT(DOW FROM day)
                 """
-            ),
-            {"sid": site_id, "s": lookback_start, "e": lookback_end},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": lookback_start, "e": lookback_end},
+            )
+            .mappings()
+            .all()
+        )
 
     return {int(row["dow"]): float(row["avg_revenue_cents"] or 0.0) for row in rows}
 
@@ -1000,13 +1025,16 @@ def sync_xero_revenue(
         # Square is inc-GST — strip GST so comparison is ex-GST on both sides.
         # All business decisions use ex-GST (true cash position, GST is ATO pass-through).
         from config.constants import GST_RATE
+
         gst_divisor = 1 + GST_RATE  # 1.10
 
         square_by_day = _build_square_revenue_by_day(site_id, week_start, week_end)
         week_days = list(_iter_days(week_start, week_end))
         missing_days = [d for d in week_days if int(square_by_day.get(str(d)) or 0) <= 0]
         # Convert Square known totals to ex-GST for apples-to-apples comparison
-        known_total_inc_gst = sum(int(square_by_day.get(str(d)) or 0) for d in week_days if d not in missing_days)
+        known_total_inc_gst = sum(
+            int(square_by_day.get(str(d)) or 0) for d in week_days if d not in missing_days
+        )
         known_total = round(known_total_inc_gst / gst_divisor)
         delta = xero_total - known_total  # both ex-GST
 

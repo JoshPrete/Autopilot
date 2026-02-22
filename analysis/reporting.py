@@ -146,11 +146,13 @@ def generate_weekly_roi_report(
     deltas = {
         "revenue_cents_delta": (
             current["total_revenue_cents"] - previous["total_revenue_cents"]
-            if previous["days"] > 0 else None
+            if previous["days"] > 0
+            else None
         ),
         "net_profit_cents_delta": (
             current["total_net_profit_cents"] - previous["total_net_profit_cents"]
-            if previous["days"] > 0 else None
+            if previous["days"] > 0
+            else None
         ),
         "labor_pct_delta_pp": _pp_change(
             current["avg_labor_pct"],
@@ -168,13 +170,9 @@ def generate_weekly_roi_report(
         if net_delta is None:
             headline = "Current week profitability baseline generated."
         elif net_delta >= 0:
-            headline = (
-                f"Net profit improved by ${net_delta / 100:,.0f} week-over-week."
-            )
+            headline = f"Net profit improved by ${net_delta / 100:,.0f} week-over-week."
         else:
-            headline = (
-                f"Net profit down by ${abs(net_delta) / 100:,.0f} week-over-week."
-            )
+            headline = f"Net profit down by ${abs(net_delta) / 100:,.0f} week-over-week."
 
     report_text = _format_weekly_roi_report(
         site_name=site_name,
@@ -257,12 +255,16 @@ def generate_pilot_kpi_snapshot(
         "week_end": roi["week_end"],
         "business_kpis": {
             "labor_pct_avg": roi["current_week"].get("avg_labor_pct"),
-            "revenue_per_labor_hour_avg_cents": roi["current_week"].get("avg_revenue_per_labor_hour_cents"),
+            "revenue_per_labor_hour_avg_cents": roi["current_week"].get(
+                "avg_revenue_per_labor_hour_cents"
+            ),
             "weekly_net_profit_cents": roi["current_week"].get("total_net_profit_cents"),
             "weekly_revenue_cents": roi["current_week"].get("total_revenue_cents"),
             "net_profit_wow_delta_cents": roi["deltas"].get("net_profit_cents_delta"),
             "labor_pct_wow_delta_pp": roi["deltas"].get("labor_pct_delta_pp"),
-            "rev_per_labor_hour_wow_delta_pct": roi["deltas"].get("revenue_per_labor_hour_delta_pct"),
+            "rev_per_labor_hour_wow_delta_pct": roi["deltas"].get(
+                "revenue_per_labor_hour_delta_pct"
+            ),
         },
         "ops_kpis": {
             "avg_prediction_accuracy_pct": stats.get("avg_prediction_accuracy"),
@@ -308,14 +310,20 @@ def _get_daily_details(
         if isinstance(forecast_data, str):
             forecast_data = json.loads(forecast_data)
 
-        details.append({
-            "date": str(row["forecast_date"]),
-            "day_name": date.fromisoformat(str(row["forecast_date"])).strftime("%A"),
-            "predicted_drinks": forecast_data.get("total_predicted_drinks", 0),
-            "rush_count": forecast_data.get("rush_count", 0),
-            "confidence": float(row["confidence_score"]) if row["confidence_score"] else None,
-            "accuracy": round(float(row["actual_accuracy"]) * 100, 1) if row["actual_accuracy"] else None,
-        })
+        details.append(
+            {
+                "date": str(row["forecast_date"]),
+                "day_name": date.fromisoformat(str(row["forecast_date"])).strftime("%A"),
+                "predicted_drinks": forecast_data.get("total_predicted_drinks", 0),
+                "rush_count": forecast_data.get("rush_count", 0),
+                "confidence": float(row["confidence_score"]) if row["confidence_score"] else None,
+                "accuracy": (
+                    round(float(row["actual_accuracy"]) * 100, 1)
+                    if row["actual_accuracy"]
+                    else None
+                ),
+            }
+        )
 
     return details
 
@@ -330,17 +338,11 @@ def _aggregate_profitability_rows(rows: list[dict]) -> dict:
     total_net = sum(r.get("net_profit_cents", 0) or 0 for r in rows)
 
     # Compute from weekly totals (not avg of daily %s, which skews on low-rev days)
-    avg_labor_pct = (
-        round(total_labor / total_revenue * 100, 2)
-        if total_revenue > 0 else None
-    )
+    avg_labor_pct = round(total_labor / total_revenue * 100, 2) if total_revenue > 0 else None
 
-    total_labor_hours = sum(
-        float(r.get("labor_hours", 0) or 0) for r in rows
-    )
+    total_labor_hours = sum(float(r.get("labor_hours", 0) or 0) for r in rows)
     avg_rev_per_hour = (
-        int(round(total_revenue / total_labor_hours))
-        if total_labor_hours > 0 else None
+        int(round(total_revenue / total_labor_hours)) if total_labor_hours > 0 else None
     )
 
     return {
@@ -360,9 +362,10 @@ def _get_pipeline_coverage(site_id: str, week_start: date, week_end: date) -> di
 
     expected_days = 7
     with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
+        row = (
+            conn.execute(
+                text(
+                    """
                 SELECT
                     (SELECT COUNT(DISTINCT DATE(closed_at))
                      FROM orders_raw
@@ -382,9 +385,12 @@ def _get_pipeline_coverage(site_id: str, week_start: date, week_end: date) -> di
                      WHERE site_id = :sid
                        AND forecast_date BETWEEN :ws AND :we) AS prediction_days
                 """
-            ),
-            {"sid": site_id, "ws": week_start, "we": week_end},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "ws": week_start, "we": week_end},
+            )
+            .mappings()
+            .first()
+        )
 
     orders_days = int(row["orders_days"] or 0)
     deputy_days = int(row["deputy_days"] or 0)
@@ -439,14 +445,10 @@ def _generate_insights(
     if avg_acc is not None:
         if avg_acc >= 90:
             insights.append(
-                f"Prediction accuracy excellent at {avg_acc}%. "
-                "Model is well-calibrated."
+                f"Prediction accuracy excellent at {avg_acc}%. " "Model is well-calibrated."
             )
         elif avg_acc >= 80:
-            insights.append(
-                f"Prediction accuracy good at {avg_acc}%. "
-                "Within target range."
-            )
+            insights.append(f"Prediction accuracy good at {avg_acc}%. " "Within target range.")
         elif avg_acc >= 75:
             insights.append(
                 f"Prediction accuracy at {avg_acc}% - approaching alert threshold. "
@@ -573,7 +575,7 @@ def _format_weekly_report(
         lines.append(f"{'Day':<12} {'Predicted':>9} {'Rushes':>6} {'Accuracy':>8}")
         lines.append(f"{'─' * 37}")
         for d in daily_details:
-            acc_str = f"{d['accuracy']}%" if d['accuracy'] else "—"
+            acc_str = f"{d['accuracy']}%" if d["accuracy"] else "—"
             lines.append(
                 f"{d['day_name']:<12} {d['predicted_drinks']:>9} {d['rush_count']:>6} {acc_str:>8}"
             )
@@ -680,6 +682,7 @@ def _format_weekly_roi_report(
     headline: str,
 ) -> str:
     """Format weekly ROI report as plain text."""
+
     def _money(cents: Optional[int]) -> str:
         if cents is None:
             return "N/A"
@@ -722,10 +725,7 @@ def _format_weekly_roi_report(
             f"{str(deltas['revenue_per_labor_hour_delta_pct']) + '%' if deltas['revenue_per_labor_hour_delta_pct'] is not None else 'N/A'}"
         ),
         "",
-        (
-            "Data days: "
-            f"{current['days']} current, {previous['days']} previous"
-        ),
+        ("Data days: " f"{current['days']} current, {previous['days']} previous"),
         f"{'═' * REPORT_WIDTH}",
     ]
     return "\n".join(lines)
@@ -812,15 +812,17 @@ def generate_multi_site_comparison(
         accuracy = get_rolling_accuracy(site_id, days_back=7, reference_date=week_end)
         adoption = get_adoption_metrics(site_id, week_start, week_end)
 
-        sites.append({
-            "site_id": site_id,
-            "site_name": site_names.get(site_id, site_id),
-            "avg_accuracy": accuracy.get("avg_accuracy"),
-            "adoption_rate": adoption.get("adoption_rate"),
-            "avg_timing_rating": adoption.get("avg_rush_timing_rating"),
-            "avg_helpful_rating": adoption.get("avg_helpfulness_rating"),
-            "alert": accuracy.get("alert", False),
-        })
+        sites.append(
+            {
+                "site_id": site_id,
+                "site_name": site_names.get(site_id, site_id),
+                "avg_accuracy": accuracy.get("avg_accuracy"),
+                "adoption_rate": adoption.get("adoption_rate"),
+                "avg_timing_rating": adoption.get("avg_rush_timing_rating"),
+                "avg_helpful_rating": adoption.get("avg_helpfulness_rating"),
+                "alert": accuracy.get("alert", False),
+            }
+        )
 
     return {
         "week_start": week_start.isoformat(),

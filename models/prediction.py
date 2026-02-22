@@ -247,7 +247,10 @@ def update_prediction_accuracy(
 
     logger.info(
         "Accuracy for %s: predicted=%d actual=%d accuracy=%.1f%%",
-        forecast_date, predicted_drinks, actual_drinks, accuracy * 100,
+        forecast_date,
+        predicted_drinks,
+        actual_drinks,
+        accuracy * 100,
     )
 
     return accuracy
@@ -324,6 +327,7 @@ def get_yesterday_recap(site_id: str, today: date = None) -> Optional[dict]:
 
     # Get adoption stats for yesterday
     from data.storage import get_weekly_stats
+
     adoption = get_weekly_stats(site_id, yesterday, yesterday)
 
     recap = {

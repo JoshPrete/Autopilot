@@ -90,7 +90,9 @@ def test_daily_efficiency_snapshot(monkeypatch):
     ]
     deputy_totals = [{"shifts_count": 5, "total_hours": 8.0, "total_cost_dollars": 240.0}]
 
-    monkeypatch.setattr("data.storage.get_staffing_variance_intervals", lambda *_args, **_kwargs: variance)
+    monkeypatch.setattr(
+        "data.storage.get_staffing_variance_intervals", lambda *_args, **_kwargs: variance
+    )
     monkeypatch.setattr("data.storage.engine", _DummyEngine([trade_rows, deputy_totals]))
 
     result = get_daily_efficiency_snapshot("site-1", date(2026, 2, 18))

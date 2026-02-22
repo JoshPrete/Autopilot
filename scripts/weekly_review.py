@@ -71,7 +71,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Generate report but don't send SMS or store.",
     )
     p.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable debug logging.",
     )
@@ -130,7 +131,11 @@ def main(argv: list[str]) -> int:
         "  Site: %s (%s)\n"
         "  Week: %s to %s\n"
         "  Dry run: %s",
-        site_name, site_id, week_start, week_end, args.dry_run,
+        site_name,
+        site_id,
+        week_start,
+        week_end,
+        args.dry_run,
     )
 
     try:

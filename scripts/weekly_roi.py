@@ -41,7 +41,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--site-id", help="Site UUID. Falls back to SQUARE_LOCATION_ID lookup.")
     p.add_argument("--week-end", help="Week ending date (YYYY-MM-DD).")
     p.add_argument("--json", action="store_true", help="Output JSON instead of text.")
-    p.add_argument("--send-sms", action="store_true", help="Send weekly ROI summary SMS to manager.")
+    p.add_argument(
+        "--send-sms", action="store_true", help="Send weekly ROI summary SMS to manager."
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
     return p.parse_args(argv)
 

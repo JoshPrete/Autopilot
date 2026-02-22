@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 from config.database import engine
@@ -34,6 +35,7 @@ logger = logging.getLogger("autopilot.calibrate_events")
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -60,13 +62,17 @@ def calibrate(site_id: str, *, dry_run: bool = False) -> dict[str, float]:
 
     with engine.connect() as conn:
         # Get distinct event types we have data for
-        event_types = conn.execute(
-            _text(
-                "SELECT DISTINCT event_type FROM special_events "
-                "WHERE site_id = :sid AND event_type IS NOT NULL"
-            ),
-            {"sid": site_id},
-        ).scalars().all()
+        event_types = (
+            conn.execute(
+                _text(
+                    "SELECT DISTINCT event_type FROM special_events "
+                    "WHERE site_id = :sid AND event_type IS NOT NULL"
+                ),
+                {"sid": site_id},
+            )
+            .scalars()
+            .all()
+        )
 
     if not event_types:
         logger.warning("No event types found in special_events")
@@ -85,8 +91,11 @@ def calibrate(site_id: str, *, dry_run: bool = False) -> dict[str, float]:
         if rev_event_days > item_event_days and rev_baseline_days > 0:
             multiplier = rev_multiplier
             source = "revenue"
-            logger.info("  Using REVENUE-based multiplier (more data: %d vs %d event days)",
-                        rev_event_days, item_event_days)
+            logger.info(
+                "  Using REVENUE-based multiplier (more data: %d vs %d event days)",
+                rev_event_days,
+                item_event_days,
+            )
         elif item_event_days > 0 and item_baseline_days > 0:
             multiplier = item_multiplier
             source = "items"
@@ -104,9 +113,12 @@ def calibrate(site_id: str, *, dry_run: bool = False) -> dict[str, float]:
 
         logger.info(
             "  Final multiplier: %.3f (source=%s, items=%.3f/%dd, revenue=%.3f/%dd)",
-            multiplier, source,
-            item_multiplier, item_event_days,
-            rev_multiplier, rev_event_days,
+            multiplier,
+            source,
+            item_multiplier,
+            item_event_days,
+            rev_multiplier,
+            rev_event_days,
         )
 
         # Update the table
@@ -133,8 +145,10 @@ def _calibrate_from_items(site_id: str, etype: str) -> tuple[float, int, int]:
     Returns (multiplier, event_days, baseline_days).
     """
     with engine.connect() as conn:
-        event_avg_row = conn.execute(
-            _text("""
+        event_avg_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH event_dates AS (
                     SELECT DISTINCT event_date
                     FROM special_events
@@ -157,9 +171,13 @@ def _calibrate_from_items(site_id: str, etype: str) -> tuple[float, int, int]:
                     AVG(items) AS avg_items,
                     STRING_AGG(DISTINCT dow::text, ',' ORDER BY dow::text) AS dows
                 FROM daily_counts
-            """),
-            {"sid": site_id, "etype": etype},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "etype": etype},
+            )
+            .mappings()
+            .first()
+        )
 
     event_days = event_avg_row["days_with_data"] or 0
     event_avg = float(event_avg_row["avg_items"]) if event_avg_row["avg_items"] else 0.0
@@ -168,12 +186,16 @@ def _calibrate_from_items(site_id: str, etype: str) -> tuple[float, int, int]:
     if event_days == 0:
         return 1.0, 0, 0
 
-    logger.info("  [items] Event dates: %d (avg %.1f items/day, dows=%s)", event_days, event_avg, event_dows)
+    logger.info(
+        "  [items] Event dates: %d (avg %.1f items/day, dows=%s)", event_days, event_avg, event_dows
+    )
 
     # Baseline: non-event dates with same DOW distribution
     with engine.connect() as conn:
-        baseline_row = conn.execute(
-            _text("""
+        baseline_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH event_dates AS (
                     SELECT DISTINCT event_date
                     FROM special_events
@@ -197,9 +219,13 @@ def _calibrate_from_items(site_id: str, etype: str) -> tuple[float, int, int]:
                     COUNT(*) AS days_with_data,
                     AVG(items) AS avg_items
                 FROM non_event_daily
-            """),
-            {"sid": site_id, "etype": etype, "dows": event_dows},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "etype": etype, "dows": event_dows},
+            )
+            .mappings()
+            .first()
+        )
 
     baseline_days = baseline_row["days_with_data"] or 0
     baseline_avg = float(baseline_row["avg_items"]) if baseline_row["avg_items"] else 0.0
@@ -233,8 +259,10 @@ def _calibrate_from_revenue(site_id: str, etype: str) -> tuple[float, int, int]:
         return 1.0, 0, 0
 
     with engine.connect() as conn:
-        event_row = conn.execute(
-            _text("""
+        event_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH event_dates AS (
                     SELECT DISTINCT event_date
                     FROM special_events
@@ -255,9 +283,13 @@ def _calibrate_from_revenue(site_id: str, etype: str) -> tuple[float, int, int]:
                     AVG(net_sales_cents) AS avg_revenue,
                     STRING_AGG(DISTINCT dow::text, ',' ORDER BY dow::text) AS dows
                 FROM event_revenue
-            """),
-            {"sid": site_id, "etype": etype},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "etype": etype},
+            )
+            .mappings()
+            .first()
+        )
 
     event_days = event_row["days_with_data"] or 0
     event_avg = float(event_row["avg_revenue"]) if event_row["avg_revenue"] else 0.0
@@ -266,13 +298,19 @@ def _calibrate_from_revenue(site_id: str, etype: str) -> tuple[float, int, int]:
     if event_days == 0:
         return 1.0, 0, 0
 
-    logger.info("  [revenue] Event dates: %d (avg $%.2f/day, dows=%s)",
-                event_days, event_avg / 100, event_dows)
+    logger.info(
+        "  [revenue] Event dates: %d (avg $%.2f/day, dows=%s)",
+        event_days,
+        event_avg / 100,
+        event_dows,
+    )
 
     # Baseline: non-event dates with same DOW distribution
     with engine.connect() as conn:
-        baseline_row = conn.execute(
-            _text("""
+        baseline_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH event_dates AS (
                     SELECT DISTINCT event_date
                     FROM special_events
@@ -293,9 +331,13 @@ def _calibrate_from_revenue(site_id: str, etype: str) -> tuple[float, int, int]:
                     COUNT(*) AS days_with_data,
                     AVG(net_sales_cents) AS avg_revenue
                 FROM non_event_revenue
-            """),
-            {"sid": site_id, "etype": etype, "dows": event_dows},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "etype": etype, "dows": event_dows},
+            )
+            .mappings()
+            .first()
+        )
 
     baseline_days = baseline_row["days_with_data"] or 0
     baseline_avg = float(baseline_row["avg_revenue"]) if baseline_row["avg_revenue"] else 0.0
@@ -339,8 +381,10 @@ def main():
     print("  (uses revenue from daily_sales_history when available)")
     print("=" * 60)
     for etype, mult in sorted(multipliers.items()):
-        direction = "neutral" if abs(mult - 1.0) < 0.01 else (
-            f"+{(mult-1)*100:.1f}%" if mult > 1 else f"{(mult-1)*100:.1f}%"
+        direction = (
+            "neutral"
+            if abs(mult - 1.0) < 0.01
+            else (f"+{(mult-1)*100:.1f}%" if mult > 1 else f"{(mult-1)*100:.1f}%")
         )
         print(f"  {etype:<20} {mult:.3f}x  ({direction})")
     print("=" * 60)

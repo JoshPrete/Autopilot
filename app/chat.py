@@ -91,7 +91,9 @@ def _fmt_prediction(pred: dict) -> dict:
         "weather": fd.get("weather"),
         "event_multiplier": pred.get("event_factor"),
         "actual_accuracy": pred.get("actual_accuracy"),
-        "hourly": fd.get("forecast", {}).get("hourly") if isinstance(fd.get("forecast"), dict) else None,
+        "hourly": (
+            fd.get("forecast", {}).get("hourly") if isinstance(fd.get("forecast"), dict) else None
+        ),
     }
 
 
@@ -99,16 +101,20 @@ def _get_predictions_range(site_id: str, start: date, end: date) -> list[dict]:
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT forecast_date, forecast_data, confidence_score, "
-                "event_factor, actual_accuracy, rush_windows "
-                "FROM predictions "
-                "WHERE site_id = :sid AND forecast_date BETWEEN :s AND :e "
-                "ORDER BY forecast_date"
-            ),
-            {"sid": site_id, "s": start, "e": end},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT forecast_date, forecast_data, confidence_score, "
+                    "event_factor, actual_accuracy, rush_windows "
+                    "FROM predictions "
+                    "WHERE site_id = :sid AND forecast_date BETWEEN :s AND :e "
+                    "ORDER BY forecast_date"
+                ),
+                {"sid": site_id, "s": start, "e": end},
+            )
+            .mappings()
+            .all()
+        )
 
     return [_fmt_prediction(dict(r)) for r in rows]
 
@@ -119,15 +125,19 @@ def _get_upcoming_events(site_id: str, days_ahead: int = 14) -> list[dict]:
     today = date.today()
     end = today + timedelta(days=days_ahead)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT event_name, event_date, historical_impact "
-                "FROM special_events "
-                "WHERE site_id = :sid AND event_date BETWEEN :s AND :e "
-                "ORDER BY event_date"
-            ),
-            {"sid": site_id, "s": today, "e": end},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT event_name, event_date, historical_impact "
+                    "FROM special_events "
+                    "WHERE site_id = :sid AND event_date BETWEEN :s AND :e "
+                    "ORDER BY event_date"
+                ),
+                {"sid": site_id, "s": today, "e": end},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -145,19 +155,23 @@ def _get_revenue_from_orders(site_id: str, days: int = 30) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=days)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT DATE(closed_at) AS sale_date, "
-                "COUNT(*) AS order_count, "
-                "SUM(total_money_cents) AS total_cents "
-                "FROM orders_raw "
-                "WHERE site_id = :sid AND closed_at >= :cutoff "
-                "AND state = 'COMPLETED' "
-                "GROUP BY DATE(closed_at) "
-                "ORDER BY sale_date DESC"
-            ),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT DATE(closed_at) AS sale_date, "
+                    "COUNT(*) AS order_count, "
+                    "SUM(total_money_cents) AS total_cents "
+                    "FROM orders_raw "
+                    "WHERE site_id = :sid AND closed_at >= :cutoff "
+                    "AND state = 'COMPLETED' "
+                    "GROUP BY DATE(closed_at) "
+                    "ORDER BY sale_date DESC"
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -176,18 +190,22 @@ def _get_daily_items_summary(site_id: str, days: int = 14) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=days)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT DATE(oi.created_at) AS sale_date, "
-                "COUNT(*) AS total_items, "
-                "SUM(oi.workload_units) AS total_workload "
-                "FROM order_items oi "
-                "WHERE oi.site_id = :sid AND oi.created_at >= :cutoff "
-                "GROUP BY DATE(oi.created_at) "
-                "ORDER BY sale_date DESC"
-            ),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT DATE(oi.created_at) AS sale_date, "
+                    "COUNT(*) AS total_items, "
+                    "SUM(oi.workload_units) AS total_workload "
+                    "FROM order_items oi "
+                    "WHERE oi.site_id = :sid AND oi.created_at >= :cutoff "
+                    "GROUP BY DATE(oi.created_at) "
+                    "ORDER BY sale_date DESC"
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -205,17 +223,21 @@ def _get_top_items(site_id: str, days: int = 14, limit: int = 10) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=days)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT item_name, COUNT(*) AS cnt, "
-                "ROUND(AVG(workload_units)::numeric, 1) AS avg_wu "
-                "FROM order_items "
-                "WHERE site_id = :sid AND created_at >= :cutoff "
-                "GROUP BY item_name "
-                "ORDER BY cnt DESC LIMIT :lim"
-            ),
-            {"sid": site_id, "cutoff": cutoff, "lim": limit},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT item_name, COUNT(*) AS cnt, "
+                    "ROUND(AVG(workload_units)::numeric, 1) AS avg_wu "
+                    "FROM order_items "
+                    "WHERE site_id = :sid AND created_at >= :cutoff "
+                    "GROUP BY item_name "
+                    "ORDER BY cnt DESC LIMIT :lim"
+                ),
+                {"sid": site_id, "cutoff": cutoff, "lim": limit},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {"item": r["item_name"], "count": int(r["cnt"]), "avg_workload": float(r["avg_wu"] or 0)}
@@ -229,18 +251,22 @@ def _get_item_counts_by_day(site_id: str, days: int = 7) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=days)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT DATE(oi.created_at) AS sale_date, "
-                "oi.item_name, "
-                "COUNT(*) AS qty "
-                "FROM order_items oi "
-                "WHERE oi.site_id = :sid AND oi.created_at >= :cutoff "
-                "GROUP BY DATE(oi.created_at), oi.item_name "
-                "ORDER BY sale_date DESC, qty DESC"
-            ),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT DATE(oi.created_at) AS sale_date, "
+                    "oi.item_name, "
+                    "COUNT(*) AS qty "
+                    "FROM order_items oi "
+                    "WHERE oi.site_id = :sid AND oi.created_at >= :cutoff "
+                    "GROUP BY DATE(oi.created_at), oi.item_name "
+                    "ORDER BY sale_date DESC, qty DESC"
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -269,7 +295,9 @@ def _get_item_variations(site_id: str, days: int = 7) -> list[dict]:
         ).all()
 
     # Build per-item, per-variation, per-day breakdown
-    item_data = {}  # item_name -> {variations: {name: count}, modifiers: {name: count}, daily: {date: count}, total: int}
+    item_data = (
+        {}
+    )  # item_name -> {variations: {name: count}, modifiers: {name: count}, daily: {date: count}, total: int}
     skip_mods = {"N/A", "Default Espresso"}
 
     for row in rows:
@@ -292,12 +320,16 @@ def _get_item_variations(site_id: str, days: int = 7) -> list[dict]:
             item_data[name]["daily"][sale_date] += 1
 
             if variation and variation != "Regular":
-                item_data[name]["variations"][variation] = item_data[name]["variations"].get(variation, 0) + 1
+                item_data[name]["variations"][variation] = (
+                    item_data[name]["variations"].get(variation, 0) + 1
+                )
 
             for mod in li.get("modifiers", []):
                 mod_name = mod.get("name", "?")
                 if mod_name not in skip_mods:
-                    item_data[name]["modifiers"][mod_name] = item_data[name]["modifiers"].get(mod_name, 0) + 1
+                    item_data[name]["modifiers"][mod_name] = (
+                        item_data[name]["modifiers"].get(mod_name, 0) + 1
+                    )
 
     # Convert to sorted list
     result = []
@@ -341,23 +373,39 @@ def _get_modifier_stats(site_id: str, days: int = 7) -> dict:
             {"sid": site_id, "cutoff": cutoff},
         ).all()
 
-        total_items = conn.execute(
-            text("SELECT COUNT(*) FROM order_items WHERE site_id = :sid AND created_at >= :cutoff"),
-            {"sid": site_id, "cutoff": cutoff},
-        ).scalar() or 1
+        total_items = (
+            conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM order_items WHERE site_id = :sid AND created_at >= :cutoff"
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            ).scalar()
+            or 1
+        )
 
     # Parse raw payloads for detailed modifier names
     # Categorise modifiers
     milk_names = {"Oat", "Almond", "Soy", "Coconut", "Full Cream", "Skim", "Lactose Free"}
     syrup_names = {"Vanilla", "Caramel", "Chocolate", "No Syrup"}
-    drink_types = {"Flat White", "Latte", "Cappuccino", "Long Black", "Espresso",
-                   "Chai", "Mocha", "Iced Latte", "Iced Mocha", "Iced Chai",
-                   "Iced Matcha", "Strawberry Matcha", "Piccolo"}
-    extras = {"EXTRA HOT", "STEVIA", "SUGAR", "DINE IN", "2 Extra Shot",
-              "1 Extra Shot", "2", "3"}
+    drink_types = {
+        "Flat White",
+        "Latte",
+        "Cappuccino",
+        "Long Black",
+        "Espresso",
+        "Chai",
+        "Mocha",
+        "Iced Latte",
+        "Iced Mocha",
+        "Iced Chai",
+        "Iced Matcha",
+        "Strawberry Matcha",
+        "Piccolo",
+    }
+    extras = {"EXTRA HOT", "STEVIA", "SUGAR", "DINE IN", "2 Extra Shot", "1 Extra Shot", "2", "3"}
 
     modifier_counts = {}  # name -> count
-    modifier_daily = {}   # date -> {name -> count}
+    modifier_daily = {}  # date -> {name -> count}
     milk_counts = {}
     syrup_counts = {}
     drink_type_counts = {}
@@ -397,17 +445,37 @@ def _get_modifier_stats(site_id: str, days: int = 7) -> dict:
     def _sorted_counts(d):
         return sorted(d.items(), key=lambda x: x[1], reverse=True)
 
-    size_breakdown = [{"size": r[0], "count": int(r[1]), "pct": round(int(r[1]) / total_items * 100, 1)} for r in sizes]
+    size_breakdown = [
+        {"size": r[0], "count": int(r[1]), "pct": round(int(r[1]) / total_items * 100, 1)}
+        for r in sizes
+    ]
 
     return {
         "total_drinks": total_drinks,
         "total_items": total_items,
-        "milk_breakdown": [{"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)} for k, v in _sorted_counts(milk_counts)],
-        "syrup_breakdown": [{"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)} for k, v in _sorted_counts(syrup_counts)],
-        "drink_types": [{"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)} for k, v in _sorted_counts(drink_type_counts)],
-        "extras": [{"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)} for k, v in _sorted_counts(extras_counts)],
-        "all_modifiers": [{"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)} for k, v in _sorted_counts(modifier_counts)],
-        "daily": {d: _sorted_counts(mods) for d, mods in sorted(modifier_daily.items(), reverse=True)},
+        "milk_breakdown": [
+            {"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)}
+            for k, v in _sorted_counts(milk_counts)
+        ],
+        "syrup_breakdown": [
+            {"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)}
+            for k, v in _sorted_counts(syrup_counts)
+        ],
+        "drink_types": [
+            {"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)}
+            for k, v in _sorted_counts(drink_type_counts)
+        ],
+        "extras": [
+            {"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)}
+            for k, v in _sorted_counts(extras_counts)
+        ],
+        "all_modifiers": [
+            {"name": k, "count": v, "pct": round(v / total_drinks * 100, 1)}
+            for k, v in _sorted_counts(modifier_counts)
+        ],
+        "daily": {
+            d: _sorted_counts(mods) for d, mods in sorted(modifier_daily.items(), reverse=True)
+        },
         "size_breakdown": size_breakdown,
     }
 
@@ -426,6 +494,7 @@ def _get_item_margins_context(site_id: str, days: int = 14) -> list[dict]:
     """Compute item-level margin analysis."""
     try:
         from analysis.profitability import compute_item_margins
+
         return compute_item_margins(site_id, days=days)
     except Exception:
         return []
@@ -435,15 +504,19 @@ def _get_workload_timeline_recent(site_id: str, limit: int = 48) -> list[dict]:
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT interval_start, workload_units, orders_count, items_count "
-                "FROM workload_timeline "
-                "WHERE site_id = :sid "
-                "ORDER BY interval_start DESC LIMIT :lim"
-            ),
-            {"sid": site_id, "lim": limit},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT interval_start, workload_units, orders_count, items_count "
+                    "FROM workload_timeline "
+                    "WHERE site_id = :sid "
+                    "ORDER BY interval_start DESC LIMIT :lim"
+                ),
+                {"sid": site_id, "lim": limit},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -462,19 +535,23 @@ def _get_hourly_averages(site_id: str, weeks_back: int = 4) -> list[dict]:
 
     cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT EXTRACT(HOUR FROM interval_start)::int AS hour, "
-                "ROUND(AVG(workload_units)::numeric, 1) AS avg_wu, "
-                "ROUND(AVG(orders_count)::numeric, 1) AS avg_orders, "
-                "ROUND(AVG(items_count)::numeric, 1) AS avg_items "
-                "FROM workload_timeline "
-                "WHERE site_id = :sid AND interval_start >= :cutoff "
-                "GROUP BY EXTRACT(HOUR FROM interval_start) "
-                "ORDER BY hour"
-            ),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT EXTRACT(HOUR FROM interval_start)::int AS hour, "
+                    "ROUND(AVG(workload_units)::numeric, 1) AS avg_wu, "
+                    "ROUND(AVG(orders_count)::numeric, 1) AS avg_orders, "
+                    "ROUND(AVG(items_count)::numeric, 1) AS avg_items "
+                    "FROM workload_timeline "
+                    "WHERE site_id = :sid AND interval_start >= :cutoff "
+                    "GROUP BY EXTRACT(HOUR FROM interval_start) "
+                    "ORDER BY hour"
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .all()
+        )
 
     return [
         {
@@ -513,6 +590,7 @@ def _get_roster_for_date(site_id: str, target_date: date) -> list[dict]:
 def _has_roster_data(site_id: str) -> bool:
     """Quick check if any roster data exists for this site."""
     from sqlalchemy import text
+
     try:
         with engine.connect() as conn:
             count = conn.execute(
@@ -543,8 +621,10 @@ def _get_operational_benchmarks(site_id: str, weeks: int = 4) -> dict:
     try:
         with engine.connect() as conn:
             # Avg items per hour by day-of-week
-            peak_hours = conn.execute(
-                text("""
+            peak_hours = (
+                conn.execute(
+                    text(
+                        """
                     SELECT
                         TRIM(TO_CHAR(interval_start, 'Day')) AS day_name,
                         EXTRACT(HOUR FROM interval_start)::int AS hour,
@@ -556,13 +636,19 @@ def _get_operational_benchmarks(site_id: str, weeks: int = 4) -> dict:
                              EXTRACT(HOUR FROM interval_start)
                     ORDER BY avg_items DESC
                     LIMIT 20
-                """),
-                {"sid": site_id, "cutoff": cutoff},
-            ).mappings().all()
+                """
+                    ),
+                    {"sid": site_id, "cutoff": cutoff},
+                )
+                .mappings()
+                .all()
+            )
 
             # Daily volume ranking
-            daily_ranking = conn.execute(
-                text("""
+            daily_ranking = (
+                conn.execute(
+                    text(
+                        """
                     SELECT
                         TRIM(TO_CHAR(interval_start, 'Day')) AS day_name,
                         ROUND(AVG(daily_total)::numeric, 0) AS avg_daily_items
@@ -577,14 +663,22 @@ def _get_operational_benchmarks(site_id: str, weeks: int = 4) -> dict:
                     CROSS JOIN LATERAL (SELECT sub.day_name_inner AS day_name) naming
                     GROUP BY TRIM(TO_CHAR(interval_start, 'Day'))
                     ORDER BY avg_daily_items DESC
-                """),
-                {"sid": site_id, "cutoff": cutoff},
-            ).mappings().all()
+                """
+                    ),
+                    {"sid": site_id, "cutoff": cutoff},
+                )
+                .mappings()
+                .all()
+            )
 
         return {
             "peak_hours": [
-                {"day": r["day_name"], "hour": f"{r['hour']}:00",
-                 "avg_items": float(r["avg_items"]), "avg_workload": float(r["avg_wu"])}
+                {
+                    "day": r["day_name"],
+                    "hour": f"{r['hour']}:00",
+                    "avg_items": float(r["avg_items"]),
+                    "avg_workload": float(r["avg_wu"]),
+                }
                 for r in peak_hours
             ],
             "daily_ranking": [
@@ -609,27 +703,39 @@ def _get_trending_items(site_id: str) -> list[dict]:
 
     try:
         with engine.connect() as conn:
-            this_week = conn.execute(
-                text("""
+            this_week = (
+                conn.execute(
+                    text(
+                        """
                     SELECT item_name, COUNT(*) AS cnt
                     FROM order_items
                     WHERE site_id = :sid
                     AND created_at >= :start AND created_at < :end
                     GROUP BY item_name
-                """),
-                {"sid": site_id, "start": this_week_start, "end": today},
-            ).mappings().all()
+                """
+                    ),
+                    {"sid": site_id, "start": this_week_start, "end": today},
+                )
+                .mappings()
+                .all()
+            )
 
-            last_week = conn.execute(
-                text("""
+            last_week = (
+                conn.execute(
+                    text(
+                        """
                     SELECT item_name, COUNT(*) AS cnt
                     FROM order_items
                     WHERE site_id = :sid
                     AND created_at >= :start AND created_at < :end
                     GROUP BY item_name
-                """),
-                {"sid": site_id, "start": last_week_start, "end": this_week_start},
-            ).mappings().all()
+                """
+                    ),
+                    {"sid": site_id, "start": last_week_start, "end": this_week_start},
+                )
+                .mappings()
+                .all()
+            )
 
         this_counts = {r["item_name"]: int(r["cnt"]) for r in this_week}
         last_counts = {r["item_name"]: int(r["cnt"]) for r in last_week}
@@ -647,13 +753,15 @@ def _get_trending_items(site_id: str) -> list[dict]:
                 continue
 
             if abs(change_pct) >= 10 and (this_cnt + last_cnt) >= 5:
-                trends.append({
-                    "item": item,
-                    "this_week": this_cnt,
-                    "last_week": last_cnt,
-                    "change_pct": change_pct,
-                    "direction": "up" if change_pct > 0 else "down",
-                })
+                trends.append(
+                    {
+                        "item": item,
+                        "this_week": this_cnt,
+                        "last_week": last_cnt,
+                        "change_pct": change_pct,
+                        "direction": "up" if change_pct > 0 else "down",
+                    }
+                )
 
         trends.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
         return trends[:15]
@@ -683,9 +791,10 @@ def _get_cogs_snapshot(site_id: str) -> dict:
 
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
+            row = (
+                conn.execute(
+                    text(
+                        """
                     SELECT
                         COUNT(*) AS total_items,
                         COUNT(*) FILTER (WHERE source IN ('xero', 'document')) AS real_items,
@@ -695,9 +804,12 @@ def _get_cogs_snapshot(site_id: str) -> dict:
                     FROM item_costs
                     WHERE site_id = :sid
                     """
-                ),
-                {"sid": site_id},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
     except Exception:
         return {}
 
@@ -743,9 +855,10 @@ def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) ->
     cutoff = date.today() - timedelta(days=days)
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    """
+            rows = (
+                conn.execute(
+                    text(
+                        """
                     SELECT rec_id, action_type, action_timing, action_details, adopted, outcome_data
                     FROM recommendations
                     WHERE site_id = :sid
@@ -753,9 +866,12 @@ def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) ->
                     ORDER BY action_timing DESC
                     LIMIT :lim
                     """
-                ),
-                {"sid": site_id, "cutoff": cutoff, "lim": limit},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "cutoff": cutoff, "lim": limit},
+                )
+                .mappings()
+                .all()
+            )
     except Exception:
         return []
 
@@ -774,7 +890,9 @@ def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) ->
                 "action_type": r.get("action_type"),
                 "action_timing": str(r.get("action_timing")),
                 "title": details.get("title"),
-                "expected_weekly_profit_uplift_cents": details.get("expected_weekly_profit_uplift_cents"),
+                "expected_weekly_profit_uplift_cents": details.get(
+                    "expected_weekly_profit_uplift_cents"
+                ),
                 "ranking_score_cents": details.get("ranking_score_cents"),
                 "confidence": details.get("confidence"),
                 "adopted": bool(r.get("adopted")),
@@ -860,6 +978,7 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     # --- Always: Xero connection status ---
     try:
         from data.xero import is_xero_configured
+
         context["xero_connected"] = is_xero_configured(site_id)
     except Exception:
         context["xero_connected"] = False
@@ -930,9 +1049,21 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         pass
 
     # --- Conditional: learned patterns (keyword-triggered) ---
-    if _keyword_match(question, ["insight", "learn", "pattern", "intelligence",
-                                  "recommendation", "suggest", "advice",
-                                  "improve", "optimize", "optimise"]):
+    if _keyword_match(
+        question,
+        [
+            "insight",
+            "learn",
+            "pattern",
+            "intelligence",
+            "recommendation",
+            "suggest",
+            "advice",
+            "improve",
+            "optimize",
+            "optimise",
+        ],
+    ):
         try:
             patterns = get_learned_patterns(site_id, min_confidence=0.5)
             if patterns:
@@ -941,8 +1072,9 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: events / closures / holidays ---
-    if _keyword_match(question, ["closed", "closure", "holiday", "event",
-                                  "public holiday", "market", "festival"]):
+    if _keyword_match(
+        question, ["closed", "closure", "holiday", "event", "public holiday", "market", "festival"]
+    ):
         try:
             past_events = get_events_range(
                 site_id, today - timedelta(days=30), today + timedelta(days=30)
@@ -953,7 +1085,9 @@ def gather_chat_context(site_id: str, question: str) -> dict:
                         "name": e["event_name"],
                         "date": str(e["event_date"]),
                         "type": e.get("event_type"),
-                        "impact": float(e["historical_impact"]) if e.get("historical_impact") else None,
+                        "impact": (
+                            float(e["historical_impact"]) if e.get("historical_impact") else None
+                        ),
                     }
                     for e in past_events
                 ]
@@ -961,9 +1095,20 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: staffing / roster / schedule ---
-    staffing_keywords = ["staff", "roster", "schedule", "shift", "deputy",
-                         "understaffed", "overstaffed", "working", "who's on",
-                         "whos on", "who is on", "who is working"]
+    staffing_keywords = [
+        "staff",
+        "roster",
+        "schedule",
+        "shift",
+        "deputy",
+        "understaffed",
+        "overstaffed",
+        "working",
+        "who's on",
+        "whos on",
+        "who is on",
+        "who is working",
+    ]
     if _keyword_match(question, staffing_keywords):
         has_rosters = _has_roster_data(site_id)
         if has_rosters:
@@ -974,9 +1119,7 @@ def gather_chat_context(site_id: str, question: str) -> dict:
                     context["roster_summary"] = roster_summary
 
                 # Historical staffing vs workload (last 30 days)
-                staffing_data = get_staffing_vs_workload(
-                    site_id, today - timedelta(days=30), today
-                )
+                staffing_data = get_staffing_vs_workload(site_id, today - timedelta(days=30), today)
                 if staffing_data:
                     context["staffing_vs_workload"] = staffing_data
             except Exception:
@@ -985,8 +1128,22 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             context["deputy_status"] = "not_connected"
 
     # --- Conditional: operator efficiency snapshot ---
-    if _keyword_match(question, ["efficiency", "profit", "labor", "labour", "staff", "roster",
-                                 "schedule", "optimize", "optimise", "recommend", "action"]):
+    if _keyword_match(
+        question,
+        [
+            "efficiency",
+            "profit",
+            "labor",
+            "labour",
+            "staff",
+            "roster",
+            "schedule",
+            "optimize",
+            "optimise",
+            "recommend",
+            "action",
+        ],
+    ):
         try:
             efficiency = _get_recent_efficiency_context(site_id, lookback_days=3)
             if efficiency:
@@ -995,11 +1152,25 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: latest generated actions (grounding for "what should I do") ---
-    if _keyword_match(question, ["recommend", "suggest", "what should", "next action",
-                                 "what do i do", "improve", "optimize", "optimise",
-                                 "profit", "efficiency", "staff"]):
+    if _keyword_match(
+        question,
+        [
+            "recommend",
+            "suggest",
+            "what should",
+            "next action",
+            "what do i do",
+            "improve",
+            "optimize",
+            "optimise",
+            "profit",
+            "efficiency",
+            "staff",
+        ],
+    ):
         try:
             from analysis.next_actions import generate_next_actions
+
             context["next_actions_live"] = generate_next_actions(
                 site_id=site_id,
                 target_date=today,
@@ -1015,10 +1186,23 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: 2-4 week roster planning ---
-    if _keyword_match(question, ["2 weeks", "3 weeks", "4 weeks", "next week", "roster ahead",
-                                 "schedule ahead", "advance roster", "shift plan", "templates"]):
+    if _keyword_match(
+        question,
+        [
+            "2 weeks",
+            "3 weeks",
+            "4 weeks",
+            "next week",
+            "roster ahead",
+            "schedule ahead",
+            "advance roster",
+            "shift plan",
+            "templates",
+        ],
+    ):
         try:
             from analysis.shift_optimizer import optimize_shifts_range
+
             context["optimized_shift_range"] = optimize_shifts_range(
                 site_id=site_id,
                 start_date=today,
@@ -1028,27 +1212,41 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: staffing / forecast range ---
-    if _keyword_match(question, ["staff", "roster", "schedule", "next week",
-                                  "next 2 weeks", "coming days", "forecast",
-                                  "tomorrow", "week ahead", "predict"]):
+    if _keyword_match(
+        question,
+        [
+            "staff",
+            "roster",
+            "schedule",
+            "next week",
+            "next 2 weeks",
+            "coming days",
+            "forecast",
+            "tomorrow",
+            "week ahead",
+            "predict",
+        ],
+    ):
         try:
-            predictions = _get_predictions_range(site_id, today - timedelta(days=1), today + timedelta(days=14))
+            predictions = _get_predictions_range(
+                site_id, today - timedelta(days=1), today + timedelta(days=14)
+            )
             if predictions:
                 context["predictions_range"] = predictions
         except Exception:
             pass
 
     # --- Conditional: revenue / sales / money ---
-    if _keyword_match(question, ["revenue", "sales", "money", "income",
-                                  "takings", "how much", "dollars", "earn"]):
+    if _keyword_match(
+        question, ["revenue", "sales", "money", "income", "takings", "how much", "dollars", "earn"]
+    ):
         try:
             context["revenue_30d"] = _get_revenue_from_orders(site_id, days=30)
         except Exception:
             pass
 
     # --- Conditional: rush / busy / peak ---
-    if _keyword_match(question, ["rush", "busy", "peak", "busiest", "quietest",
-                                  "slow", "quiet"]):
+    if _keyword_match(question, ["rush", "busy", "peak", "busiest", "quietest", "slow", "quiet"]):
         try:
             context["dow_pattern"] = get_dow_pattern(site_id)
             context["hourly_averages"] = _get_hourly_averages(site_id)
@@ -1056,9 +1254,21 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: history / trend / compare ---
-    if _keyword_match(question, ["history", "trend", "compare", "last week",
-                                  "week before", "month", "versus", "vs",
-                                  "this week", "yesterday"]):
+    if _keyword_match(
+        question,
+        [
+            "history",
+            "trend",
+            "compare",
+            "last week",
+            "week before",
+            "month",
+            "versus",
+            "vs",
+            "this week",
+            "yesterday",
+        ],
+    ):
         try:
             context["revenue_30d"] = _get_revenue_from_orders(site_id, days=30)
             context["dow_pattern"] = get_dow_pattern(site_id)
@@ -1067,15 +1277,46 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: menu / items / popular / "how many X" ---
-    if _keyword_match(question, ["menu", "item", "popular", "top", "drink",
-                                  "best seller", "selling", "sell", "sold",
-                                  "how many", "toastie", "coffee", "latte",
-                                  "flat white", "cappuccino", "mocha", "chai",
-                                  "muffin", "croissant", "wrap", "pastry",
-                                  "cookie", "juice", "smoothie", "matcha",
-                                  "batch brew", "iced", "cold brew",
-                                  "food", "pastry", "wrap", "butterboy",
-                                  "croissant", "muffin", "bean"]):
+    if _keyword_match(
+        question,
+        [
+            "menu",
+            "item",
+            "popular",
+            "top",
+            "drink",
+            "best seller",
+            "selling",
+            "sell",
+            "sold",
+            "how many",
+            "toastie",
+            "coffee",
+            "latte",
+            "flat white",
+            "cappuccino",
+            "mocha",
+            "chai",
+            "muffin",
+            "croissant",
+            "wrap",
+            "pastry",
+            "cookie",
+            "juice",
+            "smoothie",
+            "matcha",
+            "batch brew",
+            "iced",
+            "cold brew",
+            "food",
+            "pastry",
+            "wrap",
+            "butterboy",
+            "croissant",
+            "muffin",
+            "bean",
+        ],
+    ):
         try:
             context["top_items"] = _get_top_items(site_id, days=14, limit=15)
             context["item_counts_by_day"] = _get_item_counts_by_day(site_id, days=7)
@@ -1084,19 +1325,40 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: modifiers ---
-    if _keyword_match(question, ["modifier", "oat", "almond", "soy", "alt milk",
-                                  "alternative milk", "iced", "extra shot",
-                                  "decaf", "large", "syrup", "milk type",
-                                  "upgrade", "add-on", "add on", "milk",
-                                  "breakdown", "customis", "customiz"]):
+    if _keyword_match(
+        question,
+        [
+            "modifier",
+            "oat",
+            "almond",
+            "soy",
+            "alt milk",
+            "alternative milk",
+            "iced",
+            "extra shot",
+            "decaf",
+            "large",
+            "syrup",
+            "milk type",
+            "upgrade",
+            "add-on",
+            "add on",
+            "milk",
+            "breakdown",
+            "customis",
+            "customiz",
+        ],
+    ):
         try:
             context["modifier_stats"] = _get_modifier_stats(site_id, days=90)
         except Exception:
             pass
 
     # --- Conditional: workload / current / now ---
-    if _keyword_match(question, ["workload", "timeline", "actual", "real-time",
-                                  "right now", "current", "today so far"]):
+    if _keyword_match(
+        question,
+        ["workload", "timeline", "actual", "real-time", "right now", "current", "today so far"],
+    ):
         try:
             context["workload_timeline"] = _get_workload_timeline_recent(site_id, limit=48)
         except Exception:
@@ -1108,6 +1370,7 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             site = get_site(site_id)
             site_name = site["name"] if site else "Clubhouse"
             from analysis.reporting import generate_weekly_review
+
             review = generate_weekly_review(site_id, site_name)
             context["weekly_review"] = {
                 "week_start": review.get("week_start"),
@@ -1121,17 +1384,28 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: hourly patterns (any time-of-day question) ---
-    if _keyword_match(question, ["hour", "morning", "afternoon", "lunch",
-                                  "open", "close", "pattern"]):
+    if _keyword_match(
+        question, ["hour", "morning", "afternoon", "lunch", "open", "close", "pattern"]
+    ):
         try:
             context["hourly_averages"] = _get_hourly_averages(site_id)
         except Exception:
             pass
 
     # --- Conditional: trending items ---
-    if _keyword_match(question, ["trend", "trending", "growing", "declining",
-                                  "popular", "compared to last week",
-                                  "week over week", "change"]):
+    if _keyword_match(
+        question,
+        [
+            "trend",
+            "trending",
+            "growing",
+            "declining",
+            "popular",
+            "compared to last week",
+            "week over week",
+            "change",
+        ],
+    ):
         try:
             trends = _get_trending_items(site_id)
             if trends:
@@ -1140,10 +1414,22 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: operational benchmarks ---
-    if _keyword_match(question, ["benchmark", "average", "efficiency",
-                                  "drinks per hour", "peak", "busiest",
-                                  "quietest", "ranking", "best day",
-                                  "worst day", "compare days"]):
+    if _keyword_match(
+        question,
+        [
+            "benchmark",
+            "average",
+            "efficiency",
+            "drinks per hour",
+            "peak",
+            "busiest",
+            "quietest",
+            "ranking",
+            "best day",
+            "worst day",
+            "compare days",
+        ],
+    ):
         try:
             benchmarks = _get_operational_benchmarks(site_id)
             if benchmarks:
@@ -1152,9 +1438,23 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: inventory / stock ---
-    if _keyword_match(question, ["inventory", "stock", "low stock", "out of stock",
-                                  "restock", "cups", "lids", "milk", "beans",
-                                  "consumable", "reorder", "on hand"]):
+    if _keyword_match(
+        question,
+        [
+            "inventory",
+            "stock",
+            "low stock",
+            "out of stock",
+            "restock",
+            "cups",
+            "lids",
+            "milk",
+            "beans",
+            "consumable",
+            "reorder",
+            "on hand",
+        ],
+    ):
         try:
             alerts = get_inventory_alerts(site_id, lookback_days=21, include_ok=False)
             context["inventory_alerts"] = alerts
@@ -1185,9 +1485,24 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: profitability / P&L / margins ---
-    if _keyword_match(question, ["profit", "p&l", "margin", "cogs", "cost of goods",
-                                  "profitable", "bottom line", "xero", "cost",
-                                  "supplier", "ingredient", "price", "pricing"]):
+    if _keyword_match(
+        question,
+        [
+            "profit",
+            "p&l",
+            "margin",
+            "cogs",
+            "cost of goods",
+            "profitable",
+            "bottom line",
+            "xero",
+            "cost",
+            "supplier",
+            "ingredient",
+            "price",
+            "pricing",
+        ],
+    ):
         try:
             pnl = _get_profitability_context(site_id, days=14)
             if pnl:
@@ -1201,9 +1516,19 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             pass
 
     # --- Conditional: labor efficiency ---
-    if _keyword_match(question, ["efficiency", "revenue per hour", "cost per drink",
-                                  "labor cost", "labour cost", "wage", "labor %",
-                                  "labour %"]):
+    if _keyword_match(
+        question,
+        [
+            "efficiency",
+            "revenue per hour",
+            "cost per drink",
+            "labor cost",
+            "labour cost",
+            "wage",
+            "labor %",
+            "labour %",
+        ],
+    ):
         try:
             pnl = _get_profitability_context(site_id, days=14)
             if pnl:
@@ -1249,7 +1574,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             freshness_line = f"Data freshness: {freshness}"
     else:
         freshness_line = "Data freshness: unknown"
-        stale_warning = "WARNING: Could not determine data freshness. Note this uncertainty in responses."
+        stale_warning = (
+            "WARNING: Could not determine data freshness. Note this uncertainty in responses."
+        )
 
     sections = [
         f"You are the Clubhouse Autopilot assistant for **{site_name}** — a specialty coffee cafe in Nundah, Brisbane.",
@@ -1259,31 +1586,33 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if stale_warning:
         sections.append(f"**{stale_warning}**")
 
-    sections.extend([
-        "",
-        "You're the cafe's AI analyst. You have access to real operational data: sales, predictions, workload patterns, "
-        "rush windows, events, and menu analytics. Managers ask you questions to plan their day, week, and staffing.",
-        "",
-        "Response Format:",
-        "1. Lead with data freshness indicator: 'Data through: DD/MM' or similar",
-        "2. Then the key answer/number",
-        "3. Then supporting detail",
-        "4. Then caveats if data is stale (>1 day old)",
-        "",
-        "Personality & Style:",
-        "- Friendly, sharp, and data-driven — like a really smart shift supervisor who knows the numbers",
-        "- Lead with the key insight or number, then provide supporting detail",
-        "- Use markdown tables when comparing multiple days or items — managers love quick-scan tables",
-        "- Bold the most important numbers",
-        "- Give actionable takeaways when relevant (e.g. 'You might want an extra hand Thursday')",
-        "- Australian English, casual-professional tone",
-        "- Dates in DD/MM format, currency in AUD ($)",
-        "- If you don't have data for something, say so — don't guess",
-        "- For recommendations, cite the specific metric(s) used (for example labor %, rev/labor-hour, understaffed intervals, margin %)",
-        "- If data is missing/empty, say that explicitly and provide the next check to run",
-        "- Keep responses focused. Don't pad with generic advice unless asked",
-        "",
-    ])
+    sections.extend(
+        [
+            "",
+            "You're the cafe's AI analyst. You have access to real operational data: sales, predictions, workload patterns, "
+            "rush windows, events, and menu analytics. Managers ask you questions to plan their day, week, and staffing.",
+            "",
+            "Response Format:",
+            "1. Lead with data freshness indicator: 'Data through: DD/MM' or similar",
+            "2. Then the key answer/number",
+            "3. Then supporting detail",
+            "4. Then caveats if data is stale (>1 day old)",
+            "",
+            "Personality & Style:",
+            "- Friendly, sharp, and data-driven — like a really smart shift supervisor who knows the numbers",
+            "- Lead with the key insight or number, then provide supporting detail",
+            "- Use markdown tables when comparing multiple days or items — managers love quick-scan tables",
+            "- Bold the most important numbers",
+            "- Give actionable takeaways when relevant (e.g. 'You might want an extra hand Thursday')",
+            "- Australian English, casual-professional tone",
+            "- Dates in DD/MM format, currency in AUD ($)",
+            "- If you don't have data for something, say so — don't guess",
+            "- For recommendations, cite the specific metric(s) used (for example labor %, rev/labor-hour, understaffed intervals, margin %)",
+            "- If data is missing/empty, say that explicitly and provide the next check to run",
+            "- Keep responses focused. Don't pad with generic advice unless asked",
+            "",
+        ]
+    )
 
     # --- COGS status (enhanced with source breakdown) ---
     has_real = context.get("has_real_cogs", False)
@@ -1310,22 +1639,33 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append("Consider connecting Xero at /xero/setup for automatic updates.")
         sections.append("")
     elif xero_connected:
-        sections.append("**COGS STATUS:** Xero is connected but no costs have synced yet. A sync will run automatically at 5:25pm AEST, or the user can trigger one at /xero/setup.")
-        sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS sync is pending.")
+        sections.append(
+            "**COGS STATUS:** Xero is connected but no costs have synced yet. A sync will run automatically at 5:25pm AEST, or the user can trigger one at /xero/setup."
+        )
+        sections.append(
+            "When asked about profitability, show revenue + labor (real data) but note that COGS sync is pending."
+        )
         sections.append("")
     else:
         default_count = cogs_sources.get("default", {}).get("count", 0)
         if default_count > 0:
-            sections.append(f"**COGS STATUS:** {default_count} items with default/estimated costs only.")
+            sections.append(
+                f"**COGS STATUS:** {default_count} items with default/estimated costs only."
+            )
         else:
             sections.append("**COGS STATUS:** No cost data available.")
-        sections.append("When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available.")
-        sections.append("Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'")
+        sections.append(
+            "When asked about profitability, show revenue + labor (real data) but note that COGS are NOT available."
+        )
+        sections.append(
+            "Tell the user: 'Connect Xero at /xero/setup for automatic COGS, or upload supplier invoices.'"
+        )
         sections.append("")
 
     # --- Staffing Efficiency (always-visible) ---
     if "efficiency_gap" in context:
         from config.constants import EFFICIENCY_SCORE_TARGET
+
         eg = context["efficiency_gap"]
         eg_totals = eg.get("totals", {})
         eg_score = eg_totals.get("efficiency_score", 1.0)
@@ -1392,8 +1732,12 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         if by_day:
             rev_source_map = {"xero": "X", "square_csv": "C", "square_api": "S", "none": "?"}
             sections.append("### Staffing Efficiency — Daily Breakdown (7d)")
-            sections.append("| Date | Day | Eff % | Actual Labor | Min Labor | Excess | Deficit | Revenue | Src | Over/Under |")
-            sections.append("|------|-----|-------|-------------|-----------|--------|---------|---------|-----|------------|")
+            sections.append(
+                "| Date | Day | Eff % | Actual Labor | Min Labor | Excess | Deficit | Revenue | Src | Over/Under |"
+            )
+            sections.append(
+                "|------|-----|-------|-------------|-----------|--------|---------|---------|-----|------------|"
+            )
             for d in by_day:
                 src = rev_source_map.get(d.get("revenue_source", "none"), "?")
                 sections.append(
@@ -1407,7 +1751,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                     f"| {src} "
                     f"| +{d['overstaffed_intervals']}/-{d.get('understaffed_intervals', 0)}/{d['intervals']} |"
                 )
-            sections.append("_Revenue source: X=Xero (verified), C=Square CSV, S=Square API, ?=none_")
+            sections.append(
+                "_Revenue source: X=Xero (verified), C=Square CSV, S=Square API, ?=none_"
+            )
             sections.append("")
 
     # --- Bottom-Line Scorecard (trend + realized impact attribution) ---
@@ -1467,7 +1813,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             )
             avg_realized = actions.get("avg_realized_weekly_profit_delta_cents")
             if avg_realized is not None:
-                sections.append(f"- Avg realized weekly profit delta: ${int(avg_realized) / 100:+,.0f}")
+                sections.append(
+                    f"- Avg realized weekly profit delta: ${int(avg_realized) / 100:+,.0f}"
+                )
             top_proven = actions.get("top_proven_action_types") or []
             if top_proven:
                 sections.append("### Proven Action Types")
@@ -1490,13 +1838,13 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         if "active_insights" in context:
             sections.append("### Active Insights (last 7 days)")
             for ins in context["active_insights"][:5]:
-                icon = "!" if ins.get("severity") == "warning" else (
-                    ">" if ins.get("severity") == "opportunity" else "-"
+                icon = (
+                    "!"
+                    if ins.get("severity") == "warning"
+                    else (">" if ins.get("severity") == "opportunity" else "-")
                 )
                 conf = float(ins.get("confidence", 0))
-                sections.append(
-                    f"{icon} **{ins.get('title', '')}** (confidence: {conf:.0%})"
-                )
+                sections.append(f"{icon} **{ins.get('title', '')}** (confidence: {conf:.0%})")
                 body = ins.get("body", "")
                 if body:
                     sections.append(f"  {body}")
@@ -1509,7 +1857,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 for p in summary["top_patterns"]:
                     conf = float(p.get("confidence", 0))
                     impact = int(p.get("total_impact_cents") or 0)
-                    impact_str = f", measured impact: ${impact / 100:+,.0f}/week" if impact != 0 else ""
+                    impact_str = (
+                        f", measured impact: ${impact / 100:+,.0f}/week" if impact != 0 else ""
+                    )
                     sections.append(
                         f"- {p.get('description', p.get('pattern_key', '?'))} "
                         f"(confidence: {conf:.0%}{impact_str})"
@@ -1549,20 +1899,22 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         alerts = context.get("inventory_alerts") or []
         sections.append("## Inventory Alerts")
         if not alerts:
-            sections.append("- No active low-stock alerts based on current rules and count snapshots.")
+            sections.append(
+                "- No active low-stock alerts based on current rules and count snapshots."
+            )
         else:
             sections.append(f"- Active alerts: {len(alerts)}")
             for a in alerts[:10]:
                 unit = a.get("unit") or "units"
                 on_hand = a.get("effective_on_hand")
-                on_hand_text = f"{on_hand:.1f} {unit}" if isinstance(on_hand, (int, float)) else "unknown"
+                on_hand_text = (
+                    f"{on_hand:.1f} {unit}" if isinstance(on_hand, (int, float)) else "unknown"
+                )
                 rp = a.get("reorder_point")
                 rp_text = f"{rp:.1f} {unit}" if isinstance(rp, (int, float)) else "n/a"
                 days_remaining = a.get("days_remaining")
                 days_text = (
-                    f"{days_remaining:.1f}d"
-                    if isinstance(days_remaining, (int, float))
-                    else "n/a"
+                    f"{days_remaining:.1f}d" if isinstance(days_remaining, (int, float)) else "n/a"
                 )
                 sections.append(
                     f"- {a.get('item_name', '?')}: status={a.get('status', '?')}, "
@@ -1604,12 +1956,16 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 sections.append("- No rush windows predicted")
             if p.get("weather") and isinstance(p["weather"], dict):
                 w = p["weather"]
-                sections.append(f"- Weather: {w.get('temp_c', '?')}°C, {w.get('description', '?')}, "
-                              f"rain {round((w.get('rain_probability', 0)) * 100)}%")
+                sections.append(
+                    f"- Weather: {w.get('temp_c', '?')}°C, {w.get('description', '?')}, "
+                    f"rain {round((w.get('rain_probability', 0)) * 100)}%"
+                )
             if p.get("event_multiplier") and p["event_multiplier"] != 1.0:
                 sections.append(f"- **Event multiplier active: {p['event_multiplier']}x**")
             if p.get("actual_accuracy") is not None:
-                sections.append(f"- Yesterday's actual accuracy: {round(p['actual_accuracy'] * 100, 1)}%")
+                sections.append(
+                    f"- Yesterday's actual accuracy: {round(p['actual_accuracy'] * 100, 1)}%"
+                )
 
     # --- Predictions range ---
     if "predictions_range" in context:
@@ -1649,7 +2005,10 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(f"- **ALERT: {a.get('alert_reason')}**")
 
     # --- Revenue ---
-    for key, label in [("recent_revenue", "Revenue History (last 90 days)"), ("revenue_30d", "Revenue (last 30 days)")]:
+    for key, label in [
+        ("recent_revenue", "Revenue History (last 90 days)"),
+        ("revenue_30d", "Revenue (last 30 days)"),
+    ]:
         if key in context and context[key]:
             rev = context[key]
             total = sum(r["revenue"] for r in rev)
@@ -1660,17 +2019,27 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(f"- Total orders: {sum(r['orders'] for r in rev)}")
             best = max(rev, key=lambda r: r["revenue"])
             worst = min(rev, key=lambda r: r["revenue"])
-            sections.append(f"- Best day: {best['date']} ({best['day_name']}) — ${best['revenue']:,.2f} ({best['orders']} orders)")
-            sections.append(f"- Slowest day: {worst['date']} ({worst['day_name']}) — ${worst['revenue']:,.2f} ({worst['orders']} orders)")
+            sections.append(
+                f"- Best day: {best['date']} ({best['day_name']}) — ${best['revenue']:,.2f} ({best['orders']} orders)"
+            )
+            sections.append(
+                f"- Slowest day: {worst['date']} ({worst['day_name']}) — ${worst['revenue']:,.2f} ({worst['orders']} orders)"
+            )
             sections.append("- Day-by-day:")
             for r in rev[:14]:
-                sections.append(f"  {r['date']} ({r['day_name']}): ${r['revenue']:,.2f}, {r['orders']} orders")
+                sections.append(
+                    f"  {r['date']} ({r['day_name']}): ${r['revenue']:,.2f}, {r['orders']} orders"
+                )
 
     # --- Staffing & Rosters ---
     if "deputy_status" in context and context["deputy_status"] == "not_connected":
         sections.append("\n## Staffing & Rosters")
-        sections.append("- Deputy roster integration is not connected yet. No shift data available.")
-        sections.append("- If asked about rosters/staffing, let the manager know Deputy isn't synced yet.")
+        sections.append(
+            "- Deputy roster integration is not connected yet. No shift data available."
+        )
+        sections.append(
+            "- If asked about rosters/staffing, let the manager know Deputy isn't synced yet."
+        )
 
     # --- Rolling Roster (7-day window) ---
     if "rolling_roster" in context:
@@ -1693,14 +2062,18 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         for shift in context["today_roster"]:
             open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
             hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
-            sections.append(f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}")
+            sections.append(
+                f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}"
+            )
 
     if "tomorrow_roster" in context:
         sections.append("\n## Tomorrow's Roster (detail)")
         for shift in context["tomorrow_roster"]:
             open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
             hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
-            sections.append(f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}")
+            sections.append(
+                f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}"
+            )
 
     if "roster_summary" in context:
         sections.append(f"\n## Roster Summary (next {len(context['roster_summary'])} days)")
@@ -1731,7 +2104,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         if valid:
             avg_dps = sum(d["drinks_per_staff"] for d in valid) / len(valid)
             sections.append(f"- **Average drinks per staff member: {avg_dps:.1f}**")
-            sections.append(f"- Days above average suggest understaffing; below suggest overstaffing")
+            sections.append(
+                f"- Days above average suggest understaffing; below suggest overstaffing"
+            )
 
     # --- Daily Profitability (P&L) ---
     if "daily_profitability" in context:
@@ -1751,7 +2126,11 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 cogs = d["cogs_cents"] / 100 if d.get("cogs_cents") else 0
                 net = d["net_profit_cents"] / 100 if d.get("net_profit_cents") else 0
                 labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
-                rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
+                rev_hr = (
+                    f"${d['revenue_per_labor_hour'] / 100:.0f}"
+                    if d.get("revenue_per_labor_hour")
+                    else "N/A"
+                )
                 no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
                 try:
                     day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
@@ -1767,15 +2146,29 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             total_net = sum(d.get("net_profit_cents", 0) or 0 for d in pnl)
             days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
             avg_labor_pct = (
-                sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
-                / days_with_labor
-            ) if days_with_labor > 0 else 0
-            sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f} | "
-                           f"COGS ${total_cogs / 100:,.0f} | Net ${total_net / 100:,.0f}")
-            sections.append(f"**Avg labor % (days with data): {avg_labor_pct:.1f}%** "
-                           f"(industry benchmark: 25-35% for specialty cafes)")
+                (
+                    sum(
+                        d["labor_pct"]
+                        for d in pnl
+                        if d.get("labor_pct") and d["labor_cost_cents"] > 0
+                    )
+                    / days_with_labor
+                )
+                if days_with_labor > 0
+                else 0
+            )
+            sections.append(
+                f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f} | "
+                f"COGS ${total_cogs / 100:,.0f} | Net ${total_net / 100:,.0f}"
+            )
+            sections.append(
+                f"**Avg labor % (days with data): {avg_labor_pct:.1f}%** "
+                f"(industry benchmark: 25-35% for specialty cafes)"
+            )
             if days_with_labor < len(pnl):
-                sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
+                sections.append(
+                    f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data"
+                )
         else:
             # Revenue + Labor only (no estimated COGS)
             sections.append(f"\n## Revenue & Labor ({len(pnl)} days)")
@@ -1789,7 +2182,11 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 labor = d["labor_cost_cents"] / 100
                 orders = d.get("order_count") or "—"
                 labor_pct = f"{d['labor_pct']:.1f}%" if d.get("labor_pct") is not None else "N/A"
-                rev_hr = f"${d['revenue_per_labor_hour'] / 100:.0f}" if d.get("revenue_per_labor_hour") else "N/A"
+                rev_hr = (
+                    f"${d['revenue_per_labor_hour'] / 100:.0f}"
+                    if d.get("revenue_per_labor_hour")
+                    else "N/A"
+                )
                 no_labor_flag = " *" if d["labor_cost_cents"] == 0 else ""
                 try:
                     day_name = date.fromisoformat(d["date"]).strftime("%a %d/%m")
@@ -1803,13 +2200,25 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             total_labor = sum(d["labor_cost_cents"] for d in pnl)
             days_with_labor = sum(1 for d in pnl if d["labor_cost_cents"] > 0)
             avg_labor_pct = (
-                sum(d["labor_pct"] for d in pnl if d.get("labor_pct") and d["labor_cost_cents"] > 0)
-                / days_with_labor
-            ) if days_with_labor > 0 else 0
-            sections.append(f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f}")
+                (
+                    sum(
+                        d["labor_pct"]
+                        for d in pnl
+                        if d.get("labor_pct") and d["labor_cost_cents"] > 0
+                    )
+                    / days_with_labor
+                )
+                if days_with_labor > 0
+                else 0
+            )
+            sections.append(
+                f"\n**Totals:** Rev ${total_rev / 100:,.0f} | Labor ${total_labor / 100:,.0f}"
+            )
             sections.append(f"**Avg labor %: {avg_labor_pct:.1f}%** (benchmark: 25-35%)")
             if days_with_labor < len(pnl):
-                sections.append(f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data")
+                sections.append(
+                    f"* = {len(pnl) - days_with_labor} day(s) missing Deputy labor data"
+                )
 
     # --- Daily Efficiency (latest available day) ---
     if "daily_efficiency" in context:
@@ -1870,7 +2279,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 conf_text = f", conf {round(float(conf) * 100)}%" if conf is not None else ""
                 realized_samples = int(a.get("realized_samples") or 0)
                 gate_status = a.get("proven_gate_status")
-                gate_text = f", gate={gate_status}, samples={realized_samples}" if gate_status else ""
+                gate_text = (
+                    f", gate={gate_status}, samples={realized_samples}" if gate_status else ""
+                )
                 sections.append(
                     f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}{gate_text}"
                 )
@@ -1881,7 +2292,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         for r in context["recent_recommendations"][:8]:
             expected = int(r.get("expected_weekly_profit_uplift_cents") or 0)
             realized = r.get("realized_weekly_delta_cents")
-            realized_text = f", realized {int(realized) / 100:+,.0f}/wk" if realized is not None else ""
+            realized_text = (
+                f", realized {int(realized) / 100:+,.0f}/wk" if realized is not None else ""
+            )
             adopted = "adopted" if r.get("adopted") else "not adopted"
             sections.append(
                 f"- {r.get('title') or r.get('action_type')}: est {expected / 100:+,.0f}/wk{realized_text}, {adopted}"
@@ -1927,16 +2340,26 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         by_dow = corr.get("by_dow", [])
         if by_dow:
             sections.append("\n## Profitability by Day of Week")
-            sections.append("| Day | Revenue | COGS | Labor | Net Profit | Staff | Profit/Staff | Rev/$Labor |")
-            sections.append("|-----|---------|------|-------|------------|-------|--------------|------------|")
+            sections.append(
+                "| Day | Revenue | COGS | Labor | Net Profit | Staff | Profit/Staff | Rev/$Labor |"
+            )
+            sections.append(
+                "|-----|---------|------|-------|------------|-------|--------------|------------|"
+            )
             for d in by_dow:
                 rev = d["avg_revenue_cents"] / 100
                 cogs = d["avg_cogs_cents"] / 100
                 labor = d["avg_labor_cents"] / 100
                 net = d["avg_net_profit_cents"] / 100
                 staff = d["avg_staff_count"]
-                pps = f"${d['profit_per_staff_cents'] / 100:.0f}" if d.get("profit_per_staff_cents") else "N/A"
-                rpld = f"${d['rev_per_labor_dollar']:.2f}" if d.get("rev_per_labor_dollar") else "N/A"
+                pps = (
+                    f"${d['profit_per_staff_cents'] / 100:.0f}"
+                    if d.get("profit_per_staff_cents")
+                    else "N/A"
+                )
+                rpld = (
+                    f"${d['rev_per_labor_dollar']:.2f}" if d.get("rev_per_labor_dollar") else "N/A"
+                )
                 sections.append(
                     f"| {d['day_name']} | ${rev:,.0f} | ${cogs:,.0f} | ${labor:,.0f} | "
                     f"${net:,.0f} | {staff:.1f} | {pps} | {rpld} |"
@@ -1944,7 +2367,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
 
         optimal = corr.get("optimal_staffing", [])
         if optimal:
-            sections.append("\n**Staffing vs Profit (historical best — explore alternatives, not prescriptive):**")
+            sections.append(
+                "\n**Staffing vs Profit (historical best — explore alternatives, not prescriptive):**"
+            )
             for o in optimal:
                 sections.append(
                     f"- {o['day_name']}: best observed with {o['optimal_staff']} staff → "
@@ -1963,9 +2388,7 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             updated = item.get("updated_at", "N/A")
             if updated and len(updated) > 10:
                 updated = updated[:10]
-            sections.append(
-                f"| {item['score_key']} | {cost} | {item['source']} | {updated} |"
-            )
+            sections.append(f"| {item['score_key']} | {cost} | {item['source']} | {updated} |")
 
     # --- Xero Supplier Mappings ---
     if "xero_mappings" in context:
@@ -1994,14 +2417,14 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         confirmed = sum(1 for m in mappings if _confidence_value(m.get("confidence", 0)) >= 0.8)
         unconfirmed = len(mappings) - confirmed
         sections.append(f"\n## Xero Supplier Mappings")
-        sections.append(f"{len(mappings)} items mapped ({confirmed} confirmed, {unconfirmed} unconfirmed)")
+        sections.append(
+            f"{len(mappings)} items mapped ({confirmed} confirmed, {unconfirmed} unconfirmed)"
+        )
         for m in mappings[:15]:
             conf = _confidence_value(m.get("confidence", 0))
             conf_label = "confirmed" if conf >= 0.8 else "unconfirmed"
             units = f", {m['units_per_pack']} units/pack" if m.get("units_per_pack") else ""
-            sections.append(
-                f"- {m['xero_description']} → {m['score_key']} ({conf_label}{units})"
-            )
+            sections.append(f"- {m['xero_description']} → {m['score_key']} ({conf_label}{units})")
 
     # --- Tomorrow's Weather ---
     if "tomorrow_weather" in context:
@@ -2009,7 +2432,7 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append(f"\n## Tomorrow's Weather Forecast")
         sections.append(f"- Temperature: {w.get('temp_c', '?')}°C")
         sections.append(f"- Conditions: {w.get('description', '?')}")
-        rain_pct = round((w.get('rain_probability', 0)) * 100)
+        rain_pct = round((w.get("rain_probability", 0)) * 100)
         sections.append(f"- Rain probability: {rain_pct}%")
         if rain_pct > 50:
             sections.append("- **High rain chance — historically reduces foot traffic**")
@@ -2022,11 +2445,15 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         if growers:
             sections.append("**Growing:**")
             for t in growers[:8]:
-                sections.append(f"- {t['item']}: {t['last_week']} → {t['this_week']} (+{t['change_pct']}%)")
+                sections.append(
+                    f"- {t['item']}: {t['last_week']} → {t['this_week']} (+{t['change_pct']}%)"
+                )
         if decliners:
             sections.append("**Declining:**")
             for t in decliners[:8]:
-                sections.append(f"- {t['item']}: {t['last_week']} → {t['this_week']} ({t['change_pct']}%)")
+                sections.append(
+                    f"- {t['item']}: {t['last_week']} → {t['this_week']} ({t['change_pct']}%)"
+                )
 
     # --- Operational Benchmarks ---
     if "benchmarks" in context:
@@ -2034,7 +2461,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         if bm.get("peak_hours"):
             sections.append("\n## Peak Hours (busiest time slots by day)")
             for ph in bm["peak_hours"][:10]:
-                sections.append(f"- {ph['day']} {ph['hour']}: avg {ph['avg_items']} items, {ph['avg_workload']} WU")
+                sections.append(
+                    f"- {ph['day']} {ph['hour']}: avg {ph['avg_items']} items, {ph['avg_workload']} WU"
+                )
         if bm.get("daily_ranking"):
             sections.append("\n## Daily Volume Ranking")
             for dr in bm["daily_ranking"]:
@@ -2050,7 +2479,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if "top_items" in context:
         sections.append("\n## Top Items (last 14 days)")
         for item in context["top_items"]:
-            sections.append(f"- {item['item']}: {item['count']} sold (avg {item['avg_workload']} WU)")
+            sections.append(
+                f"- {item['item']}: {item['count']} sold (avg {item['avg_workload']} WU)"
+            )
 
     # --- Modifier stats ---
     if "modifier_stats" in context:
@@ -2073,7 +2504,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(f"Total alt/specified milk drinks: {total_milks}")
             for m in ms["milk_breakdown"]:
                 pct_of_milks = round(m["count"] / max(total_milks, 1) * 100, 1)
-                sections.append(f"- **{m['name']}**: {m['count']} ({m['pct']}% of all drinks, {pct_of_milks}% of milk selections)")
+                sections.append(
+                    f"- **{m['name']}**: {m['count']} ({m['pct']}% of all drinks, {pct_of_milks}% of milk selections)"
+                )
 
         if ms.get("syrup_breakdown"):
             sections.append("\n### Syrup Breakdown")
@@ -2095,7 +2528,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if "item_variations" in context:
         items = context["item_variations"][:40]
         total_sold = sum(i["total"] for i in items)
-        sections.append(f"\n## Detailed Item Breakdown (Square POS, recent window — {total_sold} total items)")
+        sections.append(
+            f"\n## Detailed Item Breakdown (Square POS, recent window — {total_sold} total items)"
+        )
         for item in items:
             sections.append(f"\n### {item['item']} — {item['total']} sold")
             if item.get("variations"):
@@ -2110,7 +2545,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             if item.get("daily"):
                 # Show weekly aggregates instead of every day
                 daily = dict(item["daily"])
-                sections.append(f"  Daily range: {item['daily'][0][0]} to {item['daily'][-1][0]} ({len(daily)} days)")
+                sections.append(
+                    f"  Daily range: {item['daily'][0][0]} to {item['daily'][-1][0]} ({len(daily)} days)"
+                )
 
     # --- Item counts by day ---
     if "item_counts_by_day" in context:
@@ -2169,7 +2606,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append(f"\n## Recent Document Uploads")
         for doc in docs:
             summary = doc.get("extraction_summary") or "pending processing"
-            sections.append(f"- {doc['filename']} ({doc.get('document_type', 'unknown')}): {summary}")
+            sections.append(
+                f"- {doc['filename']} ({doc.get('document_type', 'unknown')}): {summary}"
+            )
 
     # --- DOW pattern ---
     if "dow_pattern" in context:
@@ -2184,7 +2623,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if "hourly_averages" in context:
         sections.append(f"\n## Hourly Patterns (average workload by hour)")
         for h in context["hourly_averages"]:
-            sections.append(f"- {h['hour']}: {h['avg_workload']} WU avg, {h['avg_orders']} orders, {h['avg_items']} items")
+            sections.append(
+                f"- {h['hour']}: {h['avg_workload']} WU avg, {h['avg_orders']} orders, {h['avg_items']} items"
+            )
 
     # --- Weekly review ---
     if "weekly_review" in context:
@@ -2201,7 +2642,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append("- Daily:")
             for d in wr["daily_details"]:
                 acc = f"{d['accuracy']}%" if d.get("accuracy") else "no data"
-                sections.append(f"  {d.get('day_name', d['date'])}: {d['predicted_drinks']} predicted, {acc}")
+                sections.append(
+                    f"  {d.get('day_name', d['date'])}: {d['predicted_drinks']} predicted, {acc}"
+                )
         if wr.get("insights"):
             sections.append("- Insights:")
             for insight in wr["insights"]:
@@ -2212,7 +2655,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         wt = context["workload_timeline"]
         sections.append(f"\n## Recent Workload ({len(wt)} intervals)")
         for entry in wt[:16]:
-            sections.append(f"- {entry['time']}: {entry['workload_units']:.1f} WU, {entry['orders']} orders, {entry['items']} items")
+            sections.append(
+                f"- {entry['time']}: {entry['workload_units']:.1f} WU, {entry['orders']} orders, {entry['items']} items"
+            )
 
     return "\n".join(sections)
 
@@ -2290,8 +2735,10 @@ async def stream_chat_response(
         if api_messages and api_messages[-1].get("role") == "user":
             api_messages[-1] = {
                 "role": "user",
-                "content": api_messages[-1]["content"] + "\n\n[Document extraction results: "
-                + " | ".join(extraction_text_parts) + "]",
+                "content": api_messages[-1]["content"]
+                + "\n\n[Document extraction results: "
+                + " | ".join(extraction_text_parts)
+                + "]",
             }
 
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)

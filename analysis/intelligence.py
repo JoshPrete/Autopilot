@@ -26,9 +26,7 @@ logger = logging.getLogger("autopilot.intelligence")
 # ============================================================
 
 
-def run_intelligence_cycle(
-    site_id: str, site_name: str, cycle_date: date
-) -> dict:
+def run_intelligence_cycle(site_id: str, site_name: str, cycle_date: date) -> dict:
     """
     Full intelligence cycle. Called daily after step_predict.
 
@@ -59,6 +57,7 @@ def run_intelligence_cycle(
     # Dispatch SMS digest if high-severity insights exist
     try:
         from delivery.sender import dispatch_intelligence_digest
+
         dispatch_intelligence_digest(site_id, insights)
     except Exception:
         logger.warning("Intelligence SMS digest failed (non-fatal)")
@@ -119,9 +118,10 @@ def update_patterns_from_outcomes(site_id: str, outcomes: dict) -> dict:
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
+        rows = (
+            conn.execute(
+                text(
+                    """
                 SELECT
                     i.insight_type,
                     i.data->>'pattern_key' AS pattern_key,
@@ -133,9 +133,12 @@ def update_patterns_from_outcomes(site_id: str, outcomes: dict) -> dict:
                   AND r.outcome_data->'realized' IS NOT NULL
                   AND r.outcome_data->'realized'->>'weekly_net_profit_delta_cents' IS NOT NULL
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().all()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .all()
+        )
 
     strengthened = 0
     weakened = 0
@@ -143,9 +146,7 @@ def update_patterns_from_outcomes(site_id: str, outcomes: dict) -> dict:
 
     # Build lookup of current patterns
     all_patterns = get_learned_patterns(site_id, min_confidence=-1)
-    pattern_lookup = {
-        (p["pattern_type"], p["pattern_key"]): p for p in all_patterns
-    }
+    pattern_lookup = {(p["pattern_type"], p["pattern_key"]): p for p in all_patterns}
 
     for row in rows:
         pattern_key = row.get("pattern_key")
@@ -229,18 +230,14 @@ def gather_signals(site_id: str, cycle_date: date) -> list[dict]:
             before = len(signals)
             signals = [s for s in signals if s.get("key") not in suppressed_keys]
             if before != len(signals):
-                logger.info(
-                    "Filtered %d suppressed signals", before - len(signals)
-                )
+                logger.info("Filtered %d suppressed signals", before - len(signals))
     except Exception:
         pass
 
     return signals
 
 
-def detect_staffing_signals(
-    site_id: str, cycle_date: date, lookback_days: int = 28
-) -> list[dict]:
+def detect_staffing_signals(site_id: str, cycle_date: date, lookback_days: int = 28) -> list[dict]:
     """
     Detect recurring staffing mismatches by (day_of_week, hour).
 
@@ -274,12 +271,14 @@ def detect_staffing_signals(
 
             if slot not in slot_tracker:
                 slot_tracker[slot] = []
-            slot_tracker[slot].append({
-                "status": status,
-                "staff_on": interval.get("staff_on", 0),
-                "workload_per_staff": interval.get("workload_per_staff"),
-                "date": check_date.isoformat(),
-            })
+            slot_tracker[slot].append(
+                {
+                    "status": status,
+                    "staff_on": interval.get("staff_on", 0),
+                    "workload_per_staff": interval.get("workload_per_staff"),
+                    "date": check_date.isoformat(),
+                }
+            )
 
     day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -294,37 +293,43 @@ def detect_staffing_signals(
 
         if overstaffed_count >= 3:
             avg_staff = sum(e["staff_on"] for e in recent) / len(recent)
-            signals.append({
-                "signal_type": "staffing",
-                "key": f"overstaffed_{day_names[dow].lower()}_{hour}",
-                "title": f"{day_names[dow]} {hour}:00 consistently overstaffed",
-                "evidence": {
-                    "day": day_names[dow],
-                    "hour": hour,
-                    "occurrences": overstaffed_count,
-                    "out_of": len(recent),
-                    "avg_staff_on": round(avg_staff, 1),
-                },
-                "severity": "opportunity",
-                "suggested_action": "STAFFING_ADJUST",
-            })
+            signals.append(
+                {
+                    "signal_type": "staffing",
+                    "key": f"overstaffed_{day_names[dow].lower()}_{hour}",
+                    "title": f"{day_names[dow]} {hour}:00 consistently overstaffed",
+                    "evidence": {
+                        "day": day_names[dow],
+                        "hour": hour,
+                        "occurrences": overstaffed_count,
+                        "out_of": len(recent),
+                        "avg_staff_on": round(avg_staff, 1),
+                    },
+                    "severity": "opportunity",
+                    "suggested_action": "STAFFING_ADJUST",
+                }
+            )
 
         if understaffed_count >= 3:
             avg_wps = [e["workload_per_staff"] for e in recent if e.get("workload_per_staff")]
-            signals.append({
-                "signal_type": "staffing",
-                "key": f"understaffed_{day_names[dow].lower()}_{hour}",
-                "title": f"{day_names[dow]} {hour}:00 consistently understaffed",
-                "evidence": {
-                    "day": day_names[dow],
-                    "hour": hour,
-                    "occurrences": understaffed_count,
-                    "out_of": len(recent),
-                    "avg_workload_per_staff": round(sum(avg_wps) / len(avg_wps), 2) if avg_wps else None,
-                },
-                "severity": "warning",
-                "suggested_action": "STAFFING_ADJUST",
-            })
+            signals.append(
+                {
+                    "signal_type": "staffing",
+                    "key": f"understaffed_{day_names[dow].lower()}_{hour}",
+                    "title": f"{day_names[dow]} {hour}:00 consistently understaffed",
+                    "evidence": {
+                        "day": day_names[dow],
+                        "hour": hour,
+                        "occurrences": understaffed_count,
+                        "out_of": len(recent),
+                        "avg_workload_per_staff": (
+                            round(sum(avg_wps) / len(avg_wps), 2) if avg_wps else None
+                        ),
+                    },
+                    "severity": "warning",
+                    "suggested_action": "STAFFING_ADJUST",
+                }
+            )
 
     return signals
 
@@ -363,23 +368,25 @@ def detect_efficiency_gap_signals(
 
     if eff_score < 0.80 and days_analyzed >= 7:
         weekly_excess = round(excess / max(days_analyzed, 1) * 7)
-        signals.append({
-            "signal_type": "efficiency",
-            "key": "overall_low_efficiency",
-            "title": (
-                f"Staffing efficiency at {round(eff_score * 100)}% "
-                f"— ${weekly_excess / 100:,.0f}/week excess labor"
-            ),
-            "evidence": {
-                "efficiency_score": round(eff_score, 4),
-                "excess_labor_cents": excess,
-                "weekly_excess_cents": weekly_excess,
-                "days_analyzed": days_analyzed,
-                "target": EFFICIENCY_SCORE_TARGET,
-            },
-            "severity": "warning",
-            "suggested_action": "STAFFING_ADJUST",
-        })
+        signals.append(
+            {
+                "signal_type": "efficiency",
+                "key": "overall_low_efficiency",
+                "title": (
+                    f"Staffing efficiency at {round(eff_score * 100)}% "
+                    f"— ${weekly_excess / 100:,.0f}/week excess labor"
+                ),
+                "evidence": {
+                    "efficiency_score": round(eff_score, 4),
+                    "excess_labor_cents": excess,
+                    "weekly_excess_cents": weekly_excess,
+                    "days_analyzed": days_analyzed,
+                    "target": EFFICIENCY_SCORE_TARGET,
+                },
+                "severity": "warning",
+                "suggested_action": "STAFFING_ADJUST",
+            }
+        )
 
     # Signal 2: Per-DOW recurring excess (> $13/day = 1300 cents)
     for dow_entry in by_dow:
@@ -387,23 +394,25 @@ def detect_efficiency_gap_signals(
         avg_eff = dow_entry.get("avg_efficiency_score", 1.0)
         samples = dow_entry.get("sample_days", 0)
         if avg_excess > 1300 and samples >= 2:
-            signals.append({
-                "signal_type": "efficiency",
-                "key": f"dow_excess_{dow_entry['day_name'].lower()}",
-                "title": (
-                    f"{dow_entry['day_name']}: avg ${avg_excess / 100:,.0f}/day excess labor "
-                    f"(efficiency: {round(avg_eff * 100)}%)"
-                ),
-                "evidence": {
-                    "dow": dow_entry["dow"],
-                    "day_name": dow_entry["day_name"],
-                    "avg_excess_labor_cents": avg_excess,
-                    "avg_efficiency_score": round(avg_eff, 4),
-                    "sample_days": samples,
-                },
-                "severity": "opportunity",
-                "suggested_action": "STAFFING_ADJUST",
-            })
+            signals.append(
+                {
+                    "signal_type": "efficiency",
+                    "key": f"dow_excess_{dow_entry['day_name'].lower()}",
+                    "title": (
+                        f"{dow_entry['day_name']}: avg ${avg_excess / 100:,.0f}/day excess labor "
+                        f"(efficiency: {round(avg_eff * 100)}%)"
+                    ),
+                    "evidence": {
+                        "dow": dow_entry["dow"],
+                        "day_name": dow_entry["day_name"],
+                        "avg_excess_labor_cents": avg_excess,
+                        "avg_efficiency_score": round(avg_eff, 4),
+                        "sample_days": samples,
+                    },
+                    "severity": "opportunity",
+                    "suggested_action": "STAFFING_ADJUST",
+                }
+            )
 
     # Signal 3: Efficiency trend (split window into halves)
     if len(by_day) >= 14:
@@ -415,29 +424,29 @@ def detect_efficiency_gap_signals(
         delta_pp = round((second_avg - first_avg) * 100, 1)
 
         if delta_pp < -5:
-            signals.append({
-                "signal_type": "efficiency",
-                "key": "efficiency_trend_declining",
-                "title": (
-                    f"Staffing efficiency declined {abs(delta_pp):.0f}pp: "
-                    f"{round(first_avg * 100)}% → {round(second_avg * 100)}%"
-                ),
-                "evidence": {
-                    "first_half_avg": round(first_avg, 4),
-                    "second_half_avg": round(second_avg, 4),
-                    "delta_pp": delta_pp,
-                    "window_days": len(by_day),
-                },
-                "severity": "warning",
-                "suggested_action": "STAFFING_ADJUST",
-            })
+            signals.append(
+                {
+                    "signal_type": "efficiency",
+                    "key": "efficiency_trend_declining",
+                    "title": (
+                        f"Staffing efficiency declined {abs(delta_pp):.0f}pp: "
+                        f"{round(first_avg * 100)}% → {round(second_avg * 100)}%"
+                    ),
+                    "evidence": {
+                        "first_half_avg": round(first_avg, 4),
+                        "second_half_avg": round(second_avg, 4),
+                        "delta_pp": delta_pp,
+                        "window_days": len(by_day),
+                    },
+                    "severity": "warning",
+                    "suggested_action": "STAFFING_ADJUST",
+                }
+            )
 
     return signals
 
 
-def detect_margin_signals(
-    site_id: str, cycle_date: date, lookback_days: int = 28
-) -> list[dict]:
+def detect_margin_signals(site_id: str, cycle_date: date, lookback_days: int = 28) -> list[dict]:
     """
     Detect margin concerns from item costs and profitability.
 
@@ -463,20 +472,22 @@ def detect_margin_signals(
         for m in margins:
             margin_pct = m.get("margin_pct", 100)
             if margin_pct < 30 and m.get("qty", 0) >= 10:
-                signals.append({
-                    "signal_type": "margin",
-                    "key": f"low_margin_{m['item'].lower().replace(' ', '_')}",
-                    "title": f"Low margin on {m['item']} ({margin_pct}%)",
-                    "evidence": {
-                        "item": m["item"],
-                        "margin_pct": margin_pct,
-                        "avg_price_cents": m.get("avg_price_cents"),
-                        "cogs_cents": m.get("cogs_cents"),
-                        "qty_sold": m.get("qty"),
-                    },
-                    "severity": "warning",
-                    "suggested_action": "MARGIN_ALERT",
-                })
+                signals.append(
+                    {
+                        "signal_type": "margin",
+                        "key": f"low_margin_{m['item'].lower().replace(' ', '_')}",
+                        "title": f"Low margin on {m['item']} ({margin_pct}%)",
+                        "evidence": {
+                            "item": m["item"],
+                            "margin_pct": margin_pct,
+                            "avg_price_cents": m.get("avg_price_cents"),
+                            "cogs_cents": m.get("cogs_cents"),
+                            "qty_sold": m.get("qty"),
+                        },
+                        "severity": "warning",
+                        "suggested_action": "MARGIN_ALERT",
+                    }
+                )
     except Exception:
         pass
 
@@ -499,27 +510,27 @@ def detect_margin_signals(
                 delta_pp = second_avg - first_avg
 
                 if delta_pp > 3.0:
-                    signals.append({
-                        "signal_type": "margin",
-                        "key": "labor_pct_trending_up",
-                        "title": f"Labor % trending up (+{delta_pp:.1f}pp over {lookback_days} days)",
-                        "evidence": {
-                            "first_half_avg": round(first_avg, 1),
-                            "second_half_avg": round(second_avg, 1),
-                            "delta_pp": round(delta_pp, 1),
-                        },
-                        "severity": "warning",
-                        "suggested_action": "REVENUE_INSIGHT",
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "margin",
+                            "key": "labor_pct_trending_up",
+                            "title": f"Labor % trending up (+{delta_pp:.1f}pp over {lookback_days} days)",
+                            "evidence": {
+                                "first_half_avg": round(first_avg, 1),
+                                "second_half_avg": round(second_avg, 1),
+                                "delta_pp": round(delta_pp, 1),
+                            },
+                            "severity": "warning",
+                            "suggested_action": "REVENUE_INSIGHT",
+                        }
+                    )
     except Exception:
         pass
 
     return signals
 
 
-def detect_demand_signals(
-    site_id: str, cycle_date: date, lookback_days: int = 28
-) -> list[dict]:
+def detect_demand_signals(site_id: str, cycle_date: date, lookback_days: int = 28) -> list[dict]:
     """
     Detect demand shifts: items with > 20% volume change sustained 2+ weeks.
     """
@@ -535,25 +546,33 @@ def detect_demand_signals(
 
     try:
         with engine.connect() as conn:
-            recent_items = conn.execute(
-                text(
-                    "SELECT item_name, COUNT(*) AS cnt "
-                    "FROM order_items "
-                    "WHERE site_id = :sid AND created_at >= :s AND created_at < :e "
-                    "GROUP BY item_name"
-                ),
-                {"sid": site_id, "s": recent_start, "e": recent_end},
-            ).mappings().all()
+            recent_items = (
+                conn.execute(
+                    text(
+                        "SELECT item_name, COUNT(*) AS cnt "
+                        "FROM order_items "
+                        "WHERE site_id = :sid AND created_at >= :s AND created_at < :e "
+                        "GROUP BY item_name"
+                    ),
+                    {"sid": site_id, "s": recent_start, "e": recent_end},
+                )
+                .mappings()
+                .all()
+            )
 
-            prev_items = conn.execute(
-                text(
-                    "SELECT item_name, COUNT(*) AS cnt "
-                    "FROM order_items "
-                    "WHERE site_id = :sid AND created_at >= :s AND created_at < :e "
-                    "GROUP BY item_name"
-                ),
-                {"sid": site_id, "s": prev_start, "e": prev_end},
-            ).mappings().all()
+            prev_items = (
+                conn.execute(
+                    text(
+                        "SELECT item_name, COUNT(*) AS cnt "
+                        "FROM order_items "
+                        "WHERE site_id = :sid AND created_at >= :s AND created_at < :e "
+                        "GROUP BY item_name"
+                    ),
+                    {"sid": site_id, "s": prev_start, "e": prev_end},
+                )
+                .mappings()
+                .all()
+            )
 
         recent_map = {r["item_name"]: int(r["cnt"]) for r in recent_items}
         prev_map = {r["item_name"]: int(r["cnt"]) for r in prev_items}
@@ -569,20 +588,22 @@ def detect_demand_signals(
 
             if abs(change_pct) >= 20:
                 direction = "up" if change_pct > 0 else "down"
-                signals.append({
-                    "signal_type": "demand",
-                    "key": f"demand_shift_{item.lower().replace(' ', '_')}_{direction}",
-                    "title": f"{item} volume {direction} {abs(change_pct):.0f}% over 4 weeks",
-                    "evidence": {
-                        "item": item,
-                        "recent_count": recent_cnt,
-                        "prev_count": prev_cnt,
-                        "change_pct": round(change_pct, 1),
-                        "direction": direction,
-                    },
-                    "severity": "opportunity" if direction == "up" else "warning",
-                    "suggested_action": "DEMAND_SHIFT",
-                })
+                signals.append(
+                    {
+                        "signal_type": "demand",
+                        "key": f"demand_shift_{item.lower().replace(' ', '_')}_{direction}",
+                        "title": f"{item} volume {direction} {abs(change_pct):.0f}% over 4 weeks",
+                        "evidence": {
+                            "item": item,
+                            "recent_count": recent_cnt,
+                            "prev_count": prev_cnt,
+                            "change_pct": round(change_pct, 1),
+                            "direction": direction,
+                        },
+                        "severity": "opportunity" if direction == "up" else "warning",
+                        "suggested_action": "DEMAND_SHIFT",
+                    }
+                )
 
     except Exception:
         logger.exception("detect_demand_signals failed")
@@ -605,18 +626,20 @@ def detect_prediction_signals(
 
         # Check for alert from accuracy module
         if acc.get("alert"):
-            signals.append({
-                "signal_type": "prediction",
-                "key": "prediction_accuracy_alert",
-                "title": f"Prediction accuracy alert: {acc.get('alert_reason', 'low accuracy')}",
-                "evidence": {
-                    "avg_accuracy": acc.get("avg_accuracy"),
-                    "days_measured": acc.get("days_measured"),
-                    "trend": acc.get("trend"),
-                },
-                "severity": "warning",
-                "suggested_action": "PREDICTION_DRIFT",
-            })
+            signals.append(
+                {
+                    "signal_type": "prediction",
+                    "key": "prediction_accuracy_alert",
+                    "title": f"Prediction accuracy alert: {acc.get('alert_reason', 'low accuracy')}",
+                    "evidence": {
+                        "avg_accuracy": acc.get("avg_accuracy"),
+                        "days_measured": acc.get("days_measured"),
+                        "trend": acc.get("trend"),
+                    },
+                    "severity": "warning",
+                    "suggested_action": "PREDICTION_DRIFT",
+                }
+            )
 
         # Check for systematic bias by day-of-week
         daily = acc.get("daily_accuracies", [])
@@ -638,18 +661,20 @@ def detect_prediction_signals(
                     mean_error = sum(errors) / len(errors)
                     if abs(mean_error) > 10:
                         direction = "over-predicting" if mean_error > 0 else "under-predicting"
-                        signals.append({
-                            "signal_type": "prediction",
-                            "key": f"prediction_bias_{dow.lower()}",
-                            "title": f"Systematic {direction} on {dow}s ({mean_error:+.1f}%)",
-                            "evidence": {
-                                "day": dow,
-                                "mean_error_pct": round(mean_error, 1),
-                                "sample_size": len(errors),
-                            },
-                            "severity": "info",
-                            "suggested_action": "PREDICTION_DRIFT",
-                        })
+                        signals.append(
+                            {
+                                "signal_type": "prediction",
+                                "key": f"prediction_bias_{dow.lower()}",
+                                "title": f"Systematic {direction} on {dow}s ({mean_error:+.1f}%)",
+                                "evidence": {
+                                    "day": dow,
+                                    "mean_error_pct": round(mean_error, 1),
+                                    "sample_size": len(errors),
+                                },
+                                "severity": "info",
+                                "suggested_action": "PREDICTION_DRIFT",
+                            }
+                        )
 
     except Exception:
         logger.exception("detect_prediction_signals failed")
@@ -657,9 +682,7 @@ def detect_prediction_signals(
     return signals
 
 
-def detect_revenue_signals(
-    site_id: str, cycle_date: date, lookback_days: int = 28
-) -> list[dict]:
+def detect_revenue_signals(site_id: str, cycle_date: date, lookback_days: int = 28) -> list[dict]:
     """
     Detect revenue and labor efficiency trends from daily_profitability.
     """
@@ -675,27 +698,33 @@ def detect_revenue_signals(
             return signals
 
         # Revenue per labor hour declining > 10%
-        valid_rplh = [d for d in pnl if d.get("revenue_per_labor_hour") and d["revenue_per_labor_hour"] > 0]
+        valid_rplh = [
+            d for d in pnl if d.get("revenue_per_labor_hour") and d["revenue_per_labor_hour"] > 0
+        ]
         if len(valid_rplh) >= 14:
             mid = len(valid_rplh) // 2
             first_avg = sum(d["revenue_per_labor_hour"] for d in valid_rplh[:mid]) / mid
-            second_avg = sum(d["revenue_per_labor_hour"] for d in valid_rplh[mid:]) / (len(valid_rplh) - mid)
+            second_avg = sum(d["revenue_per_labor_hour"] for d in valid_rplh[mid:]) / (
+                len(valid_rplh) - mid
+            )
 
             if first_avg > 0:
                 change_pct = ((second_avg - first_avg) / first_avg) * 100
                 if change_pct < -10:
-                    signals.append({
-                        "signal_type": "revenue",
-                        "key": "rev_per_labor_hour_declining",
-                        "title": f"Revenue per labor hour declining ({change_pct:.1f}%)",
-                        "evidence": {
-                            "first_half_avg_cents": round(first_avg),
-                            "second_half_avg_cents": round(second_avg),
-                            "change_pct": round(change_pct, 1),
-                        },
-                        "severity": "warning",
-                        "suggested_action": "REVENUE_INSIGHT",
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "revenue",
+                            "key": "rev_per_labor_hour_declining",
+                            "title": f"Revenue per labor hour declining ({change_pct:.1f}%)",
+                            "evidence": {
+                                "first_half_avg_cents": round(first_avg),
+                                "second_half_avg_cents": round(second_avg),
+                                "change_pct": round(change_pct, 1),
+                            },
+                            "severity": "warning",
+                            "suggested_action": "REVENUE_INSIGHT",
+                        }
+                    )
 
         # Most/least profitable day of week
         dow_profit: dict[str, list] = {}
@@ -710,41 +739,43 @@ def detect_revenue_signals(
 
         if len(dow_profit) >= 5:
             dow_avgs = {
-                dow: sum(vals) / len(vals)
-                for dow, vals in dow_profit.items()
-                if len(vals) >= 2
+                dow: sum(vals) / len(vals) for dow, vals in dow_profit.items() if len(vals) >= 2
             }
             if dow_avgs:
                 best_dow = max(dow_avgs, key=dow_avgs.get)
                 worst_dow = min(dow_avgs, key=dow_avgs.get)
 
                 if dow_avgs[best_dow] > 0:
-                    signals.append({
-                        "signal_type": "revenue",
-                        "key": f"best_day_{best_dow.lower()}",
-                        "title": f"{best_dow} is consistently the most profitable day",
-                        "evidence": {
-                            "day": best_dow,
-                            "avg_net_profit_cents": round(dow_avgs[best_dow]),
-                            "sample_size": len(dow_profit[best_dow]),
-                        },
-                        "severity": "info",
-                        "suggested_action": None,
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "revenue",
+                            "key": f"best_day_{best_dow.lower()}",
+                            "title": f"{best_dow} is consistently the most profitable day",
+                            "evidence": {
+                                "day": best_dow,
+                                "avg_net_profit_cents": round(dow_avgs[best_dow]),
+                                "sample_size": len(dow_profit[best_dow]),
+                            },
+                            "severity": "info",
+                            "suggested_action": None,
+                        }
+                    )
 
                 if dow_avgs[worst_dow] < dow_avgs[best_dow] * 0.5:
-                    signals.append({
-                        "signal_type": "revenue",
-                        "key": f"worst_day_{worst_dow.lower()}",
-                        "title": f"{worst_dow} is consistently the least profitable day",
-                        "evidence": {
-                            "day": worst_dow,
-                            "avg_net_profit_cents": round(dow_avgs[worst_dow]),
-                            "vs_best": round(dow_avgs[best_dow]),
-                        },
-                        "severity": "opportunity",
-                        "suggested_action": "REVENUE_INSIGHT",
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "revenue",
+                            "key": f"worst_day_{worst_dow.lower()}",
+                            "title": f"{worst_dow} is consistently the least profitable day",
+                            "evidence": {
+                                "day": worst_dow,
+                                "avg_net_profit_cents": round(dow_avgs[worst_dow]),
+                                "vs_best": round(dow_avgs[best_dow]),
+                            },
+                            "severity": "opportunity",
+                            "suggested_action": "REVENUE_INSIGHT",
+                        }
+                    )
 
     except Exception:
         logger.exception("detect_revenue_signals failed")
@@ -805,28 +836,30 @@ def detect_profitability_signals(
                 # Approximate labor cost per item
                 item_labor = round(labor_per_item)
                 labor_adjusted_profit = avg_price - cogs - item_labor
-                labor_adjusted_margin = round(
-                    (labor_adjusted_profit / avg_price) * 100, 1
-                ) if avg_price > 0 else 0
+                labor_adjusted_margin = (
+                    round((labor_adjusted_profit / avg_price) * 100, 1) if avg_price > 0 else 0
+                )
 
                 if labor_adjusted_margin < 15 and gross_margin_pct >= 25:
                     item_key = m["item"].lower().replace(" ", "_")
-                    signals.append({
-                        "signal_type": "profitability",
-                        "key": f"low_profit_after_labor_{item_key}",
-                        "title": f"{m['item']} has {gross_margin_pct}% gross margin but only {labor_adjusted_margin}% after labor",
-                        "evidence": {
-                            "item": m["item"],
-                            "qty": m["qty"],
-                            "avg_price_cents": avg_price,
-                            "cogs_cents": cogs,
-                            "labor_per_item_cents": item_labor,
-                            "gross_margin_pct": gross_margin_pct,
-                            "labor_adjusted_margin_pct": labor_adjusted_margin,
-                        },
-                        "severity": "warning",
-                        "suggested_action": "MARGIN_ALERT",
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "profitability",
+                            "key": f"low_profit_after_labor_{item_key}",
+                            "title": f"{m['item']} has {gross_margin_pct}% gross margin but only {labor_adjusted_margin}% after labor",
+                            "evidence": {
+                                "item": m["item"],
+                                "qty": m["qty"],
+                                "avg_price_cents": avg_price,
+                                "cogs_cents": cogs,
+                                "labor_per_item_cents": item_labor,
+                                "gross_margin_pct": gross_margin_pct,
+                                "labor_adjusted_margin_pct": labor_adjusted_margin,
+                            },
+                            "severity": "warning",
+                            "suggested_action": "MARGIN_ALERT",
+                        }
+                    )
     except Exception:
         logger.exception("Profitability signal A (unit economics) failed")
 
@@ -845,33 +878,43 @@ def detect_profitability_signals(
             current_staff = dow_data.get("avg_staff_count", 0)
             optimal_staff = opt["optimal_staff"]
             if current_staff > 0 and abs(current_staff - optimal_staff) >= 1:
-                current_pps = round(dow_data["avg_net_profit_cents"] / current_staff) if current_staff > 0 else 0
+                current_pps = (
+                    round(dow_data["avg_net_profit_cents"] / current_staff)
+                    if current_staff > 0
+                    else 0
+                )
                 optimal_pps = opt["profit_per_staff"]
                 day_name = day_names[opt["dow"]] if opt["dow"] < 7 else opt.get("day_name", "?")
                 direction = "fewer" if optimal_staff < current_staff else "more"
-                signals.append({
-                    "signal_type": "profitability",
-                    "key": f"optimal_staff_{day_name.lower()}",
-                    "title": f"{day_name}: historically {optimal_staff} staff yielded ${optimal_pps / 100:.0f}/staff. Currently avg {current_staff:.0f} → ${current_pps / 100:.0f}/staff. Worth trying {direction}?",
-                    "evidence": {
-                        "dow": opt["dow"],
-                        "day": day_name,
-                        "best_observed_staff": optimal_staff,
-                        "current_avg_staff": round(current_staff, 1),
-                        "profit_per_staff_at_best": optimal_pps,
-                        "profit_per_staff_current": current_pps,
-                        "note": "Historical correlation, not causal — experiment recommended",
-                    },
-                    "severity": "opportunity",
-                    "suggested_action": "STAFFING_ADJUST",
-                })
+                signals.append(
+                    {
+                        "signal_type": "profitability",
+                        "key": f"optimal_staff_{day_name.lower()}",
+                        "title": f"{day_name}: historically {optimal_staff} staff yielded ${optimal_pps / 100:.0f}/staff. Currently avg {current_staff:.0f} → ${current_pps / 100:.0f}/staff. Worth trying {direction}?",
+                        "evidence": {
+                            "dow": opt["dow"],
+                            "day": day_name,
+                            "best_observed_staff": optimal_staff,
+                            "current_avg_staff": round(current_staff, 1),
+                            "profit_per_staff_at_best": optimal_pps,
+                            "profit_per_staff_current": current_pps,
+                            "note": "Historical correlation, not causal — experiment recommended",
+                        },
+                        "severity": "opportunity",
+                        "suggested_action": "STAFFING_ADJUST",
+                    }
+                )
     except Exception:
         logger.exception("Profitability signal B (optimal staffing) failed")
 
     # --- C. Revenue per Labor Dollar Trends ---
     try:
         pnl = get_daily_profitability(site_id, start, cycle_date)
-        valid = [d for d in pnl if d.get("revenue_cents") and d.get("labor_cost_cents") and d["labor_cost_cents"] > 0]
+        valid = [
+            d
+            for d in pnl
+            if d.get("revenue_cents") and d.get("labor_cost_cents") and d["labor_cost_cents"] > 0
+        ]
 
         if len(valid) >= 14:
             mid = len(valid) // 2
@@ -884,18 +927,20 @@ def detect_profitability_signals(
             if first_avg > 0:
                 change_pct = ((second_avg - first_avg) / first_avg) * 100
                 if change_pct < -10:
-                    signals.append({
-                        "signal_type": "profitability",
-                        "key": "rev_per_labor_dollar_declining",
-                        "title": f"Revenue per labor dollar declining ({change_pct:.1f}% over {lookback_days} days)",
-                        "evidence": {
-                            "first_half_avg": round(first_avg, 2),
-                            "second_half_avg": round(second_avg, 2),
-                            "change_pct": round(change_pct, 1),
-                        },
-                        "severity": "warning",
-                        "suggested_action": "REVENUE_INSIGHT",
-                    })
+                    signals.append(
+                        {
+                            "signal_type": "profitability",
+                            "key": "rev_per_labor_dollar_declining",
+                            "title": f"Revenue per labor dollar declining ({change_pct:.1f}% over {lookback_days} days)",
+                            "evidence": {
+                                "first_half_avg": round(first_avg, 2),
+                                "second_half_avg": round(second_avg, 2),
+                                "change_pct": round(change_pct, 1),
+                            },
+                            "severity": "warning",
+                            "suggested_action": "REVENUE_INSIGHT",
+                        }
+                    )
 
             # Check specific DOW underperformers
             dow_ratios: dict[str, list] = {}
@@ -909,31 +954,39 @@ def detect_profitability_signals(
                     continue
 
             if dow_ratios:
-                overall_avg = sum(sum(v) for v in dow_ratios.values()) / sum(len(v) for v in dow_ratios.values())
+                overall_avg = sum(sum(v) for v in dow_ratios.values()) / sum(
+                    len(v) for v in dow_ratios.values()
+                )
                 for dow, ratios in dow_ratios.items():
                     if len(ratios) >= 2:
                         dow_avg = sum(ratios) / len(ratios)
                         if dow_avg < overall_avg * 0.75:
-                            signals.append({
-                                "signal_type": "profitability",
-                                "key": f"low_labor_roi_{dow.lower()}",
-                                "title": f"{dow} has low revenue per labor dollar (${dow_avg:.2f} vs ${overall_avg:.2f} avg)",
-                                "evidence": {
-                                    "day": dow,
-                                    "dow_avg_ratio": round(dow_avg, 2),
-                                    "overall_avg_ratio": round(overall_avg, 2),
-                                    "sample_size": len(ratios),
-                                },
-                                "severity": "opportunity",
-                                "suggested_action": "REVENUE_INSIGHT",
-                            })
+                            signals.append(
+                                {
+                                    "signal_type": "profitability",
+                                    "key": f"low_labor_roi_{dow.lower()}",
+                                    "title": f"{dow} has low revenue per labor dollar (${dow_avg:.2f} vs ${overall_avg:.2f} avg)",
+                                    "evidence": {
+                                        "day": dow,
+                                        "dow_avg_ratio": round(dow_avg, 2),
+                                        "overall_avg_ratio": round(overall_avg, 2),
+                                        "sample_size": len(ratios),
+                                    },
+                                    "severity": "opportunity",
+                                    "suggested_action": "REVENUE_INSIGHT",
+                                }
+                            )
     except Exception:
         logger.exception("Profitability signal C (rev/labor dollar) failed")
 
     # --- D. COGS-to-Revenue Ratio Trends ---
     try:
         pnl = get_daily_profitability(site_id, start, cycle_date)
-        valid = [d for d in pnl if d.get("cogs_cents") and d.get("revenue_cents") and d["revenue_cents"] > 0]
+        valid = [
+            d
+            for d in pnl
+            if d.get("cogs_cents") and d.get("revenue_cents") and d["revenue_cents"] > 0
+        ]
 
         if len(valid) >= 14:
             mid = len(valid) // 2
@@ -950,19 +1003,21 @@ def detect_profitability_signals(
             rev_change_pct = ((second_rev - first_rev) / first_rev) * 100 if first_rev > 0 else 0
 
             if delta_pp > 2.0 and abs(rev_change_pct) < 10:
-                signals.append({
-                    "signal_type": "profitability",
-                    "key": "cogs_ratio_rising",
-                    "title": f"COGS ratio rising +{delta_pp:.1f}pp while revenue flat — margin compression",
-                    "evidence": {
-                        "first_half_cogs_pct": round(first_avg, 1),
-                        "second_half_cogs_pct": round(second_avg, 1),
-                        "delta_pp": round(delta_pp, 1),
-                        "revenue_change_pct": round(rev_change_pct, 1),
-                    },
-                    "severity": "warning",
-                    "suggested_action": "MARGIN_ALERT",
-                })
+                signals.append(
+                    {
+                        "signal_type": "profitability",
+                        "key": "cogs_ratio_rising",
+                        "title": f"COGS ratio rising +{delta_pp:.1f}pp while revenue flat — margin compression",
+                        "evidence": {
+                            "first_half_cogs_pct": round(first_avg, 1),
+                            "second_half_cogs_pct": round(second_avg, 1),
+                            "delta_pp": round(delta_pp, 1),
+                            "revenue_change_pct": round(rev_change_pct, 1),
+                        },
+                        "severity": "warning",
+                        "suggested_action": "MARGIN_ALERT",
+                    }
+                )
     except Exception:
         logger.exception("Profitability signal D (COGS ratio) failed")
 
@@ -998,19 +1053,21 @@ def detect_profitability_signals(
                 continue
             avg_rev = sum(revenues) / len(revenues)
             if avg_rev > 5000:  # > $50 per 15-min interval while understaffed
-                signals.append({
-                    "signal_type": "profitability",
-                    "key": f"high_revenue_understaffed_{day_names[dow].lower()}_{hour}",
-                    "title": f"{day_names[dow]} {hour}:00 consistently understaffed with ${avg_rev / 100:.0f} avg revenue",
-                    "evidence": {
-                        "day": day_names[dow],
-                        "hour": hour,
-                        "occurrences": len(revenues),
-                        "avg_revenue_cents": round(avg_rev),
-                    },
-                    "severity": "opportunity",
-                    "suggested_action": "STAFFING_ADJUST",
-                })
+                signals.append(
+                    {
+                        "signal_type": "profitability",
+                        "key": f"high_revenue_understaffed_{day_names[dow].lower()}_{hour}",
+                        "title": f"{day_names[dow]} {hour}:00 consistently understaffed with ${avg_rev / 100:.0f} avg revenue",
+                        "evidence": {
+                            "day": day_names[dow],
+                            "hour": hour,
+                            "occurrences": len(revenues),
+                            "avg_revenue_cents": round(avg_rev),
+                        },
+                        "severity": "opportunity",
+                        "suggested_action": "STAFFING_ADJUST",
+                    }
+                )
     except Exception:
         logger.exception("Profitability signal E (understaffed windows) failed")
 
@@ -1028,7 +1085,9 @@ def detect_profitability_signals(
                     m["total_profit_cents"] = m.get("total_profit_cents", 0)
 
                 by_volume = sorted(margins, key=lambda x: x.get("qty", 0), reverse=True)[:10]
-                by_profit = sorted(margins, key=lambda x: x.get("total_profit_cents", 0), reverse=True)[:10]
+                by_profit = sorted(
+                    margins, key=lambda x: x.get("total_profit_cents", 0), reverse=True
+                )[:10]
 
                 # Find high-volume items with below-median margins
                 margin_values = [m.get("margin_pct", 0) for m in margins if m.get("qty", 0) >= 5]
@@ -1038,39 +1097,42 @@ def detect_profitability_signals(
                     top_seller = by_volume[0] if by_volume else None
                     top_profit = by_profit[0] if by_profit else None
 
-                    if (top_seller and top_profit
-                            and top_seller["item"] != top_profit["item"]
-                            and top_seller.get("margin_pct", 100) < median_margin):
-                        signals.append({
-                            "signal_type": "profitability",
-                            "key": "menu_mix_opportunity",
-                            "title": (
-                                f"Top seller ({top_seller['item']}, {top_seller['volume_pct']}% vol) "
-                                f"has {top_seller.get('margin_pct', 0)}% margin. "
-                                f"{top_profit['item']} ({top_profit['volume_pct']}% vol) "
-                                f"has {top_profit.get('margin_pct', 0)}% margin"
-                            ),
-                            "evidence": {
-                                "top_seller": top_seller["item"],
-                                "top_seller_volume_pct": top_seller["volume_pct"],
-                                "top_seller_margin_pct": top_seller.get("margin_pct"),
-                                "top_profit_item": top_profit["item"],
-                                "top_profit_volume_pct": top_profit["volume_pct"],
-                                "top_profit_margin_pct": top_profit.get("margin_pct"),
-                                "median_margin_pct": median_margin,
-                            },
-                            "severity": "opportunity",
-                            "suggested_action": "MARGIN_ALERT",
-                        })
+                    if (
+                        top_seller
+                        and top_profit
+                        and top_seller["item"] != top_profit["item"]
+                        and top_seller.get("margin_pct", 100) < median_margin
+                    ):
+                        signals.append(
+                            {
+                                "signal_type": "profitability",
+                                "key": "menu_mix_opportunity",
+                                "title": (
+                                    f"Top seller ({top_seller['item']}, {top_seller['volume_pct']}% vol) "
+                                    f"has {top_seller.get('margin_pct', 0)}% margin. "
+                                    f"{top_profit['item']} ({top_profit['volume_pct']}% vol) "
+                                    f"has {top_profit.get('margin_pct', 0)}% margin"
+                                ),
+                                "evidence": {
+                                    "top_seller": top_seller["item"],
+                                    "top_seller_volume_pct": top_seller["volume_pct"],
+                                    "top_seller_margin_pct": top_seller.get("margin_pct"),
+                                    "top_profit_item": top_profit["item"],
+                                    "top_profit_volume_pct": top_profit["volume_pct"],
+                                    "top_profit_margin_pct": top_profit.get("margin_pct"),
+                                    "median_margin_pct": median_margin,
+                                },
+                                "severity": "opportunity",
+                                "suggested_action": "MARGIN_ALERT",
+                            }
+                        )
     except Exception:
         logger.exception("Profitability signal F (menu mix) failed")
 
     return signals
 
 
-def detect_inventory_signals(
-    site_id: str, cycle_date: date, lookback_days: int = 21
-) -> list[dict]:
+def detect_inventory_signals(site_id: str, cycle_date: date, lookback_days: int = 21) -> list[dict]:
     """
     Detect operational stock risks using:
       effective_on_hand = latest_count + receipts - consumed_sales
@@ -1090,10 +1152,7 @@ def detect_inventory_signals(
         status = alert.get("status")
         item_name = alert.get("item_name", "Inventory item")
         key_base = (
-            str(alert.get("score_key") or item_name)
-            .lower()
-            .replace(" ", "_")
-            .replace("-", "_")
+            str(alert.get("score_key") or item_name).lower().replace(" ", "_").replace("-", "_")
         )
         on_hand = alert.get("effective_on_hand")
         reorder_point = alert.get("reorder_point")
@@ -1105,10 +1164,7 @@ def detect_inventory_signals(
             title = (
                 f"{item_name} out of stock"
                 if status == "out_of_stock"
-                else (
-                    f"{item_name} low stock "
-                    f"({round(float(on_hand or 0), 1)} remaining)"
-                )
+                else (f"{item_name} low stock " f"({round(float(on_hand or 0), 1)} remaining)")
             )
         elif status == "reorder_soon":
             severity = "opportunity"
@@ -1161,7 +1217,12 @@ def synthesize_insights(
     Single Claude API call. Takes structured signals + learned patterns,
     returns prioritized insights with natural language titles/descriptions.
     """
-    from data.storage import get_learned_patterns, get_recent_insights, store_insight, store_learned_pattern
+    from data.storage import (
+        get_learned_patterns,
+        get_recent_insights,
+        store_insight,
+        store_learned_pattern,
+    )
 
     if not signals:
         logger.info("No signals to synthesize")
@@ -1199,15 +1260,21 @@ def synthesize_insights(
         "- Return ONLY the JSON array, no other text"
     )
 
-    user_content = json.dumps({
-        "signals_detected_today": signals[:20],  # Limit to avoid token overflow
-        "previously_learned_patterns": [
-            {"key": p["pattern_key"], "description": p["description"],
-             "confidence": float(p["confidence"])}
-            for p in patterns[:10]
-        ],
-        "recent_insight_titles_avoid_repeating": recent_titles[:10],
-    }, default=str)
+    user_content = json.dumps(
+        {
+            "signals_detected_today": signals[:20],  # Limit to avoid token overflow
+            "previously_learned_patterns": [
+                {
+                    "key": p["pattern_key"],
+                    "description": p["description"],
+                    "confidence": float(p["confidence"]),
+                }
+                for p in patterns[:10]
+            ],
+            "recent_insight_titles_avoid_repeating": recent_titles[:10],
+        },
+        default=str,
+    )
 
     try:
         client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
@@ -1261,16 +1328,18 @@ def synthesize_insights(
         )
 
         if insight_id:
-            stored_insights.append({
-                "insight_id": insight_id,
-                "insight_type": insight_type,
-                "severity": severity,
-                "title": title,
-                "body": body,
-                "action_type": action_type,
-                "confidence": confidence,
-                "pattern_key": pattern_key,
-            })
+            stored_insights.append(
+                {
+                    "insight_id": insight_id,
+                    "insight_type": insight_type,
+                    "severity": severity,
+                    "title": title,
+                    "body": body,
+                    "action_type": action_type,
+                    "confidence": confidence,
+                    "pattern_key": pattern_key,
+                }
+            )
 
         # Store/update learned pattern
         if pattern_key:
@@ -1289,9 +1358,7 @@ def synthesize_insights(
     return stored_insights
 
 
-def _fallback_insights(
-    site_id: str, cycle_date: date, signals: list[dict]
-) -> list[dict]:
+def _fallback_insights(site_id: str, cycle_date: date, signals: list[dict]) -> list[dict]:
     """
     Rule-based fallback when LLM is unavailable.
     Converts top signals directly into insights without LLM synthesis.
@@ -1318,16 +1385,18 @@ def _fallback_insights(
         )
 
         if insight_id:
-            stored.append({
-                "insight_id": insight_id,
-                "insight_type": signal.get("signal_type", "operations"),
-                "severity": signal.get("severity", "info"),
-                "title": signal.get("title", "Signal detected"),
-                "body": json.dumps(signal.get("evidence", {})),
-                "action_type": signal.get("suggested_action"),
-                "confidence": 0.5,
-                "pattern_key": signal.get("key", ""),
-            })
+            stored.append(
+                {
+                    "insight_id": insight_id,
+                    "insight_type": signal.get("signal_type", "operations"),
+                    "severity": signal.get("severity", "info"),
+                    "title": signal.get("title", "Signal detected"),
+                    "body": json.dumps(signal.get("evidence", {})),
+                    "action_type": signal.get("suggested_action"),
+                    "confidence": 0.5,
+                    "pattern_key": signal.get("key", ""),
+                }
+            )
 
         # Store pattern
         key = signal.get("key", "")
@@ -1405,6 +1474,8 @@ def create_intelligence_recommendations(
 
             created.append(rec_id)
         except Exception:
-            logger.exception("Failed to create recommendation for insight: %s", insight.get("title"))
+            logger.exception(
+                "Failed to create recommendation for insight: %s", insight.get("title")
+            )
 
     return created

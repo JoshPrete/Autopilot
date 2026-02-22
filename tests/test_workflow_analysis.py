@@ -52,10 +52,30 @@ def test_analyze_workflow_state_distribution(monkeypatch):
         "analysis.workflow.get_daily_efficiency_snapshot",
         lambda *_args, **_kwargs: {
             "intervals": [
-                {"interval_start": "2026-02-19T07:00:00", "staff_on": 1, "workload_units": 2.0, "status": "balanced"},
-                {"interval_start": "2026-02-19T07:15:00", "staff_on": 2, "workload_units": 4.0, "status": "balanced"},
-                {"interval_start": "2026-02-19T07:30:00", "staff_on": 3, "workload_units": 6.0, "status": "balanced"},
-                {"interval_start": "2026-02-19T07:45:00", "staff_on": 4, "workload_units": 8.0, "status": "balanced"},
+                {
+                    "interval_start": "2026-02-19T07:00:00",
+                    "staff_on": 1,
+                    "workload_units": 2.0,
+                    "status": "balanced",
+                },
+                {
+                    "interval_start": "2026-02-19T07:15:00",
+                    "staff_on": 2,
+                    "workload_units": 4.0,
+                    "status": "balanced",
+                },
+                {
+                    "interval_start": "2026-02-19T07:30:00",
+                    "staff_on": 3,
+                    "workload_units": 6.0,
+                    "status": "balanced",
+                },
+                {
+                    "interval_start": "2026-02-19T07:45:00",
+                    "staff_on": 4,
+                    "workload_units": 8.0,
+                    "status": "balanced",
+                },
             ]
         },
     )
@@ -76,7 +96,10 @@ def test_generate_roster_change_plan_assigns_roles(monkeypatch):
                 {
                     "day_of_week": "Mon",
                     "status": "ok",
-                    "template_shifts": [{"start_hour": 6, "end_hour": 10}, {"start_hour": 7, "end_hour": 11}],
+                    "template_shifts": [
+                        {"start_hour": 6, "end_hour": 10},
+                        {"start_hour": 7, "end_hour": 11},
+                    ],
                 }
             ],
             "daily": [

@@ -80,40 +80,48 @@ def build_extraction_content_blocks(doc: dict) -> list[dict]:
     if mime_type in ("image/jpeg", "image/png"):
         file_bytes = Path(storage_path).read_bytes()
         b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": mime_type,
-                "data": b64,
-            },
-        })
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": b64,
+                },
+            }
+        )
     elif mime_type == "application/pdf":
         file_bytes = Path(storage_path).read_bytes()
         b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
-        blocks.append({
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": "application/pdf",
-                "data": b64,
-            },
-        })
+        blocks.append(
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": b64,
+                },
+            }
+        )
     elif mime_type == "text/csv":
         csv_text = Path(storage_path).read_text(errors="replace")
         # Truncate very large CSVs
         lines = csv_text.splitlines()
         if len(lines) > 200:
             csv_text = "\n".join(lines[:200]) + f"\n... ({len(lines) - 200} more rows)"
-        blocks.append({
-            "type": "text",
-            "text": f"CSV file contents:\n```\n{csv_text}\n```",
-        })
+        blocks.append(
+            {
+                "type": "text",
+                "text": f"CSV file contents:\n```\n{csv_text}\n```",
+            }
+        )
 
-    blocks.append({
-        "type": "text",
-        "text": f"Filename: {doc['filename']}\nPlease extract structured data from this document.",
-    })
+    blocks.append(
+        {
+            "type": "text",
+            "text": f"Filename: {doc['filename']}\nPlease extract structured data from this document.",
+        }
+    )
 
     return blocks
 
@@ -208,11 +216,13 @@ def _apply_cogs_updates(site_id: str, items: list[dict]) -> list[dict]:
                 description=item.get("item_name"),
                 source="document",
             )
-            updated.append({
-                "score_key": score_key,
-                "cost_cents": int(cost_cents),
-                "item_name": item.get("item_name"),
-            })
+            updated.append(
+                {
+                    "score_key": score_key,
+                    "cost_cents": int(cost_cents),
+                    "item_name": item.get("item_name"),
+                }
+            )
         except Exception as e:
             logger.error("Failed to upsert item cost %s: %s", score_key, e)
 
@@ -229,6 +239,7 @@ def _apply_event_updates(site_id: str, events: list[dict]) -> None:
 
         try:
             from datetime import date as date_type
+
             if isinstance(event_date, str):
                 event_date = date_type.fromisoformat(event_date)
 

@@ -80,7 +80,12 @@ class TestTomorrowPlanSummary:
         assert "No rush windows" in msg
 
     def test_multiple_rushes(self, sample_rush_window):
-        rush2 = {**sample_rush_window, "start": "2026-02-07T12:00:00", "end": "2026-02-07T12:45:00", "predicted_drinks": 38}
+        rush2 = {
+            **sample_rush_window,
+            "start": "2026-02-07T12:00:00",
+            "end": "2026-02-07T12:45:00",
+            "predicted_drinks": 38,
+        }
         msg = tomorrow_plan_summary(
             day_name="Friday",
             date_str="7 FEB",
@@ -241,9 +246,17 @@ class TestSmsLengths:
 
     def test_all_prompts_under_480_chars(self, sample_rush_window):
         messages = [
-            tomorrow_plan_summary("Friday", "7 FEB", [sample_rush_window],
-                                  {"temp_c": 28, "description": "sunny"}, 287, "3P"),
-            pre_rush_reminder("2026-02-07T08:47:00", "2026-02-07T09:32:00", 52, "high", "2026-02-07T08:40:00"),
+            tomorrow_plan_summary(
+                "Friday",
+                "7 FEB",
+                [sample_rush_window],
+                {"temp_c": 28, "description": "sunny"},
+                287,
+                "3P",
+            ),
+            pre_rush_reminder(
+                "2026-02-07T08:47:00", "2026-02-07T09:32:00", 52, "high", "2026-02-07T08:40:00"
+            ),
             switch_to_3p({"P1": "Sarah", "P2": "Tom", "P3": "Jess"}, "2026-02-07T08:47:00"),
             wally_start(8, {"full_cream": 5, "oat": 2, "soy": 1}, "Tom"),
             p1_to_shots(),

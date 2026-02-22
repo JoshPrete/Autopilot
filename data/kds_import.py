@@ -43,6 +43,7 @@ SITE_TIMEZONE = "Australia/Brisbane"
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -129,7 +130,8 @@ def store_kds_tickets(site_id: str, tickets: list[dict]) -> int:
     with engine.connect() as conn:
         for ticket in tickets:
             result = conn.execute(
-                _text("""
+                _text(
+                    """
                     INSERT INTO kds_tickets (
                         site_id, device_name, ticket_name, order_source,
                         num_items, items_description, completion_time_sec,
@@ -140,7 +142,8 @@ def store_kds_tickets(site_id: str, tickets: list[dict]) -> int:
                         :time_created, :time_completed, :time_due, :time_recalled
                     )
                     ON CONFLICT (site_id, time_created, items_description) DO NOTHING
-                """),
+                """
+                ),
                 {
                     "site_id": site_id,
                     **ticket,
@@ -172,7 +175,8 @@ def match_tickets_to_orders(site_id: str, tolerance_sec: int = 15) -> int:
         # Batch match: use a single SQL update with a correlated subquery
         # This is much faster than row-by-row matching
         result = conn.execute(
-            _text("""
+            _text(
+                """
                 UPDATE kds_tickets k
                 SET order_id = match.order_id
                 FROM (
@@ -192,7 +196,10 @@ def match_tickets_to_orders(site_id: str, tolerance_sec: int = 15) -> int:
                         )))
                 ) match
                 WHERE k.ticket_id = match.ticket_id
-            """.replace(":tol", str(tolerance_sec))),
+            """.replace(
+                    ":tol", str(tolerance_sec)
+                )
+            ),
             {"site_id": site_id},
         )
         matched = result.rowcount
@@ -201,16 +208,19 @@ def match_tickets_to_orders(site_id: str, tolerance_sec: int = 15) -> int:
     # Count remaining unmatched
     with engine.connect() as conn:
         remaining = conn.execute(
-            _text("""
+            _text(
+                """
                 SELECT COUNT(*) FROM kds_tickets
                 WHERE site_id = :site_id AND order_id IS NULL
-            """),
+            """
+            ),
             {"site_id": site_id},
         ).scalar()
 
     logger.info(
         "Matched %d tickets to orders (%d still unmatched)",
-        matched, remaining,
+        matched,
+        remaining,
     )
     return matched
 
@@ -227,10 +237,14 @@ def get_kds_summary(site_id: str, target_date: Optional[datetime] = None) -> dic
 
         if target_date:
             date_filter = "AND time_created::date = :target_date"
-            params["target_date"] = target_date.date() if isinstance(target_date, datetime) else target_date
+            params["target_date"] = (
+                target_date.date() if isinstance(target_date, datetime) else target_date
+            )
 
-        result = conn.execute(
-            _text(f"""
+        result = (
+            conn.execute(
+                _text(
+                    f"""
                 SELECT
                     COUNT(*) AS total_tickets,
                     ROUND(AVG(completion_time_sec)) AS avg_completion_sec,
@@ -242,9 +256,13 @@ def get_kds_summary(site_id: str, target_date: Optional[datetime] = None) -> dic
                     COUNT(*) FILTER (WHERE order_id IS NOT NULL) AS matched_orders
                 FROM kds_tickets
                 WHERE site_id = :site_id {date_filter}
-            """),
-            params,
-        ).mappings().first()
+            """
+                ),
+                params,
+            )
+            .mappings()
+            .first()
+        )
 
         return dict(result) if result else {}
 
@@ -307,6 +325,7 @@ if __name__ == "__main__":
 
     # Look up site
     from config.settings import settings
+
     site = get_site_by_location_id(settings.SQUARE_LOCATION_ID)
     if not site:
         print(f"ERROR: No site found for location {settings.SQUARE_LOCATION_ID}")

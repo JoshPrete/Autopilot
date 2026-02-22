@@ -4,7 +4,9 @@ from analysis.shift_optimizer import optimize_shifts, optimize_shifts_range
 
 
 def test_optimize_shifts_no_prediction(monkeypatch):
-    monkeypatch.setattr("analysis.shift_optimizer._parse_hourly_from_prediction", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "analysis.shift_optimizer._parse_hourly_from_prediction", lambda *_args, **_kwargs: []
+    )
 
     out = optimize_shifts("site-1", date(2026, 2, 19))
     assert out["status"] == "no_prediction"
@@ -21,8 +23,12 @@ def test_optimize_shifts_generates_shift_blocks(monkeypatch):
             {"hour": 9, "predicted_workload": 3.4},
         ],
     )
-    monkeypatch.setattr("analysis.shift_optimizer._estimate_hourly_rate", lambda *_args, **_kwargs: 30.0)
-    monkeypatch.setattr("analysis.shift_optimizer.get_rosters_for_date", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "analysis.shift_optimizer._estimate_hourly_rate", lambda *_args, **_kwargs: 30.0
+    )
+    monkeypatch.setattr(
+        "analysis.shift_optimizer.get_rosters_for_date", lambda *_args, **_kwargs: []
+    )
 
     out = optimize_shifts(
         "site-1",

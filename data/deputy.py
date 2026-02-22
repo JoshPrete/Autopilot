@@ -18,6 +18,7 @@ logger = logging.getLogger("autopilot.deputy")
 
 class DeputyError(Exception):
     """Raised when Deputy API calls fail."""
+
     pass
 
 
@@ -40,16 +41,16 @@ class DeputyClient:
         self.access_token = access_token or settings.DEPUTY_ACCESS_TOKEN
 
         if not self.base_url or not self.access_token:
-            raise DeputyError(
-                "Deputy not configured. Set DEPUTY_BASE_URL and DEPUTY_ACCESS_TOKEN."
-            )
+            raise DeputyError("Deputy not configured. Set DEPUTY_BASE_URL and DEPUTY_ACCESS_TOKEN.")
 
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        )
 
     def _request(self, method: str, endpoint: str, **kwargs) -> dict | list:
         """Make an authenticated request to the Deputy API."""

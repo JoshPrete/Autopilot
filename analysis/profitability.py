@@ -22,6 +22,7 @@ logger = logging.getLogger("autopilot.profitability")
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -103,17 +104,21 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
 
     with engine.connect() as conn:
         # 1. Revenue for the date
-        rev_row = conn.execute(
-            _text(
-                "SELECT COUNT(*) AS order_count, "
-                "COALESCE(SUM(total_money_cents), 0) AS total_revenue "
-                "FROM orders_raw "
-                "WHERE site_id = :sid "
-                "AND DATE(closed_at) = :d "
-                "AND state = 'COMPLETED'"
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().first()
+        rev_row = (
+            conn.execute(
+                _text(
+                    "SELECT COUNT(*) AS order_count, "
+                    "COALESCE(SUM(total_money_cents), 0) AS total_revenue "
+                    "FROM orders_raw "
+                    "WHERE site_id = :sid "
+                    "AND DATE(closed_at) = :d "
+                    "AND state = 'COMPLETED'"
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
         order_count = int(rev_row["order_count"])
         revenue_cents = int(rev_row["total_revenue"])
@@ -123,9 +128,10 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
             return None
 
         # 2. Labor cost and hours from deputy_rosters (deduped + guarded)
-        labor_row = conn.execute(
-            _text(
-                """
+        labor_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH shifts AS (
                     SELECT DISTINCT ON (
                         COALESCE(
@@ -158,9 +164,12 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
                     ) AS max_hourly_rate
                 FROM shifts
                 """
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
         labor_cost_cents_raw = round(float(labor_row["total_cost"]) * 100)
         labor_hours = float(labor_row["total_hours"])
@@ -171,9 +180,10 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
             else None
         )
 
-        median_row = conn.execute(
-            _text(
-                """
+        median_row = (
+            conn.execute(
+                _text(
+                    """
                 WITH daily AS (
                     SELECT
                         shift_date,
@@ -188,14 +198,17 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
                 SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY labor_cents) AS median_labor_cents
                 FROM daily
                 """
-            ),
-            {
-                "sid": site_id,
-                "d": target_date,
-                "start_d": target_date - timedelta(days=28),
-                "end_d": target_date - timedelta(days=1),
-            },
-        ).mappings().first()
+                ),
+                {
+                    "sid": site_id,
+                    "d": target_date,
+                    "start_d": target_date - timedelta(days=28),
+                    "end_d": target_date - timedelta(days=1),
+                },
+            )
+            .mappings()
+            .first()
+        )
         median_daily_labor_cents = (
             int(median_row["median_labor_cents"])
             if median_row and median_row.get("median_labor_cents") is not None
@@ -213,20 +226,25 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
 
         # Add amortised owner salary ($100k/365 per day) after quality adjustment.
         from config.constants import OWNER_DAILY_SALARY_CENTS
+
         labor_cost_cents += OWNER_DAILY_SALARY_CENTS
 
         # 3. Item counts and COGS from order_items
         # We need the score_key for each item to look up COGS.
         # order_items stores item_name; we resolve via processing.resolve_item_key()
-        items_rows = conn.execute(
-            _text(
-                "SELECT item_name, COUNT(*) AS qty "
-                "FROM order_items "
-                "WHERE site_id = :sid AND DATE(created_at) = :d "
-                "GROUP BY item_name"
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().all()
+        items_rows = (
+            conn.execute(
+                _text(
+                    "SELECT item_name, COUNT(*) AS qty "
+                    "FROM order_items "
+                    "WHERE site_id = :sid AND DATE(created_at) = :d "
+                    "GROUP BY item_name"
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .all()
+        )
 
     # Resolve item names to score_keys and compute COGS
     from data.processing import resolve_item_key
@@ -253,9 +271,9 @@ def compute_daily_profitability(site_id: str, target_date: date) -> dict | None:
 
     labor_pct = round(labor_cost_cents / revenue_cents * 100, 2) if revenue_cents > 0 else 0
     revenue_per_labor_hour = round(revenue_cents / labor_hours) if labor_hours > 0 else None
-    cost_per_drink = round(
-        (total_cogs_cents + labor_cost_cents) / drink_count
-    ) if drink_count > 0 else None
+    cost_per_drink = (
+        round((total_cogs_cents + labor_cost_cents) / drink_count) if drink_count > 0 else None
+    )
 
     metrics = {
         "revenue_cents": revenue_cents,
@@ -367,16 +385,18 @@ def compute_item_margins(site_id: str, days: int = 14) -> list[dict]:
         total_profit = total_rev - total_cogs
         margin_pct = round((total_rev - total_cogs) / total_rev * 100, 1) if total_rev > 0 else 0
 
-        results.append({
-            "item": data["name"],
-            "score_key": score_key,
-            "category": data["category"],
-            "qty": qty,
-            "avg_price_cents": avg_price,
-            "cogs_cents": unit_cogs,
-            "margin_pct": margin_pct,
-            "total_profit_cents": total_profit,
-        })
+        results.append(
+            {
+                "item": data["name"],
+                "score_key": score_key,
+                "category": data["category"],
+                "qty": qty,
+                "avg_price_cents": avg_price,
+                "cogs_cents": unit_cogs,
+                "margin_pct": margin_pct,
+                "total_profit_cents": total_profit,
+            }
+        )
 
     # Sort by total profit contribution (highest first)
     results.sort(key=lambda x: x["total_profit_cents"], reverse=True)

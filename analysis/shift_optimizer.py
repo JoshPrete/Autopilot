@@ -16,6 +16,7 @@ from data.storage import get_prediction, get_rosters_for_date
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -47,9 +48,10 @@ def _parse_hourly_from_prediction(site_id: str, target_date: date) -> list[dict]
 
 def _estimate_hourly_rate(site_id: str, target_date: date) -> float:
     with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                """
+        row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT AVG(
                     CASE WHEN total_hours > 0
                          THEN cost_dollars / NULLIF(total_hours, 0)
@@ -61,13 +63,16 @@ def _estimate_hourly_rate(site_id: str, target_date: date) -> float:
                   AND shift_date BETWEEN :s AND :e
                   AND COALESCE(is_open, FALSE) = FALSE
                 """
-            ),
-            {
-                "sid": site_id,
-                "s": target_date - timedelta(days=28),
-                "e": target_date - timedelta(days=1),
-            },
-        ).mappings().first()
+                ),
+                {
+                    "sid": site_id,
+                    "s": target_date - timedelta(days=28),
+                    "e": target_date - timedelta(days=1),
+                },
+            )
+            .mappings()
+            .first()
+        )
     rate = float(row["hourly_rate"]) if row and row.get("hourly_rate") is not None else 26.0
     return max(20.0, min(rate, 55.0))
 
@@ -113,10 +118,7 @@ def _build_shift_blocks(
                 active.append(shift)
         elif current > demand:
             to_close = current - demand
-            closable = [
-                s for s in active
-                if (h - s["start_hour"]) >= min_shift_hours
-            ]
+            closable = [s for s in active if (h - s["start_hour"]) >= min_shift_hours]
             closable.sort(key=lambda s: s["start_hour"])
             for s in closable[:to_close]:
                 s["end_hour"] = h
@@ -168,19 +170,26 @@ def optimize_shifts(
 
     hours = [h["hour"] for h in hourly]
     raw_required = [
-        max(base_floor_staff, int(math.ceil((h["predicted_workload"] or 0.0) / target_wu_per_person)))
+        max(
+            base_floor_staff,
+            int(math.ceil((h["predicted_workload"] or 0.0) / target_wu_per_person)),
+        )
         for h in hourly
     ]
     required = _smooth_staff_series(raw_required)
 
-    blocks = _build_shift_blocks(hours, required, min_shift_hours=min_shift_hours, max_shift_hours=max_shift_hours)
+    blocks = _build_shift_blocks(
+        hours, required, min_shift_hours=min_shift_hours, max_shift_hours=max_shift_hours
+    )
     avg_hourly_rate = _estimate_hourly_rate(site_id, target_date)
     recommended_hours = sum(max(0, b["end_hour"] - b["start_hour"]) for b in blocks)
     recommended_labor_cents = round(recommended_hours * avg_hourly_rate * 100)
 
     baseline_rosters = get_rosters_for_date(site_id, target_date)
     baseline_hours = sum(float(r.get("total_hours") or 0) for r in baseline_rosters)
-    baseline_labor_cents = round(sum(float(r.get("cost_dollars") or 0.0) for r in baseline_rosters) * 100)
+    baseline_labor_cents = round(
+        sum(float(r.get("cost_dollars") or 0.0) for r in baseline_rosters) * 100
+    )
 
     shifts_out = []
     for i, b in enumerate(blocks, start=1):

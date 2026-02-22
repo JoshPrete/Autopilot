@@ -106,9 +106,7 @@ def _normalize_prediction_record(record: dict) -> dict:
         forecast["forecast_date"] = str(record["forecast_date"])
     if "day_name" not in forecast and forecast.get("forecast_date"):
         try:
-            forecast["day_name"] = date.fromisoformat(
-                str(forecast["forecast_date"])
-            ).strftime("%A")
+            forecast["day_name"] = date.fromisoformat(str(forecast["forecast_date"])).strftime("%A")
         except ValueError:
             pass
 
@@ -149,8 +147,8 @@ def _build_blocked_predict_message(
     )
     clear_flag_cmd = (
         f"curl -X DELETE "
-        f"\"http://localhost:8000/api/sites/{site_id}/analysis/data-quality/flags/partial-ingest"
-        f"?flag_date={run_date.isoformat()}\""
+        f'"http://localhost:8000/api/sites/{site_id}/analysis/data-quality/flags/partial-ingest'
+        f'?flag_date={run_date.isoformat()}"'
     )
 
     message_lines = [
@@ -214,10 +212,14 @@ def _print_summary(
             reason = step_result.get("reason", "")
             print(f"         Reason: {reason}")
             if reason == "data_quality_flag":
-                print(f"         Rerun:  .venv/bin/python scripts/daily_autopilot.py"
-                      f" --site-id {site_id_text} --step ingest --date {run_date.isoformat()}")
-                print(f"         Then:   .venv/bin/python scripts/daily_autopilot.py"
-                      f" --site-id {site_id_text} --step predict --date {run_date.isoformat()}")
+                print(
+                    f"         Rerun:  .venv/bin/python scripts/daily_autopilot.py"
+                    f" --site-id {site_id_text} --step ingest --date {run_date.isoformat()}"
+                )
+                print(
+                    f"         Then:   .venv/bin/python scripts/daily_autopilot.py"
+                    f" --site-id {site_id_text} --step predict --date {run_date.isoformat()}"
+                )
             skipped_downstream = step_result.get("downstream_skipped", [])
             if skipped_downstream:
                 print(f"         Skipped downstream: {', '.join(skipped_downstream)}")
@@ -286,14 +288,17 @@ def step_ingest(site_id: str, run_date: date, dry_run: bool = False) -> dict:
     # 5. Store daily sales summary for rolling history
     if not dry_run:
         total_revenue_cents = sum(
-            o.get("total_money_cents", 0) or 0
-            for o in pipeline_result.get("orders", [])
+            o.get("total_money_cents", 0) or 0 for o in pipeline_result.get("orders", [])
         )
-        store_daily_sales(site_id, run_date, {
-            "total_revenue_cents": total_revenue_cents,
-            "orders_count": summary["orders_count"],
-            "items_count": summary["items_count"],
-        })
+        store_daily_sales(
+            site_id,
+            run_date,
+            {
+                "total_revenue_cents": total_revenue_cents,
+                "orders_count": summary["orders_count"],
+                "items_count": summary["items_count"],
+            },
+        )
 
         # Strict data-quality guard: detect and flag likely partial ingestion days.
         quality_guard = apply_partial_ingest_guard(site_id, run_date)
@@ -747,7 +752,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--step",
-        choices=["ingest", "deputy", "xero", "profitability", "predict", "replan", "intelligence", "all"],
+        choices=[
+            "ingest",
+            "deputy",
+            "xero",
+            "profitability",
+            "predict",
+            "replan",
+            "intelligence",
+            "all",
+        ],
         default="all",
         help="Which pipeline step to run. 'replan' regenerates tomorrow plan from stored prediction. Default: all.",
     )
@@ -767,13 +781,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--prediction-id",
-        help=(
-            "Render tomorrow plan from stored prediction_id only "
-            "(no recalculation)."
-        ),
+        help=("Render tomorrow plan from stored prediction_id only " "(no recalculation)."),
     )
     p.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Enable debug logging.",
     )
@@ -841,7 +853,11 @@ def main(argv: list[str]) -> int:
         "  Date: %s\n"
         "  Step: %s\n"
         "  Dry run: %s",
-        site_name, site_id, run_date, args.step, args.dry_run,
+        site_name,
+        site_id,
+        run_date,
+        args.step,
+        args.dry_run,
     )
 
     results = {}
@@ -896,9 +912,7 @@ def main(argv: list[str]) -> int:
         # Step 3: Intelligence (after predict)
         if args.step in ("intelligence", "all"):
             if args.step == "all" and args.prediction_id:
-                logger.warning(
-                    "Skipping intelligence: --prediction-id mode renders plan only."
-                )
+                logger.warning("Skipping intelligence: --prediction-id mode renders plan only.")
                 results["intelligence"] = {
                     "status": "skipped",
                     "reason": "prediction_id_regeneration_mode",

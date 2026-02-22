@@ -4,14 +4,18 @@ from app.chat import build_system_prompt, gather_chat_context
 def _patch_common_chat_dependencies(monkeypatch):
     monkeypatch.setattr("app.chat.get_data_freshness", lambda *_args, **_kwargs: "2026-02-19")
     monkeypatch.setattr("app.chat.get_prediction", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("app.chat.get_rolling_accuracy", lambda *_args, **_kwargs: {"days_measured": 0})
+    monkeypatch.setattr(
+        "app.chat.get_rolling_accuracy", lambda *_args, **_kwargs: {"days_measured": 0}
+    )
     monkeypatch.setattr("app.chat._get_upcoming_events", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._get_revenue_from_orders", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.get_roster_summary", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._get_roster_for_date", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.has_real_cogs", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("data.xero.is_xero_configured", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr("app.chat._get_cogs_snapshot", lambda *_args, **_kwargs: {"total_items": 8, "real_items": 6})
+    monkeypatch.setattr(
+        "app.chat._get_cogs_snapshot", lambda *_args, **_kwargs: {"total_items": 8, "real_items": 6}
+    )
     monkeypatch.setattr("app.chat.get_recent_documents", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.get_intelligence_summary", lambda *_args, **_kwargs: {})
     monkeypatch.setattr("app.chat.get_recent_insights", lambda *_args, **_kwargs: [])
@@ -91,13 +95,19 @@ def test_gather_chat_context_includes_operator_intelligence(monkeypatch):
         lambda *_args, **_kwargs: {
             "date": "2026-02-19",
             "summary": {"intervals_analyzed": 32, "total_revenue_cents": 150000},
-            "variance_summary": {"understaffed_intervals": 3, "overstaffed_intervals": 2, "no_staff_intervals": 0},
+            "variance_summary": {
+                "understaffed_intervals": 3,
+                "overstaffed_intervals": 2,
+                "no_staff_intervals": 0,
+            },
             "peaks": {"mismatch": []},
         },
     )
     monkeypatch.setattr(
         "analysis.next_actions.generate_next_actions",
-        lambda *_args, **_kwargs: {"actions": [{"title": "Trim 1 staff-hour", "expected_weekly_profit_uplift_cents": 7000}]},
+        lambda *_args, **_kwargs: {
+            "actions": [{"title": "Trim 1 staff-hour", "expected_weekly_profit_uplift_cents": 7000}]
+        },
     )
     monkeypatch.setattr(
         "app.chat._get_recent_recommendations",
@@ -105,7 +115,11 @@ def test_gather_chat_context_includes_operator_intelligence(monkeypatch):
     )
     monkeypatch.setattr(
         "analysis.shift_optimizer.optimize_shifts_range",
-        lambda *_args, **_kwargs: {"days": 28, "summary": {"days_with_predictions": 28}, "weekly_templates": []},
+        lambda *_args, **_kwargs: {
+            "days": 28,
+            "summary": {"days_with_predictions": 28},
+            "weekly_templates": [],
+        },
     )
 
     context = gather_chat_context(
@@ -130,7 +144,9 @@ def test_gather_chat_context_does_not_load_item_variations_for_non_item_question
 
     monkeypatch.setattr("app.chat._get_item_variations", _count_item_variations)
     monkeypatch.setattr("app.chat._get_recent_efficiency_context", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("analysis.next_actions.generate_next_actions", lambda *_args, **_kwargs: {"actions": []})
+    monkeypatch.setattr(
+        "analysis.next_actions.generate_next_actions", lambda *_args, **_kwargs: {"actions": []}
+    )
     monkeypatch.setattr("app.chat._get_recent_recommendations", lambda *_args, **_kwargs: [])
 
     context = gather_chat_context("site-1", "How is profitability and labor efficiency this week?")
@@ -195,7 +211,9 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
             "peaks": {"mismatch": []},
         },
         "next_actions_live": {
-            "summary": {"proven_gate": {"suppressed_count": 1, "suppressed_action_types": ["PRICE_TEST_UP"]}},
+            "summary": {
+                "proven_gate": {"suppressed_count": 1, "suppressed_action_types": ["PRICE_TEST_UP"]}
+            },
             "actions": [
                 {
                     "title": "Add 1 staff during peak block",
@@ -205,16 +223,25 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
                     "proven_gate_status": "positive_realized_impact",
                     "realized_samples": 3,
                 }
-            ]
+            ],
         },
         "recent_recommendations": [
-            {"title": "Trim overstaffed block", "expected_weekly_profit_uplift_cents": 5000, "adopted": False}
+            {
+                "title": "Trim overstaffed block",
+                "expected_weekly_profit_uplift_cents": 5000,
+                "adopted": False,
+            }
         ],
         "optimized_shift_range": {
             "days": 28,
             "summary": {"days_with_predictions": 28},
             "weekly_templates": [
-                {"day_of_week": "Mon", "status": "ok", "template_shifts": [1, 2], "avg_estimated_labor_delta_cents": -1200}
+                {
+                    "day_of_week": "Mon",
+                    "status": "ok",
+                    "template_shifts": [1, 2],
+                    "avg_estimated_labor_delta_cents": -1200,
+                }
             ],
         },
         "bottom_line_scorecard": {

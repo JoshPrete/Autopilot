@@ -24,6 +24,7 @@ def tomorrow_plan_text(
 ):
     prediction = _get_prediction_or_404(site)
     import json
+
     names = json.loads(staff_names) if staff_names else None
     plan = generate_tomorrow_plan(
         site_name=site["name"],
@@ -41,6 +42,7 @@ def tomorrow_plan_html(
 ):
     prediction = _get_prediction_or_404(site)
     import json
+
     names = json.loads(staff_names) if staff_names else None
     html = generate_tomorrow_plan_html(
         site_name=site["name"],

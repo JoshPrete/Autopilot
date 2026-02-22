@@ -38,6 +38,7 @@ scheduler = BackgroundScheduler(timezone="Australia/Brisbane")
 def _resolve_site_id() -> tuple[str, str] | None:
     """Resolve site from SQUARE_LOCATION_ID for scheduled jobs."""
     from data.storage import get_site_by_location_id
+
     if not settings.SQUARE_LOCATION_ID:
         return None
     site = get_site_by_location_id(settings.SQUARE_LOCATION_ID)
@@ -88,6 +89,7 @@ def _record_pipeline_run(
 def scheduled_ingest():
     """5:00pm AEST — Ingest today's orders from Square."""
     from scripts.daily_autopilot import step_ingest
+
     site = _resolve_site_id()
     if not site:
         logger.warning("Scheduled ingest skipped: no site configured")
@@ -117,6 +119,7 @@ def scheduled_ingest():
 def scheduled_deputy():
     """5:15pm AEST — Sync Deputy rosters (fail-quiet if not configured)."""
     from scripts.daily_autopilot import step_deputy
+
     site = _resolve_site_id()
     if not site:
         return
@@ -144,6 +147,7 @@ def scheduled_deputy():
 def scheduled_profitability():
     """5:20pm AEST — Compute daily P&L (after deputy roster sync)."""
     from scripts.daily_autopilot import step_profitability
+
     site = _resolve_site_id()
     if not site:
         return
@@ -210,6 +214,7 @@ def scheduled_xero_sync():
 def scheduled_predict():
     """6:00pm AEST — Generate tomorrow's prediction and send SMS."""
     from scripts.daily_autopilot import step_predict
+
     site = _resolve_site_id()
     if not site:
         logger.warning("Scheduled predict skipped: no site configured")
@@ -240,6 +245,7 @@ def scheduled_predict():
 def scheduled_intelligence():
     """6:15pm AEST — Run daily intelligence cycle (after predict@6:00pm)."""
     from analysis.intelligence import run_intelligence_cycle
+
     site = _resolve_site_id()
     if not site:
         logger.warning("Scheduled intelligence skipped: no site configured")
@@ -331,15 +337,23 @@ def scheduled_weekly_kpi_snapshot():
             "week_start": snapshot.get("week_start"),
             "week_end": week_end,
             "labor_pct_avg": snapshot["business_kpis"].get("labor_pct_avg"),
-            "revenue_per_labor_hour_avg_cents": snapshot["business_kpis"].get("revenue_per_labor_hour_avg_cents"),
+            "revenue_per_labor_hour_avg_cents": snapshot["business_kpis"].get(
+                "revenue_per_labor_hour_avg_cents"
+            ),
             "weekly_net_profit_cents": snapshot["business_kpis"].get("weekly_net_profit_cents"),
             "weekly_revenue_cents": snapshot["business_kpis"].get("weekly_revenue_cents"),
-            "net_profit_wow_delta_cents": snapshot["business_kpis"].get("net_profit_wow_delta_cents"),
+            "net_profit_wow_delta_cents": snapshot["business_kpis"].get(
+                "net_profit_wow_delta_cents"
+            ),
             "labor_pct_wow_delta_pp": snapshot["business_kpis"].get("labor_pct_wow_delta_pp"),
-            "rev_per_labor_hour_wow_delta_pct": snapshot["business_kpis"].get("rev_per_labor_hour_wow_delta_pct"),
+            "rev_per_labor_hour_wow_delta_pct": snapshot["business_kpis"].get(
+                "rev_per_labor_hour_wow_delta_pct"
+            ),
             "avg_prediction_accuracy_pct": snapshot["ops_kpis"].get("avg_prediction_accuracy_pct"),
             "adoption_rate": snapshot["ops_kpis"].get("adoption_rate"),
-            "pipeline_success_pct_estimate": snapshot["reliability"].get("pipeline_success_pct_estimate"),
+            "pipeline_success_pct_estimate": snapshot["reliability"].get(
+                "pipeline_success_pct_estimate"
+            ),
         }
         write_header = not csv_path.exists()
         with csv_path.open("a", newline="") as f:
@@ -472,10 +486,12 @@ def xero_setup_page():
 def health_check():
     jobs = []
     for job in scheduler.get_jobs():
-        jobs.append({
-            "id": job.id,
-            "next_run": str(job.next_run_time) if job.next_run_time else None,
-        })
+        jobs.append(
+            {
+                "id": job.id,
+                "next_run": str(job.next_run_time) if job.next_run_time else None,
+            }
+        )
     return {"status": "ok", "scheduled_jobs": jobs}
 
 

@@ -55,7 +55,9 @@ class TestWeeklyROIReport:
                 return current_rows
             return previous_rows
 
-        monkeypatch.setattr("analysis.reporting.get_daily_profitability", _fake_get_daily_profitability)
+        monkeypatch.setattr(
+            "analysis.reporting.get_daily_profitability", _fake_get_daily_profitability
+        )
 
         result = generate_weekly_roi_report(
             site_id="site-1",
@@ -90,7 +92,9 @@ class TestWeeklyROIReport:
                 return current_rows
             return []
 
-        monkeypatch.setattr("analysis.reporting.get_daily_profitability", _fake_get_daily_profitability)
+        monkeypatch.setattr(
+            "analysis.reporting.get_daily_profitability", _fake_get_daily_profitability
+        )
 
         result = generate_weekly_roi_report(
             site_id="site-1",

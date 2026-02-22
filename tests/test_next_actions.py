@@ -59,7 +59,11 @@ def test_generate_next_actions_returns_ranked_actions(monkeypatch):
                     "observed": {"staff_on": 2},
                     "scenarios": [
                         {"staff_count": 2, "estimated_net_delta_cents": 0, "labor_delta_cents": 0},
-                        {"staff_count": 3, "estimated_net_delta_cents": 1800, "labor_delta_cents": 650},
+                        {
+                            "staff_count": 3,
+                            "estimated_net_delta_cents": 1800,
+                            "labor_delta_cents": 650,
+                        },
                     ],
                 }
             ]
@@ -68,7 +72,10 @@ def test_generate_next_actions_returns_ranked_actions(monkeypatch):
 
     result = generate_next_actions("site-1", target_date=date(2026, 2, 18), max_actions=8)
     assert result["summary"]["actions_generated"] >= 2
-    assert result["actions"][0]["expected_weekly_profit_uplift_cents"] >= result["actions"][-1]["expected_weekly_profit_uplift_cents"]
+    assert (
+        result["actions"][0]["expected_weekly_profit_uplift_cents"]
+        >= result["actions"][-1]["expected_weekly_profit_uplift_cents"]
+    )
     assert any(a["action_type"] == "ADD_STAFF_BLOCK" for a in result["actions"])
     assert any(a["action_type"] == "WORKFLOW_SHIFT_REALLOC" for a in result["actions"])
     assert "ranking_score_cents" in result["actions"][0]

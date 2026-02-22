@@ -7,7 +7,6 @@ Templates use Clubhouse language and are kept short for SMS
 readability. Each function returns the message body string.
 """
 
-
 # ============================================================
 # Tomorrow Plan Summary (6:00pm)
 # ============================================================
@@ -95,10 +94,12 @@ def pre_rush_reminder(
     if switch_3p_time:
         lines.append(f"Switch 3P at {_format_time(switch_3p_time)}")
 
-    lines.extend([
-        "Pre-stage cups",
-        "See printed plan",
-    ])
+    lines.extend(
+        [
+            "Pre-stage cups",
+            "See printed plan",
+        ]
+    )
 
     return "\n".join(lines)
 

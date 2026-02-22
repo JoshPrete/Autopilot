@@ -136,17 +136,13 @@ class TestCalculateItemWorkload:
 
     def test_alt_milk_modifier(self):
         """Oat milk adds +0.5 units (Section 5.2)."""
-        result = calculate_item_workload(
-            "Latte", [{"name": "Oat Milk"}], position_in_order=1
-        )
+        result = calculate_item_workload("Latte", [{"name": "Oat Milk"}], position_in_order=1)
         assert result["workload_units"] == 3.0  # 2.5 + 0.5
         assert "alt_milk" in result["applied_modifiers"]
 
     def test_decaf_modifier(self):
         """Decaf adds +0.3 units (Section 5.2)."""
-        result = calculate_item_workload(
-            "Cappuccino", [{"name": "Decaf"}], position_in_order=1
-        )
+        result = calculate_item_workload("Cappuccino", [{"name": "Decaf"}], position_in_order=1)
         assert result["workload_units"] == 2.8  # 2.5 + 0.3
 
     def test_position_1_multiplier(self):

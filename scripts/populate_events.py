@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 from config.database import engine
@@ -34,6 +35,7 @@ logger = logging.getLogger("autopilot.populate_events")
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -97,25 +99,29 @@ def populate(site_id: str, *, dry_run: bool = False, clear: bool = False) -> int
     # School holidays — one row per date
     for name, start, end in SCHOOL_HOLIDAYS:
         for d in _date_range(start, end):
-            rows.append({
-                "sid": site_id,
-                "name": name,
-                "d": d,
-                "etype": "school_holiday",
-                "recurrence": "annual",
-                "impact": 1.0,
-            })
+            rows.append(
+                {
+                    "sid": site_id,
+                    "name": name,
+                    "d": d,
+                    "etype": "school_holiday",
+                    "recurrence": "annual",
+                    "impact": 1.0,
+                }
+            )
 
     # Public holidays — one row each
     for name, d in PUBLIC_HOLIDAYS:
-        rows.append({
-            "sid": site_id,
-            "name": name,
-            "d": d,
-            "etype": "public_holiday",
-            "recurrence": "annual",
-            "impact": 1.0,
-        })
+        rows.append(
+            {
+                "sid": site_id,
+                "name": name,
+                "d": d,
+                "etype": "public_holiday",
+                "recurrence": "annual",
+                "impact": 1.0,
+            }
+        )
 
     if dry_run:
         logger.info("[DRY RUN] Would insert %d event rows", len(rows))
@@ -125,12 +131,14 @@ def populate(site_id: str, *, dry_run: bool = False, clear: bool = False) -> int
             logger.info("  ... and %d more", len(rows) - 10)
         return len(rows)
 
-    insert_sql = _text("""
+    insert_sql = _text(
+        """
         INSERT INTO special_events
             (site_id, event_name, event_date, event_type, recurrence, historical_impact)
         VALUES
             (:sid, :name, :d, :etype, :recurrence, :impact)
-    """)
+    """
+    )
 
     with engine.connect() as conn:
         for r in rows:
@@ -167,22 +175,30 @@ def main():
     # Verify
     if not args.dry_run:
         with engine.connect() as conn:
-            result = conn.execute(
-                _text("SELECT COUNT(*) AS cnt FROM special_events WHERE site_id = :sid"),
-                {"sid": site_id},
-            ).mappings().first()
+            result = (
+                conn.execute(
+                    _text("SELECT COUNT(*) AS cnt FROM special_events WHERE site_id = :sid"),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
         logger.info("Total rows in special_events: %d", result["cnt"])
 
         # Breakdown by type
         with engine.connect() as conn:
-            rows = conn.execute(
-                _text(
-                    "SELECT event_type, COUNT(*) AS cnt "
-                    "FROM special_events WHERE site_id = :sid "
-                    "GROUP BY event_type ORDER BY event_type"
-                ),
-                {"sid": site_id},
-            ).mappings().all()
+            rows = (
+                conn.execute(
+                    _text(
+                        "SELECT event_type, COUNT(*) AS cnt "
+                        "FROM special_events WHERE site_id = :sid "
+                        "GROUP BY event_type ORDER BY event_type"
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .all()
+            )
         for r in rows:
             logger.info("  %s: %d rows", r["event_type"], r["cnt"])
 

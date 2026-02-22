@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 from config.database import engine
@@ -44,6 +45,7 @@ logger = logging.getLogger("autopilot.rescore")
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -93,6 +95,7 @@ def clear_timeline(site_id: str) -> int:
 
 def main():
     import argparse
+
     p = argparse.ArgumentParser(description="Re-score all orders with updated workload engine")
     p.add_argument("--dry-run", action="store_true", help="Preview without writing to DB")
     p.add_argument("--verbose", "-v", action="store_true")

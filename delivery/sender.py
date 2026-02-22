@@ -64,7 +64,9 @@ def send_sms(to_number: str, message_body: str) -> Optional[str]:
 
         logger.info(
             "SMS sent to %s (SID: %s, %d chars)",
-            to_number, message.sid, len(message_body),
+            to_number,
+            message.sid,
+            len(message_body),
         )
         return message.sid
 
@@ -102,20 +104,24 @@ def send_to_role(
         phone = contact["phone_e164"]
         name = contact["full_name"]
         sid = send_sms(phone, message_body)
-        results.append({
-            "contact_id": contact["contact_id"],
-            "name": name,
-            "phone": phone,
-            "role": role,
-            "message_sid": sid,
-            "delivered": sid is not None,
-            "sent_at": datetime.utcnow().isoformat(),
-        })
+        results.append(
+            {
+                "contact_id": contact["contact_id"],
+                "name": name,
+                "phone": phone,
+                "role": role,
+                "message_sid": sid,
+                "delivered": sid is not None,
+                "sent_at": datetime.utcnow().isoformat(),
+            }
+        )
 
     delivered = sum(1 for r in results if r["delivered"])
     logger.info(
         "Sent to role %s: %d/%d delivered",
-        role, delivered, len(results),
+        role,
+        delivered,
+        len(results),
     )
     return results
 
@@ -128,15 +134,17 @@ def send_to_manager(site_id: str, message_body: str) -> list[dict]:
     # Fallback to settings.MANAGER_PHONE if no contacts found
     if not results and settings.MANAGER_PHONE:
         sid = send_sms(settings.MANAGER_PHONE, message_body)
-        results = [{
-            "contact_id": None,
-            "name": "Manager (fallback)",
-            "phone": settings.MANAGER_PHONE,
-            "role": "MANAGER",
-            "message_sid": sid,
-            "delivered": sid is not None,
-            "sent_at": datetime.utcnow().isoformat(),
-        }]
+        results = [
+            {
+                "contact_id": None,
+                "name": "Manager (fallback)",
+                "phone": settings.MANAGER_PHONE,
+                "role": "MANAGER",
+                "message_sid": sid,
+                "delivered": sid is not None,
+                "sent_at": datetime.utcnow().isoformat(),
+            }
+        ]
 
     return results
 
@@ -220,7 +228,10 @@ def dispatch_recommendations_batch(
 
     logger.info(
         "Batch dispatch: %d sent, %d skipped (not due), %d/%d delivered",
-        sent_count, skipped_count, delivered, len(all_results),
+        sent_count,
+        skipped_count,
+        delivered,
+        len(all_results),
     )
 
     return {
@@ -283,9 +294,7 @@ def send_system_alert(site_id: str, alert_type: str, **kwargs) -> list[dict]:
     site_name = kwargs.get("site_name", "site")
 
     if alert_type == "ingestion_failed":
-        message = sms_prompts.system_alert_ingestion_failed(
-            site_name, kwargs.get("error", "")
-        )
+        message = sms_prompts.system_alert_ingestion_failed(site_name, kwargs.get("error", ""))
     elif alert_type == "prediction_blocked_data_quality":
         message = sms_prompts.system_alert_prediction_blocked(
             site_name=site_name,
@@ -365,9 +374,7 @@ def _build_message(
 # ============================================================
 
 
-def dispatch_intelligence_digest(
-    site_id: str, insights: list[dict]
-) -> list[dict]:
+def dispatch_intelligence_digest(site_id: str, insights: list[dict]) -> list[dict]:
     """Send top insights as a morning SMS digest to manager."""
     if not insights:
         return []

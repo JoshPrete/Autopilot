@@ -93,10 +93,15 @@ def generate_tomorrow_plan(
     sections.append(_header(site_name, date_display, gen_display))
 
     # ── Forecast Conditions ──
-    sections.append(_forecast_conditions(
-        weather, day_name, forecast,
-        staff_scheduled, staff_names,
-    ))
+    sections.append(
+        _forecast_conditions(
+            weather,
+            day_name,
+            forecast,
+            staff_scheduled,
+            staff_names,
+        )
+    )
 
     # ── Yesterday Recap ──
     recap = get_yesterday_recap(site_id, today=forecast_date or date.today())
@@ -110,14 +115,16 @@ def generate_tomorrow_plan(
         state = "S3P_RUSH" if staffing_mode in ("3P", "4P") else "S2P_STANDARD"
         assignments = get_role_assignments(staff_names, state)
 
-        sections.append(_rush_window_section(
-            window_num=i + 1,
-            rush=rush,
-            wally_plan=wally_plan,
-            assignments=assignments,
-            checklist=checklist,
-            staff_names=staff_names,
-        ))
+        sections.append(
+            _rush_window_section(
+                window_num=i + 1,
+                rush=rush,
+                wally_plan=wally_plan,
+                assignments=assignments,
+                checklist=checklist,
+                staff_names=staff_names,
+            )
+        )
 
     # ── Targets ──
     sections.append(_targets_section(total_drinks))
@@ -363,8 +370,7 @@ def generate_tomorrow_plan_html(
 
     # Escape HTML entities
     html_content = (
-        text_plan
-        .replace("&", "&amp;")
+        text_plan.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("═", "=")

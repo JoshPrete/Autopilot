@@ -72,7 +72,11 @@ def _counterfactual(row: dict, staff_count: int) -> dict:
     workload_units = float(row.get("workload_units") or 0.0)
     revenue_cents = int(row.get("revenue_cents") or 0)
     capacity = max(0.1, staff_count * STAFFING_WU_PER_PERSON_TARGET)
-    overload_ratio = 0.0 if workload_units <= 0 else _clamp((workload_units - capacity) / workload_units, 0.0, 1.0)
+    overload_ratio = (
+        0.0
+        if workload_units <= 0
+        else _clamp((workload_units - capacity) / workload_units, 0.0, 1.0)
+    )
 
     queue_risk = round(overload_ratio, 2)
     # Conservative conversion from overload to lost revenue capture in-interval.
@@ -96,7 +100,9 @@ def _counterfactual(row: dict, staff_count: int) -> dict:
         "expected_labor_cents": expected_labor_cents,
         "labor_delta_cents": labor_delta_cents,
         "estimated_net_delta_cents": net_delta_cents,
-        "risk_level": _risk_level(staff_count, workload_units / staff_count if staff_count > 0 else None),
+        "risk_level": _risk_level(
+            staff_count, workload_units / staff_count if staff_count > 0 else None
+        ),
     }
 
 
@@ -215,8 +221,12 @@ def generate_roster_change_plan(
                     "workflow_mode": None,
                     "role_assignments": [],
                     "recommended_shift_count": 0,
-                    "recommended_total_hours": (d.get("summary") or {}).get("recommended_total_hours"),
-                    "estimated_labor_delta_cents": (d.get("summary") or {}).get("estimated_labor_delta_cents"),
+                    "recommended_total_hours": (d.get("summary") or {}).get(
+                        "recommended_total_hours"
+                    ),
+                    "estimated_labor_delta_cents": (d.get("summary") or {}).get(
+                        "estimated_labor_delta_cents"
+                    ),
                     "notes": "No prediction available for this day.",
                 }
             )

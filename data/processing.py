@@ -43,86 +43,94 @@ logger = logging.getLogger("autopilot.processing")
 
 ITEM_CATALOG = {
     # --- Hot drinks (by size) ---
-    "6oz":                "espresso",        # piccolo/cortado size
-    "8oz/small":          "flat_white",      # small milk drink
-    "12oz/medium":        "latte",           # standard milk drink
-    "16oz/large":         "latte",           # large milk drink (+ large modifier)
-
+    "6oz": "espresso",  # piccolo/cortado size
+    "8oz/small": "flat_white",  # small milk drink
+    "12oz/medium": "latte",  # standard milk drink
+    "16oz/large": "latte",  # large milk drink (+ large modifier)
     # --- Iced drinks (by size) ---
-    "12oz/iced small":    "iced_latte",
-    "16oz/iced medium":   "iced_latte",
-    "20oz\\iced large":   "iced_latte",      # note backslash in Square data
-
+    "12oz/iced small": "iced_latte",
+    "16oz/iced medium": "iced_latte",
+    "20oz\\iced large": "iced_latte",  # note backslash in Square data
     # --- Espresso shots ---
-    "4oz/pic, esp, dop":  "espresso",
-
+    "4oz/pic, esp, dop": "espresso",
     # --- Non-coffee drinks ---
-    "babycino":           "babycino",
-    "pupacino":           "babycino",
-
+    "babycino": "babycino",
+    "pupacino": "babycino",
     # --- Food ---
-    "toastie":            "toastie",
-    "butterboy":          "butterboy",
-    "breakfast wrap":     "wrap",
+    "toastie": "toastie",
+    "butterboy": "butterboy",
+    "breakfast wrap": "wrap",
     "ham and cheese croissant": "croissant",
-    "plain croissant":    "croissant",
-    "a sweet muffin":     "muffin",
-    "a savoury muffin":   "muffin",
-    "sweet pastry":       "pastry",
+    "plain croissant": "croissant",
+    "a sweet muffin": "muffin",
+    "a savoury muffin": "muffin",
+    "sweet pastry": "pastry",
     "portugese tart/friand/caramel slice": "tart",
-    "a cookie":           "cookie",
-
+    "a cookie": "cookie",
     # --- Beverages (non-coffee) ---
-    "fiji water":         "water",
-    "fruit juice":        "juice",
-    "kombucha":           "kombucha",
-    "famous soda":        "soda",
-    "black mass":         "soda",
-
+    "fiji water": "water",
+    "fruit juice": "juice",
+    "kombucha": "kombucha",
+    "famous soda": "soda",
+    "black mass": "soda",
     # --- Retail ---
-    "500g beans":         "beans",
-    "1kg beans":          "beans",
-    "250g beans":         "beans",
-    "candle":             "merchandise",
-    "egift card":         "gift_card",
-    "mary clothes":       "merchandise",
-
+    "500g beans": "beans",
+    "1kg beans": "beans",
+    "250g beans": "beans",
+    "candle": "merchandise",
+    "egift card": "gift_card",
+    "mary clothes": "merchandise",
     # --- Legacy drink names (from manual orders / other POS) ---
-    "espresso":           "espresso",
-    "short black":        "espresso",
-    "long black":         "long_black",
-    "americano":          "long_black",
-    "latte":              "latte",
-    "cafe latte":         "latte",
-    "caffe latte":        "latte",
-    "cappuccino":         "cappuccino",
-    "cap":                "cappuccino",
-    "flat white":         "flat_white",
-    "flatwhite":          "flat_white",
-    "mocha":              "mocha",
-    "mochaccino":         "mocha",
-    "hot chocolate":      "mocha",
-    "iced latte":         "iced_latte",
-    "iced coffee":        "iced_latte",
-    "matcha":             "matcha_complex",
-    "chai":               "matcha_complex",
-
+    "espresso": "espresso",
+    "short black": "espresso",
+    "long black": "long_black",
+    "americano": "long_black",
+    "latte": "latte",
+    "cafe latte": "latte",
+    "caffe latte": "latte",
+    "cappuccino": "cappuccino",
+    "cap": "cappuccino",
+    "flat white": "flat_white",
+    "flatwhite": "flat_white",
+    "mocha": "mocha",
+    "mochaccino": "mocha",
+    "hot chocolate": "mocha",
+    "iced latte": "iced_latte",
+    "iced coffee": "iced_latte",
+    "matcha": "matcha_complex",
+    "chai": "matcha_complex",
     # --- Fallback ---
-    "unknown item":       "latte",           # conservative default
+    "unknown item": "latte",  # conservative default
 }
 
 ITEM_CATEGORIES = {
     # Drinks
-    "espresso": "drink", "long_black": "drink", "latte": "drink",
-    "cappuccino": "drink", "flat_white": "drink", "mocha": "drink",
-    "iced_latte": "drink", "matcha_complex": "drink", "babycino": "drink",
+    "espresso": "drink",
+    "long_black": "drink",
+    "latte": "drink",
+    "cappuccino": "drink",
+    "flat_white": "drink",
+    "mocha": "drink",
+    "iced_latte": "drink",
+    "matcha_complex": "drink",
+    "babycino": "drink",
     # Food
-    "toastie": "food", "wrap": "food", "croissant": "food", "butterboy": "food",
-    "muffin": "food", "pastry": "food", "cookie": "food", "tart": "food",
+    "toastie": "food",
+    "wrap": "food",
+    "croissant": "food",
+    "butterboy": "food",
+    "muffin": "food",
+    "pastry": "food",
+    "cookie": "food",
+    "tart": "food",
     # Retail
-    "water": "retail", "juice": "retail", "soda": "retail",
-    "kombucha": "retail", "beans": "retail",
-    "gift_card": "retail", "merchandise": "retail",
+    "water": "retail",
+    "juice": "retail",
+    "soda": "retail",
+    "kombucha": "retail",
+    "beans": "retail",
+    "gift_card": "retail",
+    "merchandise": "retail",
 }
 
 # Score tables by category
@@ -357,11 +365,13 @@ def calculate_order_workload(parsed_order: dict) -> dict:
             if workload.get("category") == "food":
                 food_count += 1
 
-            items_with_workload.append({
-                **li,
-                "effective_position": global_position,
-                "workload": workload,
-            })
+            items_with_workload.append(
+                {
+                    **li,
+                    "effective_position": global_position,
+                    "workload": workload,
+                }
+            )
 
     return {
         **parsed_order,
@@ -416,9 +426,7 @@ def aggregate_timeline(
 
         # Floor to interval boundary
         minute_floor = (closed_at.minute // interval_minutes) * interval_minutes
-        bucket_start = closed_at.replace(
-            minute=minute_floor, second=0, microsecond=0
-        )
+        bucket_start = closed_at.replace(minute=minute_floor, second=0, microsecond=0)
 
         bucket = buckets[bucket_start]
         bucket["workload_units"] += order.get("total_workload_units", 0)
@@ -432,17 +440,20 @@ def aggregate_timeline(
         if data["items_count"] > 0:
             avg_prep = data["total_prep_seconds"] / data["items_count"]
 
-        timeline.append({
-            "interval_start": interval_start,
-            "workload_units": round(data["workload_units"], 2),
-            "orders_count": data["orders_count"],
-            "items_count": data["items_count"],
-            "avg_prep_seconds": round(avg_prep, 1),
-        })
+        timeline.append(
+            {
+                "interval_start": interval_start,
+                "workload_units": round(data["workload_units"], 2),
+                "orders_count": data["orders_count"],
+                "items_count": data["items_count"],
+                "avg_prep_seconds": round(avg_prep, 1),
+            }
+        )
 
     logger.info(
         "Aggregated %d orders into %d timeline intervals",
-        len(processed_orders), len(timeline),
+        len(processed_orders),
+        len(timeline),
     )
     return timeline
 
@@ -592,7 +603,7 @@ def _calculate_confidence(
     # Recent data variance (coefficient of variation)
     if len(recent_values) >= 2 and recent_avg > 0:
         variance = sum((x - recent_avg) ** 2 for x in recent_values) / len(recent_values)
-        cv = (variance ** 0.5) / recent_avg
+        cv = (variance**0.5) / recent_avg
         if cv > 0.3:
             score -= 0.15
         elif cv > 0.15:
@@ -667,7 +678,9 @@ def process_orders_batch(parsed_orders: list[dict]) -> dict:
 
     logger.info(
         "Processed %d orders: %d items, %.1f workload units",
-        summary["orders_count"], summary["items_count"], summary["total_workload_units"],
+        summary["orders_count"],
+        summary["items_count"],
+        summary["total_workload_units"],
     )
 
     return {

@@ -59,9 +59,17 @@ class TestStates:
 
 class TestBaseDrinkScores:
     def test_all_drinks_present(self):
-        expected = ["espresso", "long_black", "latte", "cappuccino",
-                    "flat_white", "mocha", "iced_latte", "matcha_complex",
-                    "babycino"]
+        expected = [
+            "espresso",
+            "long_black",
+            "latte",
+            "cappuccino",
+            "flat_white",
+            "mocha",
+            "iced_latte",
+            "matcha_complex",
+            "babycino",
+        ]
         for drink in expected:
             assert drink in BASE_DRINK_SCORES
 
@@ -109,8 +117,7 @@ class TestBaseFoodScores:
 
 class TestBaseRetailScores:
     def test_all_retail_present(self):
-        expected = ["water", "juice", "soda", "kombucha", "beans",
-                    "gift_card", "merchandise"]
+        expected = ["water", "juice", "soda", "kombucha", "beans", "gift_card", "merchandise"]
         for item in expected:
             assert item in BASE_RETAIL_SCORES
 

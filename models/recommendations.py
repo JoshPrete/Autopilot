@@ -43,7 +43,9 @@ class StateMachine:
 
     def __init__(self, initial_state: str = "S2P_STANDARD"):
         if initial_state not in STATES:
-            raise ValueError(f"Invalid state: {initial_state}. Must be one of {list(STATES.keys())}")
+            raise ValueError(
+                f"Invalid state: {initial_state}. Must be one of {list(STATES.keys())}"
+            )
         self.current_state = initial_state
         self.history: list[dict] = []
 
@@ -78,7 +80,9 @@ class StateMachine:
 
         logger.info(
             "State transition: %s -> %s (reason: %s)",
-            old_state, new_state, reason,
+            old_state,
+            new_state,
+            reason,
         )
         return record
 
@@ -137,108 +141,118 @@ def generate_rush_recommendations(
 
     # 1. PRE_RUSH_REMINDER (T-15 min) -> MANAGER
     reminder_time = rush_start - timedelta(minutes=15)
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="PRE_RUSH_REMINDER",
-        action_timing=reminder_time,
-        owner_role="MANAGER",
-        action_details={
-            "message": (
-                f"Rush in 15 mins. "
-                f"{predicted_drinks} drinks predicted "
-                f"({confidence_label} confidence)."
-            ),
-            "rush_start": rush_start.isoformat(),
-            "rush_end": rush_end.isoformat(),
-            "predicted_drinks": predicted_drinks,
-        },
-    ))
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="PRE_RUSH_REMINDER",
+            action_timing=reminder_time,
+            owner_role="MANAGER",
+            action_details={
+                "message": (
+                    f"Rush in 15 mins. "
+                    f"{predicted_drinks} drinks predicted "
+                    f"({confidence_label} confidence)."
+                ),
+                "rush_start": rush_start.isoformat(),
+                "rush_end": rush_end.isoformat(),
+                "predicted_drinks": predicted_drinks,
+            },
+        )
+    )
 
     # 2. WALLY_START (T-12 min) -> P2
     wally_time = rush_start - timedelta(minutes=12)
     p2_name = staff_names.get("P2", "P2")
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="WALLY_START",
-        action_timing=wally_time,
-        owner_role="P2",
-        action_details={
-            "message": f"{p2_name}: Start Wally cycling",
-            "volume_litres": wally_litres,
-            "split": wally_split,
-            "mode": "CYCLING",
-        },
-    ))
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="WALLY_START",
+            action_timing=wally_time,
+            owner_role="P2",
+            action_details={
+                "message": f"{p2_name}: Start Wally cycling",
+                "volume_litres": wally_litres,
+                "split": wally_split,
+                "mode": "CYCLING",
+            },
+        )
+    )
 
     # 3. SWITCH_TO_3P (T-7 min) -> MANAGER
-    switch_time = rush_start - timedelta(
-        minutes=TRANSITION_2P_TO_3P["lead_time_minutes"]
-    )
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="SWITCH_TO_3P",
-        action_timing=switch_time,
-        owner_role="MANAGER",
-        action_details={
-            "message": "Switch to 3P workflow NOW",
-            "roles": {
-                "P1": {
-                    "name": staff_names.get("P1", "P1"),
-                    "task": "Front / Orders",
+    switch_time = rush_start - timedelta(minutes=TRANSITION_2P_TO_3P["lead_time_minutes"])
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="SWITCH_TO_3P",
+            action_timing=switch_time,
+            owner_role="MANAGER",
+            action_details={
+                "message": "Switch to 3P workflow NOW",
+                "roles": {
+                    "P1": {
+                        "name": staff_names.get("P1", "P1"),
+                        "task": "Front / Orders",
+                    },
+                    "P2": {
+                        "name": staff_names.get("P2", "P2"),
+                        "task": "Shots + Milk (owns Wally)",
+                    },
+                    "P3": {
+                        "name": staff_names.get("P3", "P3"),
+                        "task": "Delivery + Prep",
+                    },
                 },
-                "P2": {
-                    "name": staff_names.get("P2", "P2"),
-                    "task": "Shots + Milk (owns Wally)",
-                },
-                "P3": {
-                    "name": staff_names.get("P3", "P3"),
-                    "task": "Delivery + Prep",
-                },
+                "rush_start": rush_start.isoformat(),
             },
-            "rush_start": rush_start.isoformat(),
-        },
-    ))
+        )
+    )
 
     # 4. P3_PREP (same as 3P switch) -> P3
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="P3_PREP",
-        action_timing=switch_time,
-        owner_role="P3",
-        action_details={
-            "message": f"{staff_names.get('P3', 'P3')}: Pre-stage 30 cups at bar",
-            "cups_to_stage": 30,
-        },
-    ))
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="P3_PREP",
+            action_timing=switch_time,
+            owner_role="P3",
+            action_details={
+                "message": f"{staff_names.get('P3', 'P3')}: Pre-stage 30 cups at bar",
+                "cups_to_stage": 30,
+            },
+        )
+    )
 
     # 5. DELIVERY_PRIORITY (rush start) -> P3
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="DELIVERY_PRIORITY",
-        action_timing=rush_start,
-        owner_role="P3",
-        action_details={
-            "message": "Delivery priority NOW. Deliver as soon as ready.",
-            "rule": "Delivery > Prep",
-        },
-    ))
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="DELIVERY_PRIORITY",
+            action_timing=rush_start,
+            owner_role="P3",
+            action_details={
+                "message": "Delivery priority NOW. Deliver as soon as ready.",
+                "rule": "Delivery > Prep",
+            },
+        )
+    )
 
     # 6. RUSH_END (rush end time) -> MANAGER
-    recommendations.append(_create_recommendation(
-        prediction_id=prediction_id,
-        site_id=site_id,
-        action_type="RUSH_END",
-        action_timing=rush_end,
-        owner_role="MANAGER",
-        action_details={
-            "message": "Rush easing. Return to 2P baseline. P3 can transition out.",
-        },
-    ))
+    recommendations.append(
+        _create_recommendation(
+            prediction_id=prediction_id,
+            site_id=site_id,
+            action_type="RUSH_END",
+            action_timing=rush_end,
+            owner_role="MANAGER",
+            action_details={
+                "message": "Rush easing. Return to 2P baseline. P3 can transition out.",
+            },
+        )
+    )
 
     logger.info(
         "Generated %d recommendations for rush %s-%s (%d drinks)",
@@ -326,44 +340,48 @@ def generate_daily_recommendations(
             forecast_date.year, forecast_date.month, forecast_date.day, 18, 0
         ) - timedelta(days=1)
 
-        all_recs.append(_create_recommendation(
-            prediction_id=prediction_id,
-            site_id=site_id,
-            action_type="TOMORROW_PLAN_SEND",
-            action_timing=plan_send_time,
-            owner_role="MANAGER",
-            action_details={
-                "message": "Tomorrow Plan ready. Print and place on bench.",
-                "total_drinks": prediction.get("total_predicted_drinks", 0),
-                "rush_count": prediction.get("rush_count", 0),
-            },
-        ))
+        all_recs.append(
+            _create_recommendation(
+                prediction_id=prediction_id,
+                site_id=site_id,
+                action_type="TOMORROW_PLAN_SEND",
+                action_timing=plan_send_time,
+                owner_role="MANAGER",
+                action_details={
+                    "message": "Tomorrow Plan ready. Print and place on bench.",
+                    "total_drinks": prediction.get("total_predicted_drinks", 0),
+                    "rush_count": prediction.get("rush_count", 0),
+                },
+            )
+        )
 
     # Add END_OF_DAY_FEEDBACK (3pm) -> MANAGER
     if forecast_date_str:
         forecast_date = date.fromisoformat(forecast_date_str)
-        feedback_time = datetime(
-            forecast_date.year, forecast_date.month, forecast_date.day, 15, 0
-        )
+        feedback_time = datetime(forecast_date.year, forecast_date.month, forecast_date.day, 15, 0)
 
-        all_recs.append(_create_recommendation(
-            prediction_id=prediction_id,
-            site_id=site_id,
-            action_type="END_OF_DAY_FEEDBACK",
-            action_timing=feedback_time,
-            owner_role="MANAGER",
-            action_details={
-                "message": (
-                    "How was today's plan? "
-                    "Reply 2 numbers: Rush timing (1-5), Helpfulness (1-5). "
-                    'Example: "5 4"'
-                ),
-            },
-        ))
+        all_recs.append(
+            _create_recommendation(
+                prediction_id=prediction_id,
+                site_id=site_id,
+                action_type="END_OF_DAY_FEEDBACK",
+                action_timing=feedback_time,
+                owner_role="MANAGER",
+                action_details={
+                    "message": (
+                        "How was today's plan? "
+                        "Reply 2 numbers: Rush timing (1-5), Helpfulness (1-5). "
+                        'Example: "5 4"'
+                    ),
+                },
+            )
+        )
 
     logger.info(
         "Generated %d total recommendations for %s (%d rush windows)",
-        len(all_recs), forecast_date_str, len(rush_windows),
+        len(all_recs),
+        forecast_date_str,
+        len(rush_windows),
     )
 
     return all_recs
@@ -468,10 +486,12 @@ def generate_pre_rush_checklist(rush_window: dict) -> list[str]:
     if restock_items:
         checklist.append(f"Restock: {', '.join(restock_items)}")
 
-    checklist.extend([
-        "Clear dish station",
-        "Brief team (use this sheet)",
-    ])
+    checklist.extend(
+        [
+            "Clear dish station",
+            "Brief team (use this sheet)",
+        ]
+    )
 
     return checklist
 
@@ -508,12 +528,14 @@ def get_role_assignments(
         role_info = ROLES.get(role, {})
         name = staff_names.get(role, role)
 
-        assignments.append({
-            "role": role,
-            "name": name,
-            "primary": role_info.get("primary", ""),
-            "secondary": role_info.get("secondary", ""),
-        })
+        assignments.append(
+            {
+                "role": role,
+                "name": name,
+                "primary": role_info.get("primary", ""),
+                "secondary": role_info.get("secondary", ""),
+            }
+        )
 
     return assignments
 
@@ -541,13 +563,15 @@ def build_wally_plan(rush_windows: list[dict]) -> dict:
         split = rush.get("wally_split", {})
         wally_start = rush.get("wally_start_time", rush["start"])
 
-        batches.append({
-            "batch_number": i + 1,
-            "start_time": wally_start,
-            "volume_litres": volume,
-            "split": split,
-            "rush_window": f"{rush['start']} - {rush['end']}",
-        })
+        batches.append(
+            {
+                "batch_number": i + 1,
+                "start_time": wally_start,
+                "volume_litres": volume,
+                "split": split,
+                "rush_window": f"{rush['start']} - {rush['end']}",
+            }
+        )
         total_litres += volume
 
     # Determine mode based on rush count

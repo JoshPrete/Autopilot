@@ -105,9 +105,7 @@ def update_daily_accuracy(
     # Workload accuracy (if actual provided)
     workload_acc = None
     if actual_workload and actual_workload > 0:
-        workload_acc = calculate_volume_accuracy(
-            int(predicted_workload), int(actual_workload)
-        )
+        workload_acc = calculate_volume_accuracy(int(predicted_workload), int(actual_workload))
 
     # Store accuracy in DB
     if volume_acc is not None:
@@ -140,7 +138,9 @@ def update_daily_accuracy(
 
     logger.info(
         "Accuracy for %s: predicted=%d actual=%d accuracy=%.1f%%",
-        forecast_date, predicted_drinks, actual_drinks,
+        forecast_date,
+        predicted_drinks,
+        actual_drinks,
         volume_acc * 100 if volume_acc else 0,
     )
 
@@ -294,8 +294,5 @@ def get_adoption_metrics(
         "avg_rush_timing_rating": avg_timing,
         "avg_helpfulness_rating": avg_helpful,
         "ratings_count": int(row[2]) if row else 0,
-        "meets_target": (
-            stats["adoption_rate"] is not None
-            and stats["adoption_rate"] >= 0.60
-        ),
+        "meets_target": (stats["adoption_rate"] is not None and stats["adoption_rate"] >= 0.60),
     }

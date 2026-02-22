@@ -108,8 +108,12 @@ def store_orders_raw(site_id: str, parsed_orders: list[dict]) -> int:
 
         conn.commit()
 
-    logger.info("Stored %d/%d orders (skipped %d duplicates)",
-                inserted, len(parsed_orders), len(parsed_orders) - inserted)
+    logger.info(
+        "Stored %d/%d orders (skipped %d duplicates)",
+        inserted,
+        len(parsed_orders),
+        len(parsed_orders) - inserted,
+    )
     return inserted
 
 
@@ -268,9 +272,7 @@ def get_recent_pattern(
         )
         values = [float(row[0]) for row in result]
 
-    logger.debug(
-        "Recent pattern: dow=%d hour=%d -> %d values", day_of_week, hour, len(values)
-    )
+    logger.debug("Recent pattern: dow=%d hour=%d -> %d values", day_of_week, hour, len(values))
     return values
 
 
@@ -348,8 +350,7 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
     """
     cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
 
-    day_names = ["Sunday", "Monday", "Tuesday", "Wednesday",
-                 "Thursday", "Friday", "Saturday"]
+    day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
     with engine.connect() as conn:
         has_flags = bool(
@@ -357,10 +358,7 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
                 _text("SELECT to_regclass('public.data_quality_flags') IS NOT NULL")
             ).scalar()
         )
-        where_clause = (
-            "WHERE site_id = :sid "
-            "AND interval_start >= :cutoff "
-        )
+        where_clause = "WHERE site_id = :sid " "AND interval_start >= :cutoff "
         if has_flags:
             where_clause += (
                 "AND DATE(interval_start) NOT IN ("
@@ -385,6 +383,7 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
     if not rows:
         logger.info("No DoW data, returning defaults")
         from config.constants import DOW_PATTERN_DEFAULT
+
         return DOW_PATTERN_DEFAULT
 
     # Calculate weekly average across all days
@@ -396,6 +395,7 @@ def get_dow_pattern(site_id: str, weeks_back: int = 12) -> dict[str, float]:
             pattern[day_name] = round(rows[dow_num] / weekly_avg, 2)
         else:
             from config.constants import DOW_PATTERN_DEFAULT
+
             pattern[day_name] = DOW_PATTERN_DEFAULT.get(day_name, 1.0)
 
     logger.debug("DoW pattern: %s", pattern)
@@ -444,9 +444,17 @@ def store_prediction(site_id: str, forecast_date: date, prediction: dict) -> str
     Returns the prediction_id.
     """
     forecast_data = {
-        k: v for k, v in prediction.items()
-        if k not in ("recent_avg", "yoy_avg", "dow_factor", "event_multiplier",
-                      "base_prediction", "confidence")
+        k: v
+        for k, v in prediction.items()
+        if k
+        not in (
+            "recent_avg",
+            "yoy_avg",
+            "dow_factor",
+            "event_multiplier",
+            "base_prediction",
+            "confidence",
+        )
     }
 
     with engine.connect() as conn:
@@ -590,24 +598,29 @@ def store_recommendation(
 def get_recommendation(site_id: str, rec_id: str) -> Optional[dict]:
     """Get a recommendation by rec_id scoped to site."""
     with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                "SELECT rec_id, prediction_id, site_id, action_type, action_timing, "
-                "owner_role, action_details, adopted, outcome_data, created_at "
-                "FROM recommendations "
-                "WHERE site_id = :sid AND rec_id = :rid"
-            ),
-            {"sid": site_id, "rid": rec_id},
-        ).mappings().first()
+        row = (
+            conn.execute(
+                _text(
+                    "SELECT rec_id, prediction_id, site_id, action_type, action_timing, "
+                    "owner_role, action_details, adopted, outcome_data, created_at "
+                    "FROM recommendations "
+                    "WHERE site_id = :sid AND rec_id = :rid"
+                ),
+                {"sid": site_id, "rid": rec_id},
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
 
 def _profitability_window_metrics(site_id: str, start_date: date, end_date: date) -> dict:
     """Aggregate KPI metrics from daily_profitability for a date window."""
     with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                """
+        row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) AS days_count,
                     AVG(labor_pct) AS avg_labor_pct,
@@ -618,13 +631,18 @@ def _profitability_window_metrics(site_id: str, start_date: date, end_date: date
                 WHERE site_id = :sid
                   AND profit_date BETWEEN :s AND :e
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .first()
+        )
 
     return {
         "days_count": int((row or {}).get("days_count") or 0),
-        "avg_labor_pct": float(row["avg_labor_pct"]) if row and row.get("avg_labor_pct") is not None else None,
+        "avg_labor_pct": (
+            float(row["avg_labor_pct"]) if row and row.get("avg_labor_pct") is not None else None
+        ),
         "avg_rev_per_labor_hour": (
             float(row["avg_rev_per_labor_hour"])
             if row and row.get("avg_rev_per_labor_hour") is not None
@@ -648,22 +666,27 @@ def compute_recommendation_realized_impact(
     Compare KPI change 7 days before vs after adoption date and persist outcome_data.
     """
     with engine.connect() as conn:
-        rec = conn.execute(
-            _text(
-                """
+        rec = (
+            conn.execute(
+                _text(
+                    """
                 SELECT rec_id, action_type, action_timing, outcome_data
                 FROM recommendations
                 WHERE site_id = :sid AND rec_id = :rid
                 """
-            ),
-            {"sid": site_id, "rid": rec_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "rid": rec_id},
+            )
+            .mappings()
+            .first()
+        )
         if not rec:
             return None
 
-        adoption = conn.execute(
-            _text(
-                """
+        adoption = (
+            conn.execute(
+                _text(
+                    """
                 SELECT log_date
                 FROM adoption_logs
                 WHERE site_id = :sid
@@ -672,9 +695,12 @@ def compute_recommendation_realized_impact(
                 ORDER BY log_date DESC
                 LIMIT 1
                 """
-            ),
-            {"sid": site_id, "rid": rec_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "rid": rec_id},
+            )
+            .mappings()
+            .first()
+        )
         if not adoption:
             return None
 
@@ -695,15 +721,23 @@ def compute_recommendation_realized_impact(
     if before["avg_rev_per_labor_hour"] and after["avg_rev_per_labor_hour"]:
         if before["avg_rev_per_labor_hour"] > 0:
             rev_per_labor_hour_delta_pct = round(
-                ((after["avg_rev_per_labor_hour"] - before["avg_rev_per_labor_hour"]) / before["avg_rev_per_labor_hour"]) * 100,
+                (
+                    (after["avg_rev_per_labor_hour"] - before["avg_rev_per_labor_hour"])
+                    / before["avg_rev_per_labor_hour"]
+                )
+                * 100,
                 2,
             )
 
     avg_daily_net_profit_delta_cents = None
     if before["avg_net_profit_cents"] is not None and after["avg_net_profit_cents"] is not None:
-        avg_daily_net_profit_delta_cents = round(after["avg_net_profit_cents"] - before["avg_net_profit_cents"])
+        avg_daily_net_profit_delta_cents = round(
+            after["avg_net_profit_cents"] - before["avg_net_profit_cents"]
+        )
 
-    weekly_net_profit_delta_cents = after["total_net_profit_cents"] - before["total_net_profit_cents"]
+    weekly_net_profit_delta_cents = (
+        after["total_net_profit_cents"] - before["total_net_profit_cents"]
+    )
 
     realized = {
         "anchor_date": anchor.isoformat(),
@@ -757,9 +791,10 @@ def backfill_realized_impacts(
 ) -> dict:
     """Compute/persist realized impact for adopted recommendations missing it."""
     with engine.connect() as conn:
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     r.rec_id,
                     MAX(r.created_at) AS latest_created_at
@@ -776,9 +811,12 @@ def backfill_realized_impacts(
                 ORDER BY latest_created_at DESC
                 LIMIT :lim
                 """
-            ),
-            {"sid": site_id, "days": lookback_days, "lim": limit},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "days": lookback_days, "lim": limit},
+            )
+            .mappings()
+            .all()
+        )
 
     updated = 0
     for row in rows:
@@ -816,9 +854,10 @@ def recommendation_exists_for_action_key(
 def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 90) -> dict:
     """Summarize adoption outcomes for a recommendation action_type."""
     with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                """
+        row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) FILTER (WHERE al.adopted = TRUE) AS adopted_count,
                     COUNT(*) AS total_count,
@@ -838,9 +877,12 @@ def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 
                   AND r.action_type = :atype
                   AND al.log_date >= (CURRENT_DATE - (:days * INTERVAL '1 day'))
                 """
-            ),
-            {"sid": site_id, "atype": action_type, "days": days},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "atype": action_type, "days": days},
+            )
+            .mappings()
+            .first()
+        )
 
     adopted = int((row or {}).get("adopted_count") or 0)
     total = int((row or {}).get("total_count") or 0)
@@ -855,14 +897,10 @@ def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 
         "adoption_rate": round(adopted / total, 3) if total > 0 else None,
         "helpfulness_avg": round(float(helpfulness), 2) if helpfulness is not None else None,
         "avg_realized_weekly_profit_delta_cents": (
-            round(float(avg_realized_weekly))
-            if avg_realized_weekly is not None
-            else None
+            round(float(avg_realized_weekly)) if avg_realized_weekly is not None else None
         ),
         "avg_realized_daily_net_profit_delta_cents": (
-            round(float(avg_realized_daily))
-            if avg_realized_daily is not None
-            else None
+            round(float(avg_realized_daily)) if avg_realized_daily is not None else None
         ),
     }
 
@@ -1088,7 +1126,8 @@ def store_daily_sales(site_id: str, sale_date: date, summary: dict, source: str 
 
     with engine.connect() as conn:
         conn.execute(
-            _text("""
+            _text(
+                """
                 INSERT INTO daily_sales_history
                     (site_id, sale_date, gross_sales_cents, net_sales_cents,
                      product_sales_cents, total_collected_cents,
@@ -1105,7 +1144,8 @@ def store_daily_sales(site_id: str, sale_date: date, summary: dict, source: str 
                     items_estimated = EXCLUDED.items_estimated,
                     source = EXCLUDED.source,
                     imported_at = NOW()
-            """),
+            """
+            ),
             {
                 "sid": site_id,
                 "sale_date": sale_date,
@@ -1120,23 +1160,23 @@ def store_daily_sales(site_id: str, sale_date: date, summary: dict, source: str 
         )
         conn.commit()
 
-    logger.info("Stored daily sales for %s: $%.2f, %d items (source=%s)",
-                sale_date, total_revenue / 100 if total_revenue else 0,
-                items_count, source)
+    logger.info(
+        "Stored daily sales for %s: $%.2f, %d items (source=%s)",
+        sale_date,
+        total_revenue / 100 if total_revenue else 0,
+        items_count,
+        source,
+    )
 
 
 def _ensure_daily_sales_xero_columns(conn) -> None:
     """Backwards-safe migration: add Xero revenue cross-check columns."""
     conn.execute(
-        _text(
-            "ALTER TABLE daily_sales_history "
-            "ADD COLUMN IF NOT EXISTS xero_revenue_cents INT"
-        )
+        _text("ALTER TABLE daily_sales_history " "ADD COLUMN IF NOT EXISTS xero_revenue_cents INT")
     )
     conn.execute(
         _text(
-            "ALTER TABLE daily_sales_history "
-            "ADD COLUMN IF NOT EXISTS xero_synced_at TIMESTAMP"
+            "ALTER TABLE daily_sales_history " "ADD COLUMN IF NOT EXISTS xero_synced_at TIMESTAMP"
         )
     )
 
@@ -1153,7 +1193,8 @@ def store_xero_daily_revenue(site_id: str, sale_date: date, xero_revenue_cents: 
     with engine.connect() as conn:
         _ensure_daily_sales_xero_columns(conn)
         conn.execute(
-            _text("""
+            _text(
+                """
                 INSERT INTO daily_sales_history
                     (site_id, sale_date, xero_revenue_cents, xero_synced_at, source)
                 VALUES
@@ -1161,7 +1202,8 @@ def store_xero_daily_revenue(site_id: str, sale_date: date, xero_revenue_cents: 
                 ON CONFLICT (site_id, sale_date) DO UPDATE SET
                     xero_revenue_cents = :xero_rev,
                     xero_synced_at = NOW()
-            """),
+            """
+            ),
             {"sid": site_id, "sale_date": sale_date, "xero_rev": xero_revenue_cents},
         )
         conn.commit()
@@ -1200,7 +1242,9 @@ def store_daily_pipeline(site_id: str, pipeline_result: dict) -> dict:
 
     logger.info(
         "Daily pipeline storage complete: %d orders, %d items, %d intervals",
-        orders_stored, items_stored, timeline_stored,
+        orders_stored,
+        items_stored,
+        timeline_stored,
     )
     return result
 
@@ -1209,8 +1253,10 @@ def store_daily_pipeline(site_id: str, pipeline_result: dict) -> dict:
 # Helper
 # ============================================================
 
+
 class _JSONEncoder(json.JSONEncoder):
     """Handle UUID and date/datetime objects in JSON serialization."""
+
     def default(self, o):
         if isinstance(o, _uuid.UUID):
             return str(o)
@@ -1230,20 +1276,28 @@ def get_avg_workload_per_drink(site_id: str, weeks_back: int = 6) -> float:
     cutoff = datetime.utcnow() - timedelta(weeks=weeks_back)
 
     with engine.connect() as conn:
-        result = conn.execute(
-            _text("""
+        result = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     SUM(wt.workload_units) AS total_wu,
                     SUM(wt.items_count) AS total_items
                 FROM workload_timeline wt
                 WHERE wt.site_id = :sid
                 AND wt.interval_start >= :cutoff
-            """),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .first()
+        )
 
-        drink_result = conn.execute(
-            _text("""
+        drink_result = (
+            conn.execute(
+                _text(
+                    """
                 SELECT COUNT(*) AS drink_count
                 FROM order_items oi
                 JOIN orders_raw o ON oi.order_id = o.order_id
@@ -1258,9 +1312,13 @@ def get_avg_workload_per_drink(site_id: str, weeks_back: int = 6) -> float:
                     '500g Beans', '1kg Beans', '250g Beans',
                     'Candle', 'eGift Card', 'Mary Clothes'
                 )
-            """),
-            {"sid": site_id, "cutoff": cutoff},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "cutoff": cutoff},
+            )
+            .mappings()
+            .first()
+        )
 
     total_wu = float(result["total_wu"]) if result and result["total_wu"] else 0
     drink_count = int(drink_result["drink_count"]) if drink_result else 0
@@ -1389,7 +1447,8 @@ def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> 
     """
     with engine.connect() as conn:
         result = conn.execute(
-            _text("""
+            _text(
+                """
                 SELECT
                     dr.shift_date AS the_date,
                     COUNT(DISTINCT dr.employee_name) FILTER (WHERE dr.employee_name IS NOT NULL) AS staff_on,
@@ -1413,7 +1472,8 @@ def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> 
                 AND dr.shift_date BETWEEN :s AND :e
                 GROUP BY dr.shift_date, w.total_items, w.total_workload
                 ORDER BY dr.shift_date
-            """),
+            """
+            ),
             {"sid": site_id, "s": start_date, "e": end_date},
         )
         return [
@@ -1424,7 +1484,9 @@ def get_staffing_vs_workload(site_id: str, start_date: date, end_date: date) -> 
                 "labour_cost": float(row["labour_cost"]),
                 "total_drinks": int(row["total_items"]) if row["total_items"] else None,
                 "total_workload": float(row["total_workload"]) if row["total_workload"] else None,
-                "drinks_per_staff": float(row["drinks_per_staff"]) if row["drinks_per_staff"] else None,
+                "drinks_per_staff": (
+                    float(row["drinks_per_staff"]) if row["drinks_per_staff"] else None
+                ),
             }
             for row in result.mappings()
         ]
@@ -1491,7 +1553,11 @@ def get_staffing_variance_intervals(site_id: str, target_date: date) -> dict:
         workload_units = float(row["workload_units"] or 0.0)
         items_count = int(row["items_count"] or 0)
         staff_on = int(row["staff_on"] or 0)
-        expected_staff = int(math.ceil(workload_units / STAFFING_WU_PER_PERSON_TARGET)) if workload_units > 0 else 0
+        expected_staff = (
+            int(math.ceil(workload_units / STAFFING_WU_PER_PERSON_TARGET))
+            if workload_units > 0
+            else 0
+        )
         workload_per_staff = round(workload_units / staff_on, 2) if staff_on > 0 else None
 
         if staff_on == 0 and workload_units > 0:
@@ -1588,9 +1654,10 @@ def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
             {"sid": site_id, "d": target_date},
         ).mappings()
 
-        deputy_totals = conn.execute(
-            _text(
-                """
+        deputy_totals = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) AS shifts_count,
                     COALESCE(SUM(total_hours), 0) AS total_hours,
@@ -1599,9 +1666,12 @@ def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
                 WHERE site_id = :sid
                   AND shift_date = :d
                 """
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
     trade_by_bucket = {}
     for row in trade_rows:
@@ -1652,8 +1722,12 @@ def get_daily_efficiency_snapshot(site_id: str, target_date: date) -> dict:
     total_items = sum(r.get("items_count", 0) or 0 for r in enriched)
     total_workload = round(sum(r.get("workload_units", 0.0) or 0.0 for r in enriched), 2)
     total_staff_hours = float((deputy_totals or {}).get("total_hours") or 0.0)
-    total_labor_cost_cents = round(float((deputy_totals or {}).get("total_cost_dollars") or 0.0) * 100)
-    labor_pct = round((total_labor_cost_cents / total_revenue) * 100, 2) if total_revenue > 0 else None
+    total_labor_cost_cents = round(
+        float((deputy_totals or {}).get("total_cost_dollars") or 0.0) * 100
+    )
+    labor_pct = (
+        round((total_labor_cost_cents / total_revenue) * 100, 2) if total_revenue > 0 else None
+    )
     rev_per_labor_hour = round(total_revenue / total_staff_hours) if total_staff_hours > 0 else None
 
     return {
@@ -1719,9 +1793,10 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
 
     with engine.connect() as conn:
         # 1. Per-interval: workload + per-staff details (name, rate) for true cost calc
-        interval_rows = conn.execute(
-            _text(
-                """
+        interval_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     wt.interval_start,
                     DATE(wt.interval_start) AS day,
@@ -1763,16 +1838,20 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                   AND wt.interval_start < :e ::date + interval '1 day'
                 ORDER BY wt.interval_start
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date, "owner_name": OWNER_DEPUTY_NAME},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date, "owner_name": OWNER_DEPUTY_NAME},
+            )
+            .mappings()
+            .all()
+        )
 
         # 2a. Revenue from daily_sales_history (may include Xero cross-check columns).
         try:
             _ensure_daily_sales_xero_columns(conn)
-            history_rows = conn.execute(
-                _text(
-                    """
+            history_rows = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         sale_date AS day,
                         gross_sales_cents,
@@ -1783,18 +1862,22 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                       AND sale_date >= :s
                       AND sale_date <= :e
                     """
-                ),
-                {"sid": site_id, "s": start_date, "e": end_date},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "s": start_date, "e": end_date},
+                )
+                .mappings()
+                .all()
+            )
         except Exception as e:
             try:
                 conn.rollback()
             except Exception:
                 pass
             logger.warning("daily_sales_history xero columns unavailable (non-fatal): %s", e)
-            history_rows = conn.execute(
-                _text(
-                    """
+            history_rows = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         sale_date AS day,
                         gross_sales_cents,
@@ -1805,14 +1888,18 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                       AND sale_date >= :s
                       AND sale_date <= :e
                     """
-                ),
-                {"sid": site_id, "s": start_date, "e": end_date},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "s": start_date, "e": end_date},
+                )
+                .mappings()
+                .all()
+            )
 
         # 2b. Revenue from orders_raw as fallback
-        orders_raw_rows = conn.execute(
-            _text(
-                """
+        orders_raw_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     DATE(closed_at) AS day,
                     COUNT(*) AS order_count,
@@ -1824,14 +1911,18 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                   AND DATE(closed_at) <= :e
                 GROUP BY DATE(closed_at)
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .all()
+        )
 
         # 3. Per-day cheapest senior & junior rates (for min viable cost)
-        rate_rows = conn.execute(
-            _text(
-                """
+        rate_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     shift_date,
                     cost_dollars / NULLIF(total_hours, 0) AS hourly_rate
@@ -1841,9 +1932,12 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
                   AND total_hours > 0 AND cost_dollars > 0
                 ORDER BY shift_date
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .all()
+        )
 
     # Build daily revenue lookup — ALL figures ex-GST (true cash position).
     # GST is a pass-through to the ATO, not real revenue.
@@ -1921,6 +2015,7 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             )
         elif min_staff > 0:
             from config.constants import LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
+
             min_cost_cents = min_staff * LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS
         else:
             min_cost_cents = 0
@@ -1962,23 +2057,27 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
             day_name = "Unknown"
         # efficiency_score: capped at 1.0 (1.0 = no overstaffing waste)
         # raw_ratio > 1.0 means understaffed (min > actual)
-        raw_ratio = d["min_labor_cents"] / d["actual_labor_cents"] if d["actual_labor_cents"] > 0 else 1.0
+        raw_ratio = (
+            d["min_labor_cents"] / d["actual_labor_cents"] if d["actual_labor_cents"] > 0 else 1.0
+        )
         eff = min(1.0, round(raw_ratio, 4))
-        by_day.append({
-            "date": day_str,
-            "day_name": day_name,
-            "dow": dow,
-            "actual_labor_cents": d["actual_labor_cents"],
-            "min_labor_cents": d["min_labor_cents"],
-            "excess_labor_cents": d["excess_labor_cents"],
-            "deficit_labor_cents": d["deficit_labor_cents"],
-            "efficiency_score": round(eff, 4),
-            "total_revenue_cents": revenue_by_day.get(day_str, 0),
-            "revenue_source": revenue_source_by_day.get(day_str, "none"),
-            "intervals": d["intervals"],
-            "overstaffed_intervals": d["overstaffed_intervals"],
-            "understaffed_intervals": d["understaffed_intervals"],
-        })
+        by_day.append(
+            {
+                "date": day_str,
+                "day_name": day_name,
+                "dow": dow,
+                "actual_labor_cents": d["actual_labor_cents"],
+                "min_labor_cents": d["min_labor_cents"],
+                "excess_labor_cents": d["excess_labor_cents"],
+                "deficit_labor_cents": d["deficit_labor_cents"],
+                "efficiency_score": round(eff, 4),
+                "total_revenue_cents": revenue_by_day.get(day_str, 0),
+                "revenue_source": revenue_source_by_day.get(day_str, "none"),
+                "intervals": d["intervals"],
+                "overstaffed_intervals": d["overstaffed_intervals"],
+                "understaffed_intervals": d["understaffed_intervals"],
+            }
+        )
 
     # Aggregate by day-of-week — dollar-weighted efficiency
     dow_agg: dict[int, dict] = {}
@@ -1986,9 +2085,12 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
         dow = entry["dow"]
         if dow not in dow_agg:
             dow_agg[dow] = {
-                "total_actual": 0, "total_min": 0,
-                "total_excess": 0, "total_deficit": 0,
-                "days": 0, "day_name": entry["day_name"],
+                "total_actual": 0,
+                "total_min": 0,
+                "total_excess": 0,
+                "total_deficit": 0,
+                "days": 0,
+                "day_name": entry["day_name"],
             }
         a = dow_agg[dow]
         a["total_actual"] += entry["actual_labor_cents"]
@@ -2002,15 +2104,19 @@ def get_efficiency_gap_range(site_id: str, start_date: date, end_date: date) -> 
         a = dow_agg[dow]
         n = a["days"]
         # Dollar-weighted efficiency: total_min / total_actual across all days for this DOW
-        weighted_eff = min(1.0, round(a["total_min"] / a["total_actual"], 4)) if a["total_actual"] > 0 else 1.0
-        by_dow.append({
-            "dow": dow,
-            "day_name": a["day_name"],
-            "sample_days": n,
-            "avg_excess_labor_cents": round(a["total_excess"] / n) if n else 0,
-            "avg_deficit_labor_cents": round(a["total_deficit"] / n) if n else 0,
-            "avg_efficiency_score": weighted_eff,
-        })
+        weighted_eff = (
+            min(1.0, round(a["total_min"] / a["total_actual"], 4)) if a["total_actual"] > 0 else 1.0
+        )
+        by_dow.append(
+            {
+                "dow": dow,
+                "day_name": a["day_name"],
+                "sample_days": n,
+                "avg_excess_labor_cents": round(a["total_excess"] / n) if n else 0,
+                "avg_deficit_labor_cents": round(a["total_deficit"] / n) if n else 0,
+                "avg_efficiency_score": weighted_eff,
+            }
+        )
 
     # Totals
     total_actual = sum(d["actual_labor_cents"] for d in by_day)
@@ -2078,10 +2184,7 @@ def get_item_costs(site_id: str) -> dict[str, int]:
     """Return {score_key: cost_cents} for a site."""
     with engine.connect() as conn:
         result = conn.execute(
-            _text(
-                "SELECT score_key, cost_cents FROM item_costs "
-                "WHERE site_id = :sid"
-            ),
+            _text("SELECT score_key, cost_cents FROM item_costs " "WHERE site_id = :sid"),
             {"sid": site_id},
         )
         return {row[0]: int(row[1]) for row in result}
@@ -2158,18 +2261,22 @@ def get_inventory_item_by_score_key(site_id: str, score_key: str) -> Optional[di
         return None
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                _text(
-                    """
+            row = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT inventory_item_id, site_id, item_name, score_key, unit,
                            reorder_point, par_level, lead_time_days, active
                     FROM inventory_items
                     WHERE site_id = :sid AND score_key = :sk
                     LIMIT 1
                     """
-                ),
-                {"sid": site_id, "sk": score_key},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id, "sk": score_key},
+                )
+                .mappings()
+                .first()
+            )
         return dict(row) if row else None
     except Exception as e:
         logger.warning("get_inventory_item_by_score_key unavailable (non-fatal): %s", e)
@@ -2180,9 +2287,10 @@ def list_inventory_items(site_id: str, active_only: bool = True) -> list[dict]:
     """List inventory items with latest physical count snapshot."""
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                _text(
-                    """
+            rows = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         ii.inventory_item_id,
                         ii.item_name,
@@ -2209,9 +2317,12 @@ def list_inventory_items(site_id: str, active_only: bool = True) -> list[dict]:
                       AND (:active_only = FALSE OR ii.active = TRUE)
                     ORDER BY ii.item_name
                     """
-                ),
-                {"sid": site_id, "active_only": active_only},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "active_only": active_only},
+                )
+                .mappings()
+                .all()
+            )
 
         out = []
         for r in rows:
@@ -2229,9 +2340,7 @@ def list_inventory_items(site_id: str, active_only: bool = True) -> list[dict]:
                     "unit": r.get("unit") or "units",
                     "reorder_point": float(r.get("reorder_point") or 0),
                     "par_level": (
-                        float(r.get("par_level"))
-                        if r.get("par_level") is not None
-                        else None
+                        float(r.get("par_level")) if r.get("par_level") is not None else None
                     ),
                     "lead_time_days": int(r.get("lead_time_days") or 0),
                     "active": bool(r.get("active")),
@@ -2242,9 +2351,7 @@ def list_inventory_items(site_id: str, active_only: bool = True) -> list[dict]:
                         if r.get("quantity_on_hand") is not None
                         else None
                     ),
-                    "last_counted_at": (
-                        str(r.get("counted_at")) if r.get("counted_at") else None
-                    ),
+                    "last_counted_at": (str(r.get("counted_at")) if r.get("counted_at") else None),
                 }
             )
         return out
@@ -2297,11 +2404,7 @@ def store_inventory_count(
 def _normalize_terms(raw_terms: str) -> str:
     if not raw_terms:
         return ""
-    terms = [
-        t.strip().lower()
-        for t in str(raw_terms).split(",")
-        if t and t.strip()
-    ]
+    terms = [t.strip().lower() for t in str(raw_terms).split(",") if t and t.strip()]
     return ",".join(terms)
 
 
@@ -2327,9 +2430,10 @@ def upsert_inventory_usage_rule(
     exc_norm = _normalize_terms(excluded_modifier_terms)
 
     with engine.connect() as conn:
-        existing = conn.execute(
-            _text(
-                """
+        existing = (
+            conn.execute(
+                _text(
+                    """
                 SELECT rule_id
                 FROM inventory_usage_rules
                 WHERE site_id = :sid
@@ -2339,15 +2443,18 @@ def upsert_inventory_usage_rule(
                   AND COALESCE(LOWER(excluded_modifier_terms), '') = :exc
                 LIMIT 1
                 """
-            ),
-            {
-                "sid": site_id,
-                "iid": inventory_item_id,
-                "trigger": trigger_norm,
-                "req": req_norm,
-                "exc": exc_norm,
-            },
-        ).mappings().first()
+                ),
+                {
+                    "sid": site_id,
+                    "iid": inventory_item_id,
+                    "trigger": trigger_norm,
+                    "req": req_norm,
+                    "exc": exc_norm,
+                },
+            )
+            .mappings()
+            .first()
+        )
 
         if existing:
             rule_id = str(existing["rule_id"])
@@ -2403,9 +2510,10 @@ def list_inventory_usage_rules(site_id: str, active_only: bool = True) -> list[d
     """List inventory consumption rules with target item names."""
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                _text(
-                    """
+            rows = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         r.rule_id,
                         r.inventory_item_id,
@@ -2426,9 +2534,12 @@ def list_inventory_usage_rules(site_id: str, active_only: bool = True) -> list[d
                       AND (:active_only = FALSE OR r.active = TRUE)
                     ORDER BY r.priority ASC, r.trigger_item_name ASC
                     """
-                ),
-                {"sid": site_id, "active_only": active_only},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "active_only": active_only},
+                )
+                .mappings()
+                .all()
+            )
 
         return [
             {
@@ -2472,9 +2583,10 @@ def store_inventory_receipt(
     try:
         with engine.connect() as conn:
             # Try insert; if already present, return existing id.
-            inserted = conn.execute(
-                _text(
-                    """
+            inserted = (
+                conn.execute(
+                    _text(
+                        """
                     INSERT INTO inventory_receipts
                         (site_id, inventory_item_id, received_at, quantity_units,
                          unit_cost_cents, supplier_name, source, external_ref, raw_line_description)
@@ -2483,35 +2595,42 @@ def store_inventory_receipt(
                     ON CONFLICT (site_id, external_ref) DO NOTHING
                     RETURNING receipt_id
                     """
-                ),
-                {
-                    "sid": site_id,
-                    "iid": inventory_item_id,
-                    "ra": received_at or datetime.utcnow(),
-                    "qty": max(0.0, float(quantity_units or 0)),
-                    "cost": int(unit_cost_cents) if unit_cost_cents is not None else None,
-                    "supplier": supplier_name,
-                    "source": (source or "xero").strip() or "xero",
-                    "eref": external_ref,
-                    "raw": raw_line_description,
-                },
-            ).mappings().first()
+                    ),
+                    {
+                        "sid": site_id,
+                        "iid": inventory_item_id,
+                        "ra": received_at or datetime.utcnow(),
+                        "qty": max(0.0, float(quantity_units or 0)),
+                        "cost": int(unit_cost_cents) if unit_cost_cents is not None else None,
+                        "supplier": supplier_name,
+                        "source": (source or "xero").strip() or "xero",
+                        "eref": external_ref,
+                        "raw": raw_line_description,
+                    },
+                )
+                .mappings()
+                .first()
+            )
 
             if inserted:
                 conn.commit()
                 return str(inserted["receipt_id"])
 
-            existing = conn.execute(
-                _text(
-                    """
+            existing = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT receipt_id
                     FROM inventory_receipts
                     WHERE site_id = :sid AND external_ref = :eref
                     LIMIT 1
                     """
-                ),
-                {"sid": site_id, "eref": external_ref},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id, "eref": external_ref},
+                )
+                .mappings()
+                .first()
+            )
             conn.commit()
         return str(existing["receipt_id"]) if existing else None
     except Exception as e:
@@ -2611,18 +2730,22 @@ def get_inventory_alerts(
     receipts_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
     try:
         with engine.connect() as conn:
-            receipt_rows = conn.execute(
-                _text(
-                    """
+            receipt_rows = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT inventory_item_id, received_at, quantity_units
                     FROM inventory_receipts
                     WHERE site_id = :sid
                       AND received_at >= :start_at
                       AND received_at <= :end_at
                     """
-                ),
-                {"sid": site_id, "start_at": global_start, "end_at": now},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id, "start_at": global_start, "end_at": now},
+                )
+                .mappings()
+                .all()
+            )
 
         for r in receipt_rows:
             item_id = str(r["inventory_item_id"])
@@ -2649,18 +2772,22 @@ def get_inventory_alerts(
         if rules_by_trigger:
             try:
                 with engine.connect() as conn:
-                    order_rows = conn.execute(
-                        _text(
-                            """
+                    order_rows = (
+                        conn.execute(
+                            _text(
+                                """
                             SELECT item_name, quantity, modifiers, created_at
                             FROM order_items
                             WHERE site_id = :sid
                               AND created_at >= :start_at
                               AND created_at <= :end_at
                             """
-                        ),
-                        {"sid": site_id, "start_at": global_start, "end_at": now},
-                    ).mappings().all()
+                            ),
+                            {"sid": site_id, "start_at": global_start, "end_at": now},
+                        )
+                        .mappings()
+                        .all()
+                    )
             except Exception as e:
                 logger.warning("Inventory usage order query unavailable (non-fatal): %s", e)
                 order_rows = []
@@ -2732,9 +2859,7 @@ def get_inventory_alerts(
             status = "ok"
             severity = "info"
 
-        target_level = (
-            float(par_level) if par_level is not None else max(reorder_point, 0.0)
-        )
+        target_level = float(par_level) if par_level is not None else max(reorder_point, 0.0)
         recommended_reorder_units = (
             max(0.0, target_level - float(effective_on_hand))
             if effective_on_hand is not None and target_level > 0
@@ -2749,20 +2874,14 @@ def get_inventory_alerts(
             "status": status,
             "severity": severity,
             "effective_on_hand": (
-                round(float(effective_on_hand), 3)
-                if effective_on_hand is not None
-                else None
+                round(float(effective_on_hand), 3) if effective_on_hand is not None else None
             ),
-            "last_count_on_hand": (
-                round(float(base_count), 3) if base_count is not None else None
-            ),
+            "last_count_on_hand": (round(float(base_count), 3) if base_count is not None else None),
             "receipts_since_count": round(received_units, 3),
             "consumed_since_count": round(consumed_units, 3),
             "daily_usage_units": round(daily_usage_units, 3),
             "days_remaining": (
-                round(float(days_remaining), 2)
-                if days_remaining is not None
-                else None
+                round(float(days_remaining), 2) if days_remaining is not None else None
             ),
             "reorder_point": reorder_point,
             "par_level": float(par_level) if par_level is not None else None,
@@ -2986,16 +3105,10 @@ def bootstrap_default_inventory_rules(site_id: str) -> dict:
 def _ensure_daily_profitability_quality_columns(conn) -> None:
     """Backwards-safe migration for labor quality metadata columns."""
     conn.execute(
-        _text(
-            "ALTER TABLE daily_profitability "
-            "ADD COLUMN IF NOT EXISTS labor_data_quality TEXT"
-        )
+        _text("ALTER TABLE daily_profitability " "ADD COLUMN IF NOT EXISTS labor_data_quality TEXT")
     )
     conn.execute(
-        _text(
-            "ALTER TABLE daily_profitability "
-            "ADD COLUMN IF NOT EXISTS labor_data_issues JSONB"
-        )
+        _text("ALTER TABLE daily_profitability " "ADD COLUMN IF NOT EXISTS labor_data_issues JSONB")
     )
 
 
@@ -3004,7 +3117,8 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
     with engine.connect() as conn:
         _ensure_daily_profitability_quality_columns(conn)
         conn.execute(
-            _text("""
+            _text(
+                """
                 INSERT INTO daily_profitability
                     (site_id, profit_date, revenue_cents, labor_cost_cents,
                      cogs_cents, gross_profit_cents, net_profit_cents,
@@ -3031,7 +3145,8 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
                     labor_data_quality = EXCLUDED.labor_data_quality,
                     labor_data_issues = EXCLUDED.labor_data_issues,
                     computed_at = NOW()
-            """),
+            """
+            ),
             {
                 "sid": site_id,
                 "pd": profit_date,
@@ -3061,14 +3176,13 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
     )
 
 
-def get_daily_profitability(
-    site_id: str, start_date: date, end_date: date
-) -> list[dict]:
+def get_daily_profitability(site_id: str, start_date: date, end_date: date) -> list[dict]:
     """Retrieve daily P&L records for a date range."""
     with engine.connect() as conn:
         _ensure_daily_profitability_quality_columns(conn)
         result = conn.execute(
-            _text("""
+            _text(
+                """
                 SELECT profit_date, revenue_cents, labor_cost_cents,
                        cogs_cents, gross_profit_cents, net_profit_cents,
                        order_count, item_count, drink_count, labor_hours,
@@ -3077,7 +3191,8 @@ def get_daily_profitability(
                 FROM daily_profitability
                 WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
                 ORDER BY profit_date
-            """),
+            """
+            ),
             {"sid": site_id, "s": start_date, "e": end_date},
         )
         return [
@@ -3109,6 +3224,7 @@ def _json_dumps(obj):
 def _text(sql: str):
     """Create a SQLAlchemy text object for raw SQL execution."""
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -3341,15 +3457,19 @@ def get_item_costs_detailed(site_id: str) -> list[dict]:
 def get_cogs_source_summary(site_id: str) -> dict:
     """Lightweight COGS source aggregation: count and last update per source."""
     with engine.connect() as conn:
-        rows = conn.execute(
-            _text(
-                "SELECT COALESCE(source, 'default') AS src, COUNT(*) AS cnt, "
-                "MAX(updated_at) AS last_updated "
-                "FROM item_costs WHERE site_id = :sid "
-                "GROUP BY COALESCE(source, 'default')"
-            ),
-            {"sid": site_id},
-        ).mappings().all()
+        rows = (
+            conn.execute(
+                _text(
+                    "SELECT COALESCE(source, 'default') AS src, COUNT(*) AS cnt, "
+                    "MAX(updated_at) AS last_updated "
+                    "FROM item_costs WHERE site_id = :sid "
+                    "GROUP BY COALESCE(source, 'default')"
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .all()
+        )
 
     return {
         row["src"]: {
@@ -3368,9 +3488,10 @@ def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
     avg revenue, labor, COGS, net profit, staff count, profit/staff, rev/$labor.
     """
     with engine.connect() as conn:
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     EXTRACT(DOW FROM dp.profit_date)::int AS dow,
                     TRIM(TO_CHAR(dp.profit_date, 'Day')) AS day_name,
@@ -3390,9 +3511,12 @@ def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
                 GROUP BY EXTRACT(DOW FROM dp.profit_date), TRIM(TO_CHAR(dp.profit_date, 'Day'))
                 ORDER BY EXTRACT(DOW FROM dp.profit_date)
                 """
-            ),
-            {"sid": site_id, "days": days},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "days": days},
+            )
+            .mappings()
+            .all()
+        )
 
     by_dow = []
     for r in rows:
@@ -3405,24 +3529,27 @@ def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
         profit_per_staff = round(avg_net / avg_staff) if avg_staff > 0 else None
         rev_per_labor_dollar = round(avg_rev / avg_labor, 2) if avg_labor > 0 else None
 
-        by_dow.append({
-            "dow": int(r["dow"]),
-            "day_name": r["day_name"],
-            "avg_revenue_cents": avg_rev,
-            "avg_labor_cents": avg_labor,
-            "avg_cogs_cents": avg_cogs,
-            "avg_net_profit_cents": avg_net,
-            "avg_staff_count": avg_staff,
-            "profit_per_staff_cents": profit_per_staff,
-            "rev_per_labor_dollar": rev_per_labor_dollar,
-        })
+        by_dow.append(
+            {
+                "dow": int(r["dow"]),
+                "day_name": r["day_name"],
+                "avg_revenue_cents": avg_rev,
+                "avg_labor_cents": avg_labor,
+                "avg_cogs_cents": avg_cogs,
+                "avg_net_profit_cents": avg_net,
+                "avg_staff_count": avg_staff,
+                "profit_per_staff_cents": profit_per_staff,
+                "rev_per_labor_dollar": rev_per_labor_dollar,
+            }
+        )
 
     # Optimal staffing: for each DOW, find staff count that maximizes profit/staff
     optimal_staffing = []
     try:
-        staff_rows = conn.execute(
-            _text(
-                """
+        staff_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     EXTRACT(DOW FROM dp.profit_date)::int AS dow,
                     TRIM(TO_CHAR(dp.profit_date, 'Day')) AS day_name,
@@ -3442,9 +3569,12 @@ def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
                 HAVING COUNT(*) >= 2
                 ORDER BY EXTRACT(DOW FROM dp.profit_date), avg_profit DESC
                 """
-            ),
-            {"sid": site_id, "days": days},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "days": days},
+            )
+            .mappings()
+            .all()
+        )
 
         # For each DOW, pick the staff count with best profit/staff
         seen_dow = set()
@@ -3455,13 +3585,15 @@ def get_profitability_correlations(site_id: str, days: int = 28) -> dict:
             staff_count = int(sr["staff_count"])
             avg_profit = int(float(sr["avg_profit"] or 0))
             if staff_count > 0:
-                optimal_staffing.append({
-                    "dow": dow_val,
-                    "day_name": sr["day_name"],
-                    "optimal_staff": staff_count,
-                    "profit_at_optimal": avg_profit,
-                    "profit_per_staff": round(avg_profit / staff_count),
-                })
+                optimal_staffing.append(
+                    {
+                        "dow": dow_val,
+                        "day_name": sr["day_name"],
+                        "optimal_staff": staff_count,
+                        "profit_at_optimal": avg_profit,
+                        "profit_per_staff": round(avg_profit / staff_count),
+                    }
+                )
                 seen_dow.add(dow_val)
     except Exception:
         logger.warning("Optimal staffing query failed (non-fatal)")
@@ -3569,17 +3701,21 @@ def consume_xero_oauth_state(state: str) -> Optional[str]:
     """
     with engine.connect() as conn:
         _ensure_xero_oauth_states_table(conn)
-        row = conn.execute(
-            _text(
-                """
+        row = (
+            conn.execute(
+                _text(
+                    """
                 DELETE FROM xero_oauth_states
                 WHERE state = :st
                   AND expires_at >= NOW()
                 RETURNING site_id
                 """
-            ),
-            {"st": state},
-        ).mappings().first()
+                ),
+                {"st": state},
+            )
+            .mappings()
+            .first()
+        )
         # Also clear expired states to keep table small.
         conn.execute(
             _text("DELETE FROM xero_oauth_states WHERE expires_at < NOW()"),
@@ -3789,9 +3925,10 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
     row = None
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                _text(
-                    """
+            row = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         COUNT(*) AS days_covered,
                         COALESCE(SUM(income_cents), 0) AS income_cents,
@@ -3806,9 +3943,12 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
                     WHERE site_id = :sid
                       AND fact_date BETWEEN :s AND :e
                     """
-                ),
-                {"sid": site_id, "s": start_date, "e": end_date},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id, "s": start_date, "e": end_date},
+                )
+                .mappings()
+                .first()
+            )
     except Exception as e:
         logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", e)
 
@@ -3829,10 +3969,7 @@ def get_data_freshness(site_id: str) -> Optional[str]:
     """Get the most recent closed_at date from orders_raw."""
     with engine.connect() as conn:
         result = conn.execute(
-            _text(
-                "SELECT MAX(closed_at)::date AS latest "
-                "FROM orders_raw WHERE site_id = :sid"
-            ),
+            _text("SELECT MAX(closed_at)::date AS latest " "FROM orders_raw WHERE site_id = :sid"),
             {"sid": site_id},
         ).scalar()
         return str(result) if result else None
@@ -3918,7 +4055,12 @@ def upsert_data_quality_flag(
                     WHERE flag_id = :fid
                     """
                 ),
-                {"sev": severity, "reason": reason, "meta": _json_dumps(metadata) if metadata else None, "fid": existing},
+                {
+                    "sev": severity,
+                    "reason": reason,
+                    "meta": _json_dumps(metadata) if metadata else None,
+                    "fid": existing,
+                },
             )
             conn.commit()
             return str(existing)
@@ -3991,9 +4133,10 @@ def get_data_quality_flags(
         if not has_flags:
             return []
 
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     flag_id, site_id, flag_date, flag_type, severity, source,
                     reason, metadata, active, created_at, resolved_at
@@ -4005,15 +4148,18 @@ def get_data_quality_flags(
                 ORDER BY flag_date DESC, created_at DESC
                 LIMIT :lim
                 """
-            ),
-            {
-                "sid": site_id,
-                "active_only": active_only,
-                "s": start_date,
-                "e": end_date,
-                "lim": lim,
-            },
-        ).mappings().all()
+                ),
+                {
+                    "sid": site_id,
+                    "active_only": active_only,
+                    "s": start_date,
+                    "e": end_date,
+                    "lim": lim,
+                },
+            )
+            .mappings()
+            .all()
+        )
     return [dict(r) for r in rows]
 
 
@@ -4023,9 +4169,10 @@ def get_day_ingest_diagnostics(site_id: str, target_date: date) -> dict:
     completed orders/revenue/active hours to recent same-weekday history.
     """
     with engine.connect() as conn:
-        day = conn.execute(
-            _text(
-                """
+        day = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) AS total_orders,
                     COUNT(*) FILTER (WHERE state = 'COMPLETED') AS completed_orders,
@@ -4035,13 +4182,17 @@ def get_day_ingest_diagnostics(site_id: str, target_date: date) -> dict:
                 WHERE site_id = :sid
                   AND DATE(closed_at) = :d
                 """
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
-        baseline_rows = conn.execute(
-            _text(
-                """
+        baseline_rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     DATE(closed_at) AS trade_date,
                     COUNT(*) FILTER (WHERE state = 'COMPLETED') AS completed_orders,
@@ -4056,9 +4207,12 @@ def get_day_ingest_diagnostics(site_id: str, target_date: date) -> dict:
                 ORDER BY trade_date DESC
                 LIMIT 8
                 """
-            ),
-            {"sid": site_id, "d": target_date},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "d": target_date},
+            )
+            .mappings()
+            .all()
+        )
 
     day_completed_orders = int((day or {}).get("completed_orders") or 0)
     day_revenue = int((day or {}).get("completed_revenue_cents") or 0)
@@ -4216,14 +4370,17 @@ def store_pipeline_run(
     return str(run_id)
 
 
-def get_recent_pipeline_runs(site_id: str, limit: int = 30, job_name: Optional[str] = None) -> list[dict]:
+def get_recent_pipeline_runs(
+    site_id: str, limit: int = 30, job_name: Optional[str] = None
+) -> list[dict]:
     """Get recent pipeline run rows for operator/debug visibility."""
     lim = max(1, min(limit, 200))
     with engine.connect() as conn:
         _ensure_pipeline_runs_table(conn)
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     run_id, site_id, job_name, status, started_at, finished_at,
                     duration_ms, result_json, error_text, created_at
@@ -4233,9 +4390,12 @@ def get_recent_pipeline_runs(site_id: str, limit: int = 30, job_name: Optional[s
                 ORDER BY started_at DESC
                 LIMIT :lim
                 """
-            ),
-            {"sid": site_id, "job_name": job_name, "lim": lim},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "job_name": job_name, "lim": lim},
+            )
+            .mappings()
+            .all()
+        )
     return [dict(r) for r in rows]
 
 
@@ -4244,9 +4404,10 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
     window_hours = max(1, min(hours, 24 * 30))
     with engine.connect() as conn:
         _ensure_pipeline_runs_table(conn)
-        rows = conn.execute(
-            _text(
-                """
+        rows = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     job_name,
                     COUNT(*) AS total_runs,
@@ -4260,9 +4421,12 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
                 GROUP BY job_name
                 ORDER BY job_name
                 """
-            ),
-            {"sid": site_id, "h": window_hours},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "h": window_hours},
+            )
+            .mappings()
+            .all()
+        )
 
     components = []
     totals = {"total_runs": 0, "ok_runs": 0, "error_runs": 0, "skipped_runs": 0}
@@ -4284,14 +4448,14 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
                 "error_runs": error_runs,
                 "skipped_runs": skipped_runs,
                 "success_rate": success_rate,
-                "last_started_at": str(r.get("last_started_at")) if r.get("last_started_at") else None,
+                "last_started_at": (
+                    str(r.get("last_started_at")) if r.get("last_started_at") else None
+                ),
             }
         )
 
     overall_success = (
-        round(totals["ok_runs"] / totals["total_runs"], 3)
-        if totals["total_runs"] > 0
-        else None
+        round(totals["ok_runs"] / totals["total_runs"], 3) if totals["total_runs"] > 0 else None
     )
     status = "green"
     if totals["error_runs"] > 0:
@@ -4311,9 +4475,10 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
 def _profitability_summary(site_id: str, start_date: date, end_date: date) -> dict:
     """Aggregate daily_profitability KPIs for a date range."""
     with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                """
+        row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) AS days_count,
                     SUM(revenue_cents) AS total_revenue_cents,
@@ -4326,9 +4491,12 @@ def _profitability_summary(site_id: str, start_date: date, end_date: date) -> di
                 WHERE site_id = :sid
                   AND profit_date BETWEEN :s AND :e
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .first()
+        )
 
     total_revenue = int((row or {}).get("total_revenue_cents") or 0)
     total_net = int((row or {}).get("total_net_profit_cents") or 0)
@@ -4338,7 +4506,9 @@ def _profitability_summary(site_id: str, start_date: date, end_date: date) -> di
         "total_labor_cost_cents": int((row or {}).get("total_labor_cost_cents") or 0),
         "total_cogs_cents": int((row or {}).get("total_cogs_cents") or 0),
         "total_net_profit_cents": total_net,
-        "net_margin_pct": round((total_net / total_revenue) * 100, 2) if total_revenue > 0 else None,
+        "net_margin_pct": (
+            round((total_net / total_revenue) * 100, 2) if total_revenue > 0 else None
+        ),
         "avg_labor_pct": (
             round(float(row["avg_labor_pct"]), 2)
             if row and row.get("avg_labor_pct") is not None
@@ -4387,16 +4557,20 @@ def get_bottom_line_scorecard(
     top_limit = max(1, min(top_actions_limit, 12))
 
     with engine.connect() as conn:
-        anchor_row = conn.execute(
-            _text(
-                """
+        anchor_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT MAX(profit_date) AS latest_date
                 FROM daily_profitability
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
     anchor_date = (anchor_row or {}).get("latest_date")
     if not anchor_date:
@@ -4472,9 +4646,10 @@ def get_bottom_line_scorecard(
         logger.exception("Unable to compute previous efficiency for scorecard")
 
     with engine.connect() as conn:
-        action_summary = conn.execute(
-            _text(
-                """
+        action_summary = (
+            conn.execute(
+                _text(
+                    """
                 WITH recs AS (
                     SELECT rec_id
                     FROM recommendations
@@ -4516,13 +4691,17 @@ def get_bottom_line_scorecard(
                     (SELECT AVG(rev_per_labor_hour_delta_pct) FROM realized)
                         AS avg_realized_rev_per_labor_hour_delta_pct
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        ).mappings().first()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            .mappings()
+            .first()
+        )
 
-        top_actions = conn.execute(
-            _text(
-                """
+        top_actions = (
+            conn.execute(
+                _text(
+                    """
                 WITH adopted AS (
                     SELECT DISTINCT rec_id
                     FROM adoption_logs
@@ -4558,14 +4737,18 @@ def get_bottom_line_scorecard(
                     COUNT(*) DESC
                 LIMIT :lim
                 """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date, "lim": top_limit},
-        ).mappings().all()
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date, "lim": top_limit},
+            )
+            .mappings()
+            .all()
+        )
 
         try:
-            insights_summary = conn.execute(
-                _text(
-                    """
+            insights_summary = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         COUNT(*) AS insights_generated,
                         COUNT(*) FILTER (WHERE severity IN ('warning', 'opportunity')) AS high_priority_insights
@@ -4573,9 +4756,12 @@ def get_bottom_line_scorecard(
                     WHERE site_id = :sid
                       AND cycle_date BETWEEN :s AND :e
                     """
-                ),
-                {"sid": site_id, "s": start_date, "e": end_date},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id, "s": start_date, "e": end_date},
+                )
+                .mappings()
+                .first()
+            )
         except Exception as e:
             logger.warning("insights summary unavailable for scorecard (non-fatal): %s", e)
             insights_summary = {"insights_generated": 0, "high_priority_insights": 0}
@@ -4620,12 +4806,14 @@ def get_bottom_line_scorecard(
         "realized_actions": int((action_summary or {}).get("realized_actions") or 0),
         "avg_realized_weekly_profit_delta_cents": (
             round(float(action_summary["avg_realized_weekly_profit_delta_cents"]))
-            if action_summary and action_summary.get("avg_realized_weekly_profit_delta_cents") is not None
+            if action_summary
+            and action_summary.get("avg_realized_weekly_profit_delta_cents") is not None
             else None
         ),
         "total_realized_weekly_profit_delta_cents": (
             round(float(action_summary["total_realized_weekly_profit_delta_cents"]))
-            if action_summary and action_summary.get("total_realized_weekly_profit_delta_cents") is not None
+            if action_summary
+            and action_summary.get("total_realized_weekly_profit_delta_cents") is not None
             else None
         ),
         "avg_realized_labor_pct_delta_pp": (
@@ -4635,7 +4823,8 @@ def get_bottom_line_scorecard(
         ),
         "avg_realized_rev_per_labor_hour_delta_pct": (
             round(float(action_summary["avg_realized_rev_per_labor_hour_delta_pct"]), 2)
-            if action_summary and action_summary.get("avg_realized_rev_per_labor_hour_delta_pct") is not None
+            if action_summary
+            and action_summary.get("avg_realized_rev_per_labor_hour_delta_pct") is not None
             else None
         ),
         "top_proven_action_types": [
@@ -4675,7 +4864,9 @@ def get_bottom_line_scorecard(
 
     coverage_days = int((xero_financial or {}).get("days_covered") or 0)
     coverage_ratio = round(coverage_days / window_days, 3) if window_days > 0 else 0.0
-    fallback_expense = int(overall["total_labor_cost_cents"] or 0) + int(overall["total_cogs_cents"] or 0)
+    fallback_expense = int(overall["total_labor_cost_cents"] or 0) + int(
+        overall["total_cogs_cents"] or 0
+    )
     fallback_income = int(overall["total_revenue_cents"] or 0)
     financial_truth = {
         "mode": "xero_factual" if coverage_days > 0 else "estimated_fallback",
@@ -4775,12 +4966,16 @@ def get_bottom_line_scorecard(
         "financial_truth": financial_truth,
         "intelligence": {
             "insights_generated": int((insights_summary or {}).get("insights_generated") or 0),
-            "high_priority_insights": int((insights_summary or {}).get("high_priority_insights") or 0),
+            "high_priority_insights": int(
+                (insights_summary or {}).get("high_priority_insights") or 0
+            ),
         },
     }
 
 
-def _freshness_component(latest: Optional[date], max_green_days: int, max_yellow_days: int) -> tuple[str, Optional[int]]:
+def _freshness_component(
+    latest: Optional[date], max_green_days: int, max_yellow_days: int
+) -> tuple[str, Optional[int]]:
     if latest is None:
         return "red", None
     age_days = max(0, (date.today() - latest).days)
@@ -4798,61 +4993,78 @@ def get_data_health(site_id: str) -> dict:
     """
     with engine.connect() as conn:
         # Square/orders freshness + today volume.
-        orders_row = conn.execute(
-            _text(
-                """
+        orders_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     MAX(closed_at)::date AS latest_date,
                     COUNT(*) FILTER (WHERE DATE(closed_at) = CURRENT_DATE) AS today_orders
                 FROM orders_raw
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
         # Deputy roster freshness + next 14-day coverage.
-        deputy_row = conn.execute(
-            _text(
-                """
+        deputy_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     MAX(shift_date) AS latest_date,
                     COUNT(*) FILTER (WHERE shift_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days') AS next_14d_shifts
                 FROM deputy_rosters
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
         # Profitability freshness.
-        pnl_row = conn.execute(
-            _text(
-                """
+        pnl_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT MAX(profit_date) AS latest_date
                 FROM daily_profitability
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
         # Prediction freshness.
-        pred_row = conn.execute(
-            _text(
-                """
+        pred_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT MAX(forecast_date) AS latest_date
                 FROM predictions
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
         # Xero connection + cost freshness.
-        xero_row = conn.execute(
-            _text(
-                """
+        xero_row = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     EXISTS(SELECT 1 FROM xero_tokens xt WHERE xt.site_id = :sid) AS connected,
                     COUNT(*) FILTER (WHERE source = 'xero') AS xero_cost_items,
@@ -4860,14 +5072,18 @@ def get_data_health(site_id: str) -> dict:
                 FROM item_costs
                 WHERE site_id = :sid
                 """
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
         try:
-            xero_financial_row = conn.execute(
-                _text(
-                    """
+            xero_financial_row = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT
                         MAX(fact_date) AS latest_date,
                         COUNT(*) FILTER (
@@ -4876,21 +5092,27 @@ def get_data_health(site_id: str) -> dict:
                     FROM xero_financial_facts
                     WHERE site_id = :sid
                     """
-                ),
-                {"sid": site_id},
-            ).mappings().first()
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
         except Exception as e:
             try:
                 conn.rollback()
             except Exception:
                 pass
-            logger.warning("xero_financial_facts data-health component unavailable (non-fatal): %s", e)
+            logger.warning(
+                "xero_financial_facts data-health component unavailable (non-fatal): %s", e
+            )
             xero_financial_row = {"latest_date": None, "days_14d": 0}
 
         try:
-            quality_flags = conn.execute(
-                _text(
-                    """
+            quality_flags = (
+                conn.execute(
+                    _text(
+                        """
                     SELECT flag_date, flag_type, severity, source, reason
                     FROM data_quality_flags
                     WHERE site_id = :sid
@@ -4899,9 +5121,12 @@ def get_data_health(site_id: str) -> dict:
                       AND flag_date >= (CURRENT_DATE - INTERVAL '14 days')
                     ORDER BY flag_date DESC
                     """
-                ),
-                {"sid": site_id},
-            ).mappings().all()
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .all()
+            )
         except Exception as e:
             try:
                 conn.rollback()
@@ -4913,7 +5138,9 @@ def get_data_health(site_id: str) -> dict:
     components = []
 
     square_latest = orders_row.get("latest_date") if orders_row else None
-    square_status, square_age = _freshness_component(square_latest, max_green_days=1, max_yellow_days=2)
+    square_status, square_age = _freshness_component(
+        square_latest, max_green_days=1, max_yellow_days=2
+    )
     components.append(
         {
             "source": "square_orders",
@@ -4966,7 +5193,9 @@ def get_data_health(site_id: str) -> dict:
         xero_status = "yellow"
         xero_age = None
     else:
-        xero_status, xero_age = _freshness_component(xero_latest, max_green_days=7, max_yellow_days=14)
+        xero_status, xero_age = _freshness_component(
+            xero_latest, max_green_days=7, max_yellow_days=14
+        )
         if xero_items <= 0:
             xero_status = "yellow"
     components.append(
@@ -5020,7 +5249,11 @@ def get_data_health(site_id: str) -> dict:
         )
 
     score_map = {"green": 1.0, "yellow": 0.5, "red": 0.0}
-    component_score = round(sum(score_map[c["status"]] for c in components) / len(components), 3) if components else 0.0
+    component_score = (
+        round(sum(score_map[c["status"]] for c in components) / len(components), 3)
+        if components
+        else 0.0
+    )
     overall_status = "green"
     if any(c["status"] == "red" for c in components):
         overall_status = "red"
@@ -5092,9 +5325,7 @@ def store_insight(
     return None
 
 
-def get_recent_insights(
-    site_id: str, days: int = 14, types: list[str] = None
-) -> list[dict]:
+def get_recent_insights(site_id: str, days: int = 14, types: list[str] = None) -> list[dict]:
     """Fetch recent insights for a site, optionally filtered by type."""
     cutoff = date.today() - timedelta(days=days)
     sql = (
@@ -5278,40 +5509,51 @@ def get_intelligence_summary(site_id: str) -> dict:
     """Quick summary: active insights count, top patterns, learning stats."""
     with engine.connect() as conn:
         # Active insights count
-        insight_count = conn.execute(
-            _text(
-                "SELECT COUNT(*) FROM insights "
-                "WHERE site_id = :sid AND status = 'active' "
-                "AND cycle_date >= (CURRENT_DATE - INTERVAL '14 days')"
-            ),
-            {"sid": site_id},
-        ).scalar() or 0
+        insight_count = (
+            conn.execute(
+                _text(
+                    "SELECT COUNT(*) FROM insights "
+                    "WHERE site_id = :sid AND status = 'active' "
+                    "AND cycle_date >= (CURRENT_DATE - INTERVAL '14 days')"
+                ),
+                {"sid": site_id},
+            ).scalar()
+            or 0
+        )
 
         # Top patterns by confidence
-        top_patterns = conn.execute(
-            _text(
-                "SELECT pattern_key, description, confidence, "
-                "total_impact_cents, sample_size "
-                "FROM learned_patterns "
-                "WHERE site_id = :sid AND suppressed = FALSE "
-                "AND confidence >= 0.3 "
-                "ORDER BY confidence DESC LIMIT 5"
-            ),
-            {"sid": site_id},
-        ).mappings().all()
+        top_patterns = (
+            conn.execute(
+                _text(
+                    "SELECT pattern_key, description, confidence, "
+                    "total_impact_cents, sample_size "
+                    "FROM learned_patterns "
+                    "WHERE site_id = :sid AND suppressed = FALSE "
+                    "AND confidence >= 0.3 "
+                    "ORDER BY confidence DESC LIMIT 5"
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .all()
+        )
 
         # Learning stats
-        stats = conn.execute(
-            _text(
-                "SELECT "
-                "COUNT(*) AS total_patterns, "
-                "COUNT(*) FILTER (WHERE confidence >= 0.7) AS high_confidence, "
-                "COUNT(*) FILTER (WHERE suppressed = TRUE) AS suppressed, "
-                "SUM(total_impact_cents) AS total_impact "
-                "FROM learned_patterns WHERE site_id = :sid"
-            ),
-            {"sid": site_id},
-        ).mappings().first()
+        stats = (
+            conn.execute(
+                _text(
+                    "SELECT "
+                    "COUNT(*) AS total_patterns, "
+                    "COUNT(*) FILTER (WHERE confidence >= 0.7) AS high_confidence, "
+                    "COUNT(*) FILTER (WHERE suppressed = TRUE) AS suppressed, "
+                    "SUM(total_impact_cents) AS total_impact "
+                    "FROM learned_patterns WHERE site_id = :sid"
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
     return {
         "active_insights": int(insight_count),

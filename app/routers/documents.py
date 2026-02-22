@@ -42,7 +42,7 @@ async def upload_document(
         raise HTTPException(
             status_code=400,
             detail=f"File type '{file.content_type}' not allowed. "
-                   f"Accepted: JPEG, PNG, PDF, CSV",
+            f"Accepted: JPEG, PNG, PDF, CSV",
         )
 
     # Read file content
@@ -53,7 +53,7 @@ async def upload_document(
         raise HTTPException(
             status_code=400,
             detail=f"File too large ({len(content) / 1024 / 1024:.1f}MB). "
-                   f"Max: {settings.MAX_UPLOAD_SIZE_MB}MB",
+            f"Max: {settings.MAX_UPLOAD_SIZE_MB}MB",
         )
 
     # Create storage directory
@@ -62,6 +62,7 @@ async def upload_document(
 
     # Generate safe filename
     import uuid
+
     ext = Path(file.filename or "file").suffix
     safe_name = f"{uuid.uuid4().hex}{ext}"
     file_path = upload_dir / safe_name

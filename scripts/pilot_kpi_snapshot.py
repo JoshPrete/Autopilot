@@ -82,15 +82,21 @@ def write_snapshot(snapshot: dict, output_dir: Path) -> dict:
         "week_start": snapshot.get("week_start"),
         "week_end": week_end,
         "labor_pct_avg": snapshot["business_kpis"].get("labor_pct_avg"),
-        "revenue_per_labor_hour_avg_cents": snapshot["business_kpis"].get("revenue_per_labor_hour_avg_cents"),
+        "revenue_per_labor_hour_avg_cents": snapshot["business_kpis"].get(
+            "revenue_per_labor_hour_avg_cents"
+        ),
         "weekly_net_profit_cents": snapshot["business_kpis"].get("weekly_net_profit_cents"),
         "weekly_revenue_cents": snapshot["business_kpis"].get("weekly_revenue_cents"),
         "net_profit_wow_delta_cents": snapshot["business_kpis"].get("net_profit_wow_delta_cents"),
         "labor_pct_wow_delta_pp": snapshot["business_kpis"].get("labor_pct_wow_delta_pp"),
-        "rev_per_labor_hour_wow_delta_pct": snapshot["business_kpis"].get("rev_per_labor_hour_wow_delta_pct"),
+        "rev_per_labor_hour_wow_delta_pct": snapshot["business_kpis"].get(
+            "rev_per_labor_hour_wow_delta_pct"
+        ),
         "avg_prediction_accuracy_pct": snapshot["ops_kpis"].get("avg_prediction_accuracy_pct"),
         "adoption_rate": snapshot["ops_kpis"].get("adoption_rate"),
-        "pipeline_success_pct_estimate": snapshot["reliability"].get("pipeline_success_pct_estimate"),
+        "pipeline_success_pct_estimate": snapshot["reliability"].get(
+            "pipeline_success_pct_estimate"
+        ),
     }
     write_header = not csv_path.exists()
     with csv_path.open("a", newline="") as f:

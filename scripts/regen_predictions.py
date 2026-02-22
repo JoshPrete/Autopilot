@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 from config.database import engine
@@ -38,6 +39,7 @@ logger = logging.getLogger("autopilot.regen")
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -49,8 +51,10 @@ def get_actual_counts(site_id: str, target_date: date) -> dict:
     converted from UTC to AEST (UTC+10) for date matching.
     """
     with engine.connect() as conn:
-        result = conn.execute(
-            _text("""
+        result = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     COUNT(*) AS total_items,
                     SUM(workload_units) AS total_workload
@@ -58,15 +62,21 @@ def get_actual_counts(site_id: str, target_date: date) -> dict:
                 JOIN orders_raw o ON oi.order_id = o.order_id
                 WHERE oi.site_id = :sid
                   AND (o.closed_at AT TIME ZONE 'UTC' AT TIME ZONE 'Australia/Brisbane')::date = :dt
-            """),
-            {"sid": site_id, "dt": target_date},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "dt": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
         # Get drink-only count using the new category data
         # Items with workload >= 1.0 that aren't food/retail are drinks
         # More precisely: items whose names map to drink score keys
-        drink_result = conn.execute(
-            _text("""
+        drink_result = (
+            conn.execute(
+                _text(
+                    """
                 SELECT COUNT(*) AS drink_count
                 FROM order_items oi
                 JOIN orders_raw o ON oi.order_id = o.order_id
@@ -81,13 +91,19 @@ def get_actual_counts(site_id: str, target_date: date) -> dict:
                       '500g Beans', '1kg Beans', '250g Beans',
                       'Candle', 'eGift Card', 'Mary Clothes'
                   )
-            """),
-            {"sid": site_id, "dt": target_date},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id, "dt": target_date},
+            )
+            .mappings()
+            .first()
+        )
 
     return {
         "total_items": result["total_items"] if result else 0,
-        "total_workload": float(result["total_workload"]) if result and result["total_workload"] else 0.0,
+        "total_workload": (
+            float(result["total_workload"]) if result and result["total_workload"] else 0.0
+        ),
         "drink_count": drink_result["drink_count"] if drink_result else 0,
     }
 
@@ -97,34 +113,40 @@ def clear_prediction(site_id: str, forecast_date: date):
     with engine.connect() as conn:
         # Clear recommendations first (FK constraint)
         conn.execute(
-            _text("""
+            _text(
+                """
                 DELETE FROM recommendations
                 WHERE prediction_id IN (
                     SELECT prediction_id FROM predictions
                     WHERE site_id = :sid AND forecast_date = :fd
                 )
-            """),
+            """
+            ),
             {"sid": site_id, "fd": forecast_date},
         )
         conn.execute(
-            _text(
-                "DELETE FROM predictions WHERE site_id = :sid AND forecast_date = :fd"
-            ),
+            _text("DELETE FROM predictions WHERE site_id = :sid AND forecast_date = :fd"),
             {"sid": site_id, "fd": forecast_date},
         )
         conn.commit()
 
 
-def update_accuracy(site_id: str, forecast_date: date, actual_drinks: int, actual_workload: float) -> float | None:
+def update_accuracy(
+    site_id: str, forecast_date: date, actual_drinks: int, actual_workload: float
+) -> float | None:
     """Compute and store accuracy for a prediction."""
     with engine.connect() as conn:
-        pred = conn.execute(
-            _text(
-                "SELECT forecast_data FROM predictions "
-                "WHERE site_id = :sid AND forecast_date = :fd"
-            ),
-            {"sid": site_id, "fd": forecast_date},
-        ).mappings().first()
+        pred = (
+            conn.execute(
+                _text(
+                    "SELECT forecast_data FROM predictions "
+                    "WHERE site_id = :sid AND forecast_date = :fd"
+                ),
+                {"sid": site_id, "fd": forecast_date},
+            )
+            .mappings()
+            .first()
+        )
 
     if not pred:
         return None
@@ -211,7 +233,8 @@ def main():
 
             # Score accuracy against drinks-only actual count
             accuracy = update_accuracy(
-                site_id, target_date,
+                site_id,
+                target_date,
                 actuals["drink_count"],
                 actuals["total_workload"],
             )
@@ -234,8 +257,11 @@ def main():
         acc_str = f"{accuracy*100:.1f}%" if accuracy else "n/a"
         logger.info(
             "%s (%s): predicted=%s actual_drinks=%d actual_total=%d accuracy=%s",
-            target_date, result["day"],
-            predicted_drinks, actuals["drink_count"], actuals["total_items"],
+            target_date,
+            result["day"],
+            predicted_drinks,
+            actuals["drink_count"],
+            actuals["total_items"],
             acc_str,
         )
 
@@ -244,7 +270,7 @@ def main():
     print(f"{'Date':<12} {'Day':<10} {'Pred':>6} {'Actual':>7} {'Total':>6} {'Accuracy':>9}")
     print("-" * 75)
     for r in results:
-        acc = f"{r['accuracy']*100:.1f}%" if r['accuracy'] else "n/a"
+        acc = f"{r['accuracy']*100:.1f}%" if r["accuracy"] else "n/a"
         print(
             f"{r['date']}  {r['day']:<10} {str(r['predicted_drinks']):>6} "
             f"{r['actual_drinks']:>7} {r['actual_total']:>6} {acc:>9}"

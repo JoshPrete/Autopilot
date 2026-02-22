@@ -30,9 +30,7 @@ class TestParseOrder:
                     "name": "Latte",
                     "quantity": "2",
                     "catalog_object_id": "cat-001",
-                    "modifiers": [
-                        {"name": "Oat Milk", "catalog_object_id": "mod-001"}
-                    ],
+                    "modifiers": [{"name": "Oat Milk", "catalog_object_id": "mod-001"}],
                 }
             ],
         }

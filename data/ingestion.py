@@ -61,7 +61,9 @@ class SquareIngestion:
 
         logger.info(
             "Fetching orders: %s to %s (location: %s)",
-            start_iso, end_iso, self.location_id,
+            start_iso,
+            end_iso,
+            self.location_id,
         )
 
         while True:
@@ -211,19 +213,23 @@ def parse_order(order: dict) -> dict:
     for idx, li in enumerate(order.get("line_items", []), start=1):
         item_modifiers = []
         for mod in li.get("modifiers", []):
-            item_modifiers.append({
-                "catalog_modifier_id": mod.get("catalog_object_id"),
-                "name": mod.get("name", ""),
-                "amount_cents": mod.get("total_money", {}).get("amount", 0),
-            })
+            item_modifiers.append(
+                {
+                    "catalog_modifier_id": mod.get("catalog_object_id"),
+                    "name": mod.get("name", ""),
+                    "amount_cents": mod.get("total_money", {}).get("amount", 0),
+                }
+            )
 
-        line_items.append({
-            "catalog_item_id": li.get("catalog_object_id"),
-            "item_name": li.get("name", "Unknown Item"),
-            "quantity": int(li.get("quantity", "1")),
-            "position_in_order": idx,
-            "modifiers": item_modifiers,
-        })
+        line_items.append(
+            {
+                "catalog_item_id": li.get("catalog_object_id"),
+                "item_name": li.get("name", "Unknown Item"),
+                "quantity": int(li.get("quantity", "1")),
+                "position_in_order": idx,
+                "modifiers": item_modifiers,
+            }
+        )
 
     return {
         "order_id": order.get("id"),

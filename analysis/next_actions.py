@@ -102,10 +102,7 @@ def _rank_score(action: dict, optimization_phase: str) -> int:
 
 def _staffing_risk_metrics(intervals: list[dict]) -> dict:
     """Compute normalized staffing risk ratios from interval statuses."""
-    working = [
-        row for row in intervals
-        if (row.get("status") or "no_workload") != "no_workload"
-    ]
+    working = [row for row in intervals if (row.get("status") or "no_workload") != "no_workload"]
     total = len(working)
     if total == 0:
         return {
@@ -116,10 +113,7 @@ def _staffing_risk_metrics(intervals: list[dict]) -> dict:
             "overstaffed_ratio": 0.0,
         }
 
-    critical_under = sum(
-        1 for row in working
-        if row.get("status") in ("understaffed", "no_staff")
-    )
+    critical_under = sum(1 for row in working if row.get("status") in ("understaffed", "no_staff"))
     overstaffed = sum(1 for row in working if row.get("status") == "overstaffed")
     return {
         "working_intervals": total,
@@ -217,13 +211,17 @@ def _apply_data_health_gate(action: dict, data_health: dict | None) -> dict:
     return gated
 
 
-def generate_next_actions(site_id: str, target_date: date | None = None, max_actions: int = 8) -> dict:
+def generate_next_actions(
+    site_id: str, target_date: date | None = None, max_actions: int = 8
+) -> dict:
     """
     Generate ranked action recommendations from current operational data.
     """
     target_date = target_date or date.today()
     # Keep recommendation memory fresh as part of generation path.
-    impact_refresh = backfill_realized_impacts(site_id=site_id, lookback_days=120, window_days=7, limit=50)
+    impact_refresh = backfill_realized_impacts(
+        site_id=site_id, lookback_days=120, window_days=7, limit=50
+    )
     data_health = get_data_health(site_id)
     snapshot = get_daily_efficiency_snapshot(site_id, target_date)
     summary = snapshot.get("summary", {})
@@ -236,18 +234,26 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
     actions: list[dict] = []
     labor_cost_per_hour = 0.0
     if (summary.get("deputy_staff_hours") or 0) > 0:
-        labor_cost_per_hour = (summary.get("deputy_labor_cost_cents", 0) or 0) / summary["deputy_staff_hours"]
+        labor_cost_per_hour = (summary.get("deputy_labor_cost_cents", 0) or 0) / summary[
+            "deputy_staff_hours"
+        ]
 
     # 1) Staffing optimization actions from interval mismatches.
     understaffed = sorted(
-        [r for r in intervals if r.get("status") == "understaffed" and (r.get("revenue_cents", 0) > 0)],
+        [
+            r
+            for r in intervals
+            if r.get("status") == "understaffed" and (r.get("revenue_cents", 0) > 0)
+        ],
         key=lambda r: (r.get("revenue_cents", 0), r.get("workload_units", 0)),
         reverse=True,
     )
     if understaffed:
         top = understaffed[0]
         interval_revenue = int(top.get("revenue_cents", 0) or 0)
-        est_weekly_uplift = round(interval_revenue * 0.10 * 5)  # repeated block, 5 similar days/wk estimate
+        est_weekly_uplift = round(
+            interval_revenue * 0.10 * 5
+        )  # repeated block, 5 similar days/wk estimate
         confidence, memory = _confidence_with_memory(site_id, "ADD_STAFF_BLOCK", 0.66)
         actions.append(
             {
@@ -274,7 +280,9 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
     )
     if overstaffed:
         top = overstaffed[0]
-        est_weekly_savings = round((labor_cost_per_hour * 1.0) * 4)  # 1hr trimmed x4 days as baseline
+        est_weekly_savings = round(
+            (labor_cost_per_hour * 1.0) * 4
+        )  # 1hr trimmed x4 days as baseline
         confidence, memory = _confidence_with_memory(site_id, "CUT_STAFF_BLOCK", 0.62)
         actions.append(
             {
@@ -295,7 +303,9 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
         )
 
     # 1.5) Workflow bottleneck actions from role-level ramification model.
-    high_impact_intervals = workflow.get("high_impact_intervals", []) if isinstance(workflow, dict) else []
+    high_impact_intervals = (
+        workflow.get("high_impact_intervals", []) if isinstance(workflow, dict) else []
+    )
     if high_impact_intervals:
         top_wf = high_impact_intervals[0]
         bottleneck = (top_wf.get("bottleneck") or {}).get("type")
@@ -324,10 +334,18 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                     "window_length_minutes": 30,
                     "bottleneck_type": bottleneck,
                     "workflow_mode_hint": f"{best.get('staff_count')}p",
-                    "roles_hint": ["P1 greet/order", "P2 shots", "P3 finish", "P4 delivery/support"],
+                    "roles_hint": [
+                        "P1 greet/order",
+                        "P2 shots",
+                        "P3 finish",
+                        "P4 delivery/support",
+                    ],
                     "expected_weekly_profit_uplift_cents": estimated_net,
-                    "expected_weekly_labor_change_cents": int(best.get("labor_delta_cents") or 0) * 5,
-                    "proven_weekly_impact_cents": memory.get("avg_realized_weekly_profit_delta_cents"),
+                    "expected_weekly_labor_change_cents": int(best.get("labor_delta_cents") or 0)
+                    * 5,
+                    "proven_weekly_impact_cents": memory.get(
+                        "avg_realized_weekly_profit_delta_cents"
+                    ),
                     "confidence": confidence,
                     "memory": memory,
                     "optimization_phase": optimization_phase,
@@ -336,10 +354,13 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
 
     # 2) Margin actions from item-level profitability.
     low_margin_high_volume = [
-        m for m in margins
+        m
+        for m in margins
         if (m.get("margin_pct") is not None and m["margin_pct"] < 58 and (m.get("qty") or 0) >= 20)
     ]
-    low_margin_high_volume = sorted(low_margin_high_volume, key=lambda m: m.get("qty", 0), reverse=True)
+    low_margin_high_volume = sorted(
+        low_margin_high_volume, key=lambda m: m.get("qty", 0), reverse=True
+    )
     if low_margin_high_volume:
         item = low_margin_high_volume[0]
         weekly_qty = max(1, round((item.get("qty", 0) / 30) * 7))
@@ -380,7 +401,9 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
                     "title": action.get("title"),
                     "reason": gate_status,
                     "realized_samples": action.get("realized_samples"),
-                    "avg_realized_weekly_profit_delta_cents": action.get("proven_weekly_impact_cents"),
+                    "avg_realized_weekly_profit_delta_cents": action.get(
+                        "proven_weekly_impact_cents"
+                    ),
                 }
             )
             continue
@@ -404,7 +427,9 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
             "score": data_health.get("score") if isinstance(data_health, dict) else None,
         }
 
-    actions = sorted(gated_actions, key=lambda a: a.get("ranking_score_cents", 0), reverse=True)[:max_actions]
+    actions = sorted(gated_actions, key=lambda a: a.get("ranking_score_cents", 0), reverse=True)[
+        :max_actions
+    ]
 
     return {
         "site_id": site_id,
@@ -413,8 +438,12 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
             "actions_generated": len(actions),
             "revenue_per_labor_hour_cents": summary.get("revenue_per_labor_hour_cents"),
             "labor_pct": summary.get("labor_pct"),
-            "data_health_status": data_health.get("status") if isinstance(data_health, dict) else None,
-            "data_health_score": data_health.get("score") if isinstance(data_health, dict) else None,
+            "data_health_status": (
+                data_health.get("status") if isinstance(data_health, dict) else None
+            ),
+            "data_health_score": (
+                data_health.get("score") if isinstance(data_health, dict) else None
+            ),
             "optimization_phase": optimization_phase,
             "phase_reason": phase_reason,
             "phase_guardrails": {
@@ -444,7 +473,9 @@ def generate_next_actions(site_id: str, target_date: date | None = None, max_act
     }
 
 
-def persist_next_actions(site_id: str, actions: list[dict], target_date: date | None = None) -> dict:
+def persist_next_actions(
+    site_id: str, actions: list[dict], target_date: date | None = None
+) -> dict:
     """
     Persist actions to recommendations table (idempotent by action_key/day).
     """
@@ -457,7 +488,9 @@ def persist_next_actions(site_id: str, actions: list[dict], target_date: date | 
     for action in actions:
         action_key = action.get("action_key")
         action_type = action.get("action_type", "NEXT_ACTION")
-        if action_key and recommendation_exists_for_action_key(site_id, action_type, action_key, target_date):
+        if action_key and recommendation_exists_for_action_key(
+            site_id, action_type, action_key, target_date
+        ):
             skipped += 1
             continue
         rec_id = store_recommendation(

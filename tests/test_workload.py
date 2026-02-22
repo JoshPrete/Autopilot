@@ -118,13 +118,15 @@ class TestRushWindow:
 
 class TestMergeRushHours:
     def test_single_hour(self):
-        hours = [{
-            "hour": 8,
-            "prediction": {
-                "final_prediction": 50.0,
-                "confidence": 0.85,
-            },
-        }]
+        hours = [
+            {
+                "hour": 8,
+                "prediction": {
+                    "final_prediction": 50.0,
+                    "confidence": 0.85,
+                },
+            }
+        ]
         rw = _merge_rush_hours(date(2026, 2, 7), hours)
 
         assert rw.start == datetime(2026, 2, 7, 8, 0)

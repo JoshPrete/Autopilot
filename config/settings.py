@@ -30,12 +30,8 @@ class Settings:
     MANAGER_PHONE: str = os.environ.get("MANAGER_PHONE", "")
 
     # Autopilot Tuning
-    RUSH_THRESHOLD_MULTIPLIER: float = float(
-        os.environ.get("RUSH_THRESHOLD_MULTIPLIER", "1.3")
-    )
-    WALLY_TRIGGER_MILK_DRINKS: int = int(
-        os.environ.get("WALLY_TRIGGER_MILK_DRINKS", "3")
-    )
+    RUSH_THRESHOLD_MULTIPLIER: float = float(os.environ.get("RUSH_THRESHOLD_MULTIPLIER", "1.3"))
+    WALLY_TRIGGER_MILK_DRINKS: int = int(os.environ.get("WALLY_TRIGGER_MILK_DRINKS", "3"))
     RECENT_PATTERN_WEEKS: int = int(os.environ.get("RECENT_PATTERN_WEEKS", "6"))
     YOY_YEARS_BACK: int = int(os.environ.get("YOY_YEARS_BACK", "2"))
 

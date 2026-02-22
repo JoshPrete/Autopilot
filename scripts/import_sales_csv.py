@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(PROJECT_ROOT / ".env")
 
 from config.database import engine
@@ -49,6 +50,7 @@ ROW_MAP = {
 
 def _text(sql: str):
     from sqlalchemy import text
+
     return text(sql)
 
 
@@ -56,7 +58,7 @@ def parse_dollar(val: str) -> int:
     """Parse '$1,798.39' or '-$114.83' to cents (179839 or -11483)."""
     if not val or val.strip() == "":
         return 0
-    cleaned = val.strip().replace('"', '')
+    cleaned = val.strip().replace('"', "")
     # Handle negative: -$114.83
     negative = cleaned.startswith("-")
     cleaned = cleaned.replace("-", "").replace("$", "").replace(",", "")
@@ -151,8 +153,10 @@ def compute_avg_revenue_per_item(site_id: str) -> float | None:
     """
     with engine.connect() as conn:
         # Use order_items to compute: total net revenue / total item count
-        result = conn.execute(
-            _text("""
+        result = (
+            conn.execute(
+                _text(
+                    """
                 SELECT
                     SUM(o.total_money_cents) AS total_revenue,
                     COUNT(DISTINCT o.order_id) AS order_count,
@@ -160,9 +164,13 @@ def compute_avg_revenue_per_item(site_id: str) -> float | None:
                 FROM orders_raw o
                 JOIN order_items oi ON oi.order_id = o.order_id AND oi.site_id = :sid
                 WHERE o.site_id = :sid
-            """),
-            {"sid": site_id},
-        ).mappings().first()
+            """
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .first()
+        )
 
     if not result or not result["item_count"] or result["item_count"] < 50:
         logger.warning("Insufficient order data to compute avg revenue per item")
@@ -172,7 +180,9 @@ def compute_avg_revenue_per_item(site_id: str) -> float | None:
     avg = result["total_revenue"] / result["item_count"]
     logger.info(
         "Avg revenue per item: $%.2f (from %d items across %d orders)",
-        avg / 100, result["item_count"], result["order_count"],
+        avg / 100,
+        result["item_count"],
+        result["order_count"],
     )
     return avg
 
@@ -190,7 +200,9 @@ def store_records(
             est_items = round(net / avg_rev_per_item) if avg_rev_per_item and net > 0 else None
             logger.info(
                 "  [DRY RUN] %s: net=$%.2f  gross=$%.2f  est_items=%s",
-                r["sale_date"], net / 100, r["gross_sales_cents"] / 100,
+                r["sale_date"],
+                net / 100,
+                r["gross_sales_cents"] / 100,
                 est_items,
             )
         if len(records) > 5:
@@ -204,7 +216,8 @@ def store_records(
             est_items = round(net / avg_rev_per_item) if avg_rev_per_item and net > 0 else None
 
             conn.execute(
-                _text("""
+                _text(
+                    """
                     INSERT INTO daily_sales_history
                         (site_id, sale_date, gross_sales_cents, net_sales_cents,
                          product_sales_cents, tax_cents, discounts_cents, tips_cents,
@@ -226,7 +239,8 @@ def store_records(
                             ELSE EXCLUDED.source
                         END,
                         imported_at = NOW()
-                """),
+                """
+                ),
                 {
                     "sid": site_id,
                     "sale_date": r["sale_date"],
@@ -257,7 +271,9 @@ def main():
         nargs="+",
         help="Path(s) to CSV file(s). Supports glob patterns.",
     )
-    p.add_argument("--dry-run", action="store_true", help="Parse and show data without writing to DB")
+    p.add_argument(
+        "--dry-run", action="store_true", help="Parse and show data without writing to DB"
+    )
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args()
 

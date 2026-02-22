@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 # --- Workload ---
 
+
 class ModifierInput(BaseModel):
     modifier_name: str
     modifier_type: str = "UNKNOWN"
@@ -30,6 +31,7 @@ class WorkloadRequest(BaseModel):
 
 # --- Predictions ---
 
+
 class GeneratePredictionRequest(BaseModel):
     target_date: Optional[date] = None
     staff_scheduled: Optional[int] = None
@@ -37,6 +39,7 @@ class GeneratePredictionRequest(BaseModel):
 
 
 # --- Recommendations ---
+
 
 class QueueSignalsRequest(BaseModel):
     prediction_id: str
@@ -66,6 +69,7 @@ class RecommendationFeedbackRequest(BaseModel):
 
 # --- Pipeline ---
 
+
 class IngestRequest(BaseModel):
     run_date: Optional[date] = None
     dry_run: bool = False
@@ -80,12 +84,14 @@ class PredictRequest(BaseModel):
 
 # --- Delivery ---
 
+
 class SendRequest(BaseModel):
     role: str
     message_body: str
 
 
 # --- Analysis ---
+
 
 class AccuracyParams(BaseModel):
     days_back: int = 7
@@ -102,6 +108,7 @@ class WeeklyReviewParams(BaseModel):
 
 
 # --- Inventory ---
+
 
 class InventoryItemUpsertRequest(BaseModel):
     item_name: str
@@ -133,11 +140,13 @@ class InventoryUsageRuleUpsertRequest(BaseModel):
 
 # --- Tomorrow Plan ---
 
+
 class TomorrowPlanParams(BaseModel):
     staff_names: Optional[dict] = None
 
 
 # --- Chat ---
+
 
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
