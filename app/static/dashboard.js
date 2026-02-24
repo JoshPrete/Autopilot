@@ -158,39 +158,152 @@ function renderRush(rushWindows) {
   el.innerHTML = html;
 }
 
-function renderAccuracy(accuracy, adoption) {
+function loadAccuracyDashboard(daysBack) {
   const el = $("#accuracy-content");
-  let html = '<div class="accuracy-strip">';
+  el.className = "loading";
+  el.textContent = "Loading metrics...";
+  fetchJSON(`${API}/analysis/accuracy-dashboard?days_back=${daysBack}`)
+    .then(data => renderAccuracyDashboard(data))
+    .catch(() => {
+      el.className = "";
+      el.innerHTML = '<div class="no-data">Accuracy dashboard unavailable.</div>';
+    });
+}
 
-  if (accuracy) {
-    const avg = accuracy.avg_accuracy != null ? Math.round(accuracy.avg_accuracy) + "%" : "--";
-    const days = accuracy.days_measured ?? 7;
-    html += `<div class="accuracy-metric">
-      <div><span class="metric-value">${avg}</span>${trendArrow(accuracy.trend)}</div>
-      <div class="metric-label">Rolling ${days}-day accuracy</div>
-    </div>`;
-  } else {
-    html += `<div class="accuracy-metric"><div class="no-data">Accuracy data unavailable</div></div>`;
+function renderAccuracyDashboard(data) {
+  const el = $("#accuracy-content");
+  el.className = "";
+  if (!data || data.days_measured === 0) {
+    el.innerHTML = '<div class="no-data">No accuracy data available for this period.</div>';
+    return;
   }
 
-  if (adoption) {
-    const rate = adoption.adoption_rate != null ? Math.round(adoption.adoption_rate * 100) + "%" : "--";
-    const meets = adoption.meets_target;
-    const meetsCls = meets ? "yes" : "no";
-    const meetsLabel = meets ? "On target" : "Below target";
-    html += `<div class="accuracy-metric">
-      <div class="metric-value">${rate}</div>
-      <div class="metric-label">Adoption rate (${adoption.recommendations_adopted ?? 0}/${adoption.recommendations_total ?? 0})</div>
-      <span class="target-met ${meetsCls}">${meetsLabel}</span>
-    </div>`;
-  } else {
-    html += `<div class="accuracy-metric"><div class="no-data">Adoption data unavailable</div></div>`;
+  const s = data.summary || {};
+  let html = "";
+
+  // --- Summary strip ---
+  const avg = s.avg_accuracy != null ? Math.round(s.avg_accuracy) + "%" : "--";
+  const absErr = s.avg_abs_error != null ? s.avg_abs_error + " drinks" : "--";
+  const bias = s.avg_signed_error != null ? (s.avg_signed_error > 0 ? "+" : "") + s.avg_signed_error + " drinks" : "--";
+  html += `<div class="accuracy-strip">
+    <div class="accuracy-metric">
+      <div><span class="metric-value">${avg}</span>${trendArrow(s.trend)}</div>
+      <div class="metric-label">${data.days_measured}-day avg accuracy</div>
+    </div>
+    <div class="accuracy-metric">
+      <div class="metric-value">${absErr}</div>
+      <div class="metric-label">Avg absolute error</div>
+    </div>
+    <div class="accuracy-metric">
+      <div class="metric-value">${bias}</div>
+      <div class="metric-label">Avg bias (${(s.avg_signed_error != null && s.avg_signed_error > 0) ? "over" : "under"}-predicting)</div>
+    </div>
+    <div class="accuracy-metric">
+      <div class="metric-value">${data.days_measured}</div>
+      <div class="metric-label">Days measured</div>
+    </div>
+  </div>`;
+
+  if (data.alert) {
+    html += `<div class="alert-banner">&#9888; ${data.alert_reason || "Accuracy alert triggered"}</div>`;
   }
 
-  html += "</div>";
+  // --- Trend chart ---
+  if (data.daily_trend && data.daily_trend.length > 0) {
+    html += `<h3 class="efficiency-subhead">Daily Accuracy Trend</h3>`;
+    let trendData = data.daily_trend;
+    // Group into weekly averages for 60+ day ranges
+    if (data.days_back >= 60) {
+      const weeks = [];
+      for (let i = 0; i < trendData.length; i += 7) {
+        const chunk = trendData.slice(i, i + 7);
+        const avgAcc = chunk.reduce((s, d) => s + d.accuracy, 0) / chunk.length;
+        const avgRoll = chunk.reduce((s, d) => s + d.rolling_7d_avg, 0) / chunk.length;
+        weeks.push({ date: chunk[0].date, accuracy: Math.round(avgAcc * 10) / 10, rolling_7d_avg: Math.round(avgRoll * 10) / 10 });
+      }
+      trendData = weeks;
+    }
+    const maxAcc = 100;
+    const targetPct = 85;
+    const targetBottom = ((maxAcc - targetPct) / maxAcc) * 100;
+    html += `<div class="accuracy-trend-chart">`;
+    html += `<div class="accuracy-target-line" style="bottom:${100 - targetBottom}%"></div>`;
+    for (const d of trendData) {
+      const heightPct = (d.accuracy / maxAcc) * 100;
+      let barCls = "accuracy-bar-green";
+      if (d.accuracy < 75) barCls = "accuracy-bar-red";
+      else if (d.accuracy < 85) barCls = "accuracy-bar-yellow";
+      html += `<div class="chart-bar-wrapper">
+        <div class="chart-bar ${barCls}" style="height:${heightPct}%" title="${d.date}: ${d.accuracy}%">
+          <span class="bar-value">${Math.round(d.accuracy)}</span>
+        </div>
+        <span class="bar-label">${d.date.slice(5)}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
 
-  if (accuracy && accuracy.alert) {
-    html += `<div class="alert-banner">&#9888; ${accuracy.alert_reason || "Accuracy alert triggered"}</div>`;
+  // --- Predicted vs Actual table (last 10) ---
+  if (data.predicted_vs_actual && data.predicted_vs_actual.length > 0) {
+    html += `<h3 class="efficiency-subhead">Predicted vs Actual (Last 10)</h3>`;
+    const rows = data.predicted_vs_actual.slice(-10);
+    html += `<table class="staffing-table">
+      <thead><tr><th>Date</th><th>Predicted</th><th>Actual</th><th>Error</th><th>Accuracy</th></tr></thead>
+      <tbody>`;
+    for (const r of rows) {
+      const accPct = (100 - r.error_pct).toFixed(1);
+      html += `<tr>
+        <td>${r.date}</td>
+        <td>${r.predicted}</td>
+        <td>${r.actual}</td>
+        <td>${r.error} (${r.error_pct}%)</td>
+        <td>${accPct}%</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // --- DOW bars ---
+  if (data.by_dow && data.by_dow.length > 0) {
+    html += `<h3 class="efficiency-subhead">Accuracy by Day of Week</h3>`;
+    const best = Math.max(...data.by_dow.map(d => d.avg_accuracy));
+    const worst = Math.min(...data.by_dow.map(d => d.avg_accuracy));
+    for (const d of data.by_dow) {
+      const widthPct = (d.avg_accuracy / 100) * 100;
+      let barCls = "";
+      if (data.by_dow.length > 1 && d.avg_accuracy === best) barCls = " best";
+      else if (data.by_dow.length > 1 && d.avg_accuracy === worst) barCls = " worst";
+      const biasStr = d.avg_signed_error != null ? ((d.avg_signed_error > 0 ? "+" : "") + d.avg_signed_error) : "--";
+      html += `<div class="dow-row">
+        <span class="dow-label">${d.day_name}</span>
+        <div class="dow-bar-track">
+          <div class="dow-bar${barCls}" style="width:${widthPct}%">${d.avg_accuracy}%</div>
+        </div>
+        <span class="dow-bias">${biasStr}</span>
+      </div>`;
+    }
+  }
+
+  // --- Calibration chips (confidence bands + staffing modes) ---
+  if ((data.by_confidence && data.by_confidence.length > 0) || (data.by_staffing_mode && data.by_staffing_mode.length > 0)) {
+    html += `<h3 class="efficiency-subhead">Calibration &amp; Staffing Modes</h3>`;
+    html += `<div class="efficiency-summary">`;
+    if (data.by_confidence) {
+      for (const b of data.by_confidence) {
+        html += `<span class="staffing-chip">${b.band} conf (${b.label}): ${b.avg_accuracy}% (n=${b.sample_count})</span>`;
+      }
+    }
+    if (data.by_staffing_mode) {
+      for (const m of data.by_staffing_mode) {
+        html += `<span class="staffing-chip">${m.mode}: ${m.avg_accuracy}% (n=${m.sample_count})</span>`;
+      }
+    }
+    if (s.calibrated === false) {
+      html += `<span class="staffing-chip under">&#9888; Miscalibrated: high-confidence predictions are not more accurate than low</span>`;
+    } else if (s.calibrated === true) {
+      html += `<span class="staffing-chip balance">&#10003; Confidence scores well-calibrated</span>`;
+    }
+    html += `</div>`;
   }
 
   el.innerHTML = html;
@@ -953,17 +1066,17 @@ async function loadDashboard() {
       renderRush(null);
     });
 
-  // Fetch accuracy
-  fetchJSON(`${API}/analysis/accuracy?days_back=7`)
-    .then(acc => {
-      // Fetch adoption with last 7 days range
-      const end = new Date().toISOString().slice(0, 10);
-      const start = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-      return fetchJSON(`${API}/analysis/adoption?start_date=${start}&end_date=${end}`)
-        .then(adp => renderAccuracy(acc, adp))
-        .catch(() => renderAccuracy(acc, null));
-    })
-    .catch(() => renderAccuracy(null, null));
+  // Fetch accuracy dashboard (30-day default)
+  loadAccuracyDashboard(30);
+
+  // Period selector click handler
+  document.querySelectorAll(".period-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".period-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadAccuracyDashboard(parseInt(btn.dataset.days, 10));
+    });
+  });
 
   // Fetch weekly ROI summary
   fetchJSON(`${API}/analysis/weekly-roi`)

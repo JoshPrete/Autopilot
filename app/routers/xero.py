@@ -17,11 +17,13 @@ from data.storage import (
     consume_xero_oauth_state,
     get_all_xero_mappings,
     get_xero_financial_facts_summary,
+    get_xero_review_counts,
     get_site,
     store_xero_oauth_state,
     get_xero_tokens,
     store_xero_tokens,
 )
+from security.crypto import TokenEncryptionError, token_encryption_ready
 
 logger = logging.getLogger("autopilot.xero_router")
 
@@ -43,6 +45,11 @@ def xero_connect(site_id: str = Query(..., description="Site UUID")):
     """Redirect to Xero authorization page to begin OAuth2 flow."""
     if not settings.XERO_CLIENT_ID:
         raise HTTPException(status_code=500, detail="XERO_CLIENT_ID not configured")
+    if not token_encryption_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Xero token encryption not ready. Configure AUTOPILOT_TOKEN_ENC_KEY first.",
+        )
 
     site = get_site(site_id)
     if not site:
@@ -81,6 +88,11 @@ def xero_callback(
 
     if not settings.XERO_CLIENT_ID or not settings.XERO_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Xero credentials not configured")
+    if not token_encryption_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Xero token encryption not ready. Configure AUTOPILOT_TOKEN_ENC_KEY first.",
+        )
 
     # Exchange code for tokens
     try:
@@ -128,14 +140,18 @@ def xero_callback(
     tenant_name = connections[0].get("tenantName", "Unknown")
 
     # Store tokens
-    store_xero_tokens(
-        site_id=site_id,
-        tenant_id=tenant_id,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=expires_at,
-        scope=scope,
-    )
+    try:
+        store_xero_tokens(
+            site_id=site_id,
+            tenant_id=tenant_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scope=scope,
+        )
+    except TokenEncryptionError as e:
+        logger.error("Xero token storage failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
     logger.info("Xero connected for site %s: tenant '%s' (%s)", site_id, tenant_name, tenant_id)
 
@@ -154,7 +170,10 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
         return {"connected": False, "site_id": site_id}
 
     mappings = get_all_xero_mappings(site_id)
-    confirmed = sum(1 for m in mappings if m.get("confidence") == "confirmed")
+    approved = sum(1 for m in mappings if str(m.get("status") or "") == "approved")
+    proposed = sum(1 for m in mappings if str(m.get("status") or "") == "proposed")
+    rejected = sum(1 for m in mappings if str(m.get("status") or "") == "rejected")
+    review_counts = get_xero_review_counts(site_id, queue_status="open")
     fact_window = get_xero_financial_facts_summary(
         site_id,
         start_date=date.today() - timedelta(days=29),
@@ -169,7 +188,12 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
         "connected_at": str(tokens.get("connected_at", "")),
         "last_refreshed": str(tokens.get("updated_at", "")),
         "mappings_total": len(mappings),
-        "mappings_confirmed": confirmed,
+        "mappings_confirmed": approved,  # backward compatibility alias
+        "mappings_approved": approved,
+        "mappings_proposed": proposed,
+        "mappings_rejected": rejected,
+        "review_queue_open": int(sum(review_counts.values())),
+        "review_queue_by_reason": review_counts,
         "financial_facts_days_30d": int(fact_window.get("days_covered") or 0),
         "financial_facts_latest_date": (
             str(fact_window.get("latest_fact_date"))
@@ -186,7 +210,7 @@ def xero_sync(site_id: str = Query(..., description="Site UUID")):
     if not site:
         raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found")
 
-    from data.xero import XeroError, is_xero_configured, sync_xero_bills
+    from data.xero import XeroAuthError, XeroError, is_xero_configured, sync_xero_bills
 
     if not is_xero_configured(site_id):
         raise HTTPException(status_code=400, detail="Xero not connected for this site")
@@ -194,6 +218,9 @@ def xero_sync(site_id: str = Query(..., description="Site UUID")):
     try:
         result = sync_xero_bills(site_id)
         return {"status": "ok", **result}
+    except XeroAuthError as e:
+        logger.error("Manual Xero sync auth failed: %s", e)
+        raise HTTPException(status_code=401, detail=f"{e} Reauthorize at /xero/setup.")
     except XeroError as e:
         logger.error("Manual Xero sync failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
@@ -209,7 +236,7 @@ def xero_sync_revenue(
     if not site:
         raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found")
 
-    from data.xero import XeroError, is_xero_configured, sync_xero_revenue
+    from data.xero import XeroAuthError, XeroError, is_xero_configured, sync_xero_revenue
 
     if not is_xero_configured(site_id):
         raise HTTPException(status_code=400, detail="Xero not connected for this site")
@@ -217,6 +244,9 @@ def xero_sync_revenue(
     try:
         result = sync_xero_revenue(site_id, months_back=months_back)
         return {"status": "ok", **result}
+    except XeroAuthError as e:
+        logger.error("Xero revenue sync auth failed: %s", e)
+        raise HTTPException(status_code=401, detail=f"{e} Reauthorize at /xero/setup.")
     except XeroError as e:
         logger.error("Xero revenue sync failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))

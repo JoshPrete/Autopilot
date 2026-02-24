@@ -8,7 +8,7 @@ from app.schemas import (
     InventoryItemUpsertRequest,
     InventoryUsageRuleUpsertRequest,
 )
-from analysis.accuracy import get_rolling_accuracy, get_adoption_metrics
+from analysis.accuracy import get_rolling_accuracy, get_accuracy_dashboard, get_adoption_metrics
 from analysis.next_actions import generate_next_actions, persist_next_actions
 from analysis.shift_optimizer import optimize_shifts, optimize_shifts_range
 from analysis.workflow import analyze_workflow, generate_roster_change_plan
@@ -48,6 +48,14 @@ def accuracy(
         days_back=days_back,
         reference_date=reference_date,
     )
+
+
+@router.get("/accuracy-dashboard")
+def accuracy_dashboard(
+    site: dict = Depends(get_validated_site),
+    days_back: int = Query(default=30, ge=7, le=90),
+):
+    return get_accuracy_dashboard(site["site_id"], days_back=days_back)
 
 
 @router.get("/adoption")

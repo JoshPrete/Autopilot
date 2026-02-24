@@ -25,6 +25,7 @@ apscheduler==3.10.4
 
 # Environment Variables
 python-dotenv==1.0.1
+cryptography==44.0.0
 
 # PDF Generation (Tomorrow Plan)
 reportlab==4.2.5

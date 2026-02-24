@@ -14,7 +14,7 @@ It focuses on the daily spine:
 - PostgreSQL 14+
 - Square API credentials
 - Deputy credentials (optional, fail-quiet)
-- Xero credentials (optional, fail-quiet)
+- Xero credentials (optional, fail-quiet; requires `AUTOPILOT_TOKEN_ENC_KEY` when enabled)
 - Twilio credentials (optional, fail-quiet)
 - OpenWeatherMap API key (optional, fail-quiet)
 - Anthropic API key (optional, for intelligence LLM synthesis)
@@ -32,6 +32,12 @@ Create schema:
 
 ```bash
 psql "$DATABASE_URL" -f schema.sql
+```
+
+If upgrading an existing database, also run:
+
+```bash
+psql "$DATABASE_URL" -f scripts/migrations/2026-02-22_xero_controlled_enrichment.sql
 ```
 
 ## Architecture
@@ -89,7 +95,7 @@ Historical patterns + special_events + weather ──→ PREDICT          │
 |--------|---------|-------------|
 | Square API | Orders, items, revenue | `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID` |
 | Deputy API | Rosters, labor hours, staff names | `DEPUTY_ACCESS_TOKEN`, `DEPUTY_BASE_URL` |
-| Xero API | Bills (COGS), P&L revenue reconciliation | `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET` (OAuth) |
+| Xero API | Bills (COGS), P&L revenue reconciliation | `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, `AUTOPILOT_TOKEN_ENC_KEY` |
 | OpenWeatherMap | Weather forecasts for demand adjustment | `WEATHER_API_KEY` |
 | Anthropic (Claude) | Intelligence synthesis, chat | `ANTHROPIC_API_KEY` |
 | Twilio | SMS delivery (plan, alerts, digest) | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` |
@@ -145,14 +151,36 @@ Cross-correlates Square orders, Deputy labor costs, and Xero COGS to produce dai
 
 Syncs supplier bills (COGS) and P&L revenue from Xero.
 
+**Controlled enrichment model:**
+- Approved mappings (`status=approved`) are always applied.
+- LLM suggestions are stored as `status=proposed` with confidence + model metadata.
+- Proposed mappings are not applied by default.
+- Optional auto-apply requires both:
+  - `ALLOW_AUTO_APPLY_PROPOSED_MAPPINGS=true`
+  - `confidence >= MIN_CONFIDENCE_AUTO_APPLY`
+- All applied costs pass guardrails:
+  - Delta clamp vs current cost (`MAX_COST_DELTA_PCT`, default 40%)
+  - IQR outlier check using `xero_cost_history` when history exists
+- Blocked cases are quarantined into `xero_review_queue` with reason codes:
+  - `UNMAPPED`, `LOW_CONFIDENCE`, `PENDING_APPROVAL`, `OUTLIER_COST`, `EXCESSIVE_DELTA`, `TOKEN_ERROR`
+
 **Revenue reconciliation:** Weekly Xero P&L income vs Square known days. Delta allocated to missing/partial days using DOW-weighted historical patterns. Priority: Xero (verified) > Square CSV > Square API.
 
 **GST handling:** All financial figures are ex-GST (true cash position). Xero P&L is already ex-GST. Square totals are divided by 1.10 to strip Australian GST.
 
-Requires completed OAuth flow via `/api/xero/auth`. Manual trigger:
+Requires completed OAuth flow via `/xero/setup`. Manual trigger:
 
 ```bash
-curl -X POST http://localhost:8080/api/xero/sync-revenue
+curl -X POST "http://localhost:8000/api/xero/sync?site_id=<SITE_UUID>"
+```
+
+Review queue CLI (DB-only, no Xero API calls):
+
+```bash
+.venv/bin/python scripts/xero_review.py --site-id <SITE_UUID> list --since 7d
+.venv/bin/python scripts/xero_review.py --site-id <SITE_UUID> approve --mapping-id <ID> --score-key <score_key>
+.venv/bin/python scripts/xero_review.py --site-id <SITE_UUID> reject --mapping-id <ID>
+.venv/bin/python scripts/xero_review.py --site-id <SITE_UUID> apply --mapping-id <ID>
 ```
 
 ### Step 5: Predict

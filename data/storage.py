@@ -16,6 +16,13 @@ from typing import Optional
 
 from config.database import engine
 from config.settings import settings
+from security.crypto import (
+    TokenEncryptionError,
+    decrypt_secret,
+    encrypt_secret,
+    is_encrypted_secret,
+    token_encryption_ready,
+)
 
 logger = logging.getLogger("autopilot.storage")
 
@@ -3617,7 +3624,15 @@ def store_xero_tokens(
     expires_at: datetime,
     scope: str = None,
 ) -> None:
-    """Upsert OAuth2 tokens for a Xero connection."""
+    """Upsert OAuth2 tokens for a Xero connection (encrypted at rest)."""
+    if not token_encryption_ready():
+        raise TokenEncryptionError(
+            "AUTOPILOT_TOKEN_ENC_KEY missing/invalid or cryptography unavailable."
+        )
+
+    encrypted_access = encrypt_secret(access_token)
+    encrypted_refresh = encrypt_secret(refresh_token)
+
     with engine.connect() as conn:
         conn.execute(
             _text(
@@ -3635,8 +3650,8 @@ def store_xero_tokens(
             {
                 "sid": site_id,
                 "tid": tenant_id,
-                "at": access_token,
-                "rt": refresh_token,
+                "at": encrypted_access,
+                "rt": encrypted_refresh,
                 "ea": expires_at,
                 "sc": scope,
             },
@@ -3726,6 +3741,13 @@ def consume_xero_oauth_state(state: str) -> Optional[str]:
 
 def get_xero_tokens(site_id: str) -> Optional[dict]:
     """Fetch current Xero OAuth2 tokens for a site."""
+    if not token_encryption_ready():
+        logger.warning(
+            "Xero token encryption not ready; set AUTOPILOT_TOKEN_ENC_KEY and install cryptography "
+            "to enable Xero sync."
+        )
+        return None
+
     with engine.connect() as conn:
         result = conn.execute(
             _text(
@@ -3736,7 +3758,35 @@ def get_xero_tokens(site_id: str) -> Optional[dict]:
             {"sid": site_id},
         )
         row = result.mappings().first()
-        return dict(row) if row else None
+        if not row:
+            return None
+
+        access_raw = row["access_token"]
+        refresh_raw = row["refresh_token"]
+        needs_migration = not is_encrypted_secret(access_raw) or not is_encrypted_secret(
+            refresh_raw
+        )
+
+        tokens = dict(row)
+        tokens["access_token"] = decrypt_secret(access_raw)
+        tokens["refresh_token"] = decrypt_secret(refresh_raw)
+
+        if needs_migration:
+            conn.execute(
+                _text(
+                    "UPDATE xero_tokens SET access_token = :at, refresh_token = :rt, updated_at = NOW() "
+                    "WHERE site_id = :sid"
+                ),
+                {
+                    "sid": site_id,
+                    "at": encrypt_secret(tokens["access_token"]),
+                    "rt": encrypt_secret(tokens["refresh_token"]),
+                },
+            )
+            conn.commit()
+            logger.info("Migrated plaintext Xero tokens to encrypted-at-rest for site %s", site_id)
+
+        return tokens
 
 
 def update_xero_tokens(
@@ -3745,7 +3795,18 @@ def update_xero_tokens(
     refresh_token: str,
     expires_at: datetime,
 ) -> None:
-    """Update tokens after a refresh (keeps tenant_id unchanged)."""
+    """
+    Update tokens after a refresh (keeps tenant_id unchanged).
+    Xero rotates refresh tokens, so this always overwrites the stored refresh token.
+    """
+    if not token_encryption_ready():
+        raise TokenEncryptionError(
+            "AUTOPILOT_TOKEN_ENC_KEY missing/invalid or cryptography unavailable."
+        )
+
+    encrypted_access = encrypt_secret(access_token)
+    encrypted_refresh = encrypt_secret(refresh_token)
+
     with engine.connect() as conn:
         conn.execute(
             _text(
@@ -3756,8 +3817,8 @@ def update_xero_tokens(
             ),
             {
                 "sid": site_id,
-                "at": access_token,
-                "rt": refresh_token,
+                "at": encrypted_access,
+                "rt": encrypted_refresh,
                 "ea": expires_at,
             },
         )
@@ -3766,66 +3827,824 @@ def update_xero_tokens(
     logger.info("Refreshed Xero tokens for site %s", site_id)
 
 
-def get_xero_line_mapping(site_id: str, description: str) -> Optional[dict]:
-    """Check cached mapping: Xero line description → {score_key, units_per_pack}."""
-    with engine.connect() as conn:
-        row = conn.execute(
-            _text(
-                "SELECT score_key, units_per_pack FROM xero_line_mappings "
-                "WHERE site_id = :sid AND xero_description = :desc"
-            ),
-            {"sid": site_id, "desc": description},
-        ).first()
-        if row:
-            return {"score_key": row[0], "units_per_pack": row[1] or 1}
+def _mapping_confidence_value(confidence) -> Optional[float]:
+    if confidence is None:
         return None
+    if isinstance(confidence, (int, float)):
+        value = float(confidence)
+        return max(0.0, min(1.0, value))
+
+    raw = str(confidence).strip().lower()
+    if not raw:
+        return None
+    if raw in ("confirmed", "high"):
+        return 0.95
+    if raw == "medium":
+        return 0.70
+    if raw == "low":
+        return 0.30
+    if raw in ("unconfirmed", "unknown"):
+        return 0.0
+
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return max(0.0, min(1.0, value))
+
+
+def _ensure_xero_review_queue_table(conn) -> None:
+    try:
+        conn.execute(
+            _text(
+                """
+                CREATE TABLE IF NOT EXISTS xero_review_queue (
+                    review_id            SERIAL PRIMARY KEY,
+                    site_id              UUID NOT NULL REFERENCES sites(site_id),
+                    queue_status         TEXT NOT NULL DEFAULT 'open',
+                    reason_code          TEXT NOT NULL,
+                    invoice_id           TEXT,
+                    invoice_number       TEXT,
+                    supplier             TEXT,
+                    line_description     TEXT NOT NULL,
+                    line_quantity        NUMERIC,
+                    unit_amount          NUMERIC,
+                    line_total           NUMERIC,
+                    bill_date            DATE,
+                    suggested_score_key  TEXT,
+                    suggested_confidence REAL,
+                    mapping_id           INTEGER REFERENCES xero_line_mappings(id),
+                    payload              JSONB,
+                    resolution_note      TEXT,
+                    resolved_by          TEXT,
+                    created_at           TIMESTAMPTZ DEFAULT NOW(),
+                    resolved_at          TIMESTAMPTZ
+                )
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_xero_review_queue_site_status
+                ON xero_review_queue(site_id, queue_status, created_at DESC)
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_xero_review_queue_reason
+                ON xero_review_queue(site_id, reason_code, created_at DESC)
+                """
+            )
+        )
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return
+
+
+def _ensure_xero_cost_history_table(conn) -> None:
+    try:
+        conn.execute(
+            _text(
+                """
+                CREATE TABLE IF NOT EXISTS xero_cost_history (
+                    history_id  SERIAL PRIMARY KEY,
+                    site_id     UUID NOT NULL REFERENCES sites(site_id),
+                    score_key   TEXT NOT NULL,
+                    cost_cents  INT NOT NULL,
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    source      TEXT NOT NULL DEFAULT 'xero',
+                    reference   TEXT
+                )
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_xero_cost_history_site_key_time
+                ON xero_cost_history(site_id, score_key, observed_at DESC)
+                """
+            )
+        )
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return
+
+
+def _xero_table_exists(conn, table_name: str) -> bool:
+    try:
+        value = conn.execute(
+            _text("SELECT to_regclass(:name)"),
+            {"name": f"public.{table_name}"},
+        ).scalar()
+        return value is not None
+    except Exception:
+        return False
+
+
+def get_xero_line_mapping(site_id: str, description: str, status: str = None) -> Optional[dict]:
+    """Read one Xero line mapping, optionally scoped by workflow status."""
+    with engine.connect() as conn:
+        try:
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT id, score_key, confidence, units_per_pack, source, status,
+                               proposed_at, approved_at, approved_by, model, prompt_version,
+                               created_at, updated_at
+                        FROM xero_line_mappings
+                        WHERE site_id = :sid
+                          AND xero_description = :desc
+                          AND (:status IS NULL OR status = :status)
+                        ORDER BY
+                            CASE status
+                                WHEN 'approved' THEN 0
+                                WHEN 'proposed' THEN 1
+                                ELSE 2
+                            END,
+                            updated_at DESC NULLS LAST,
+                            created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"sid": site_id, "desc": description, "status": status},
+                )
+                .mappings()
+                .first()
+            )
+        except Exception:
+            row = (
+                conn.execute(
+                    _text(
+                        "SELECT id, score_key, confidence, units_per_pack, created_at "
+                        "FROM xero_line_mappings "
+                        "WHERE site_id = :sid AND xero_description = :desc "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"sid": site_id, "desc": description},
+                )
+                .mappings()
+                .first()
+            )
+            if row:
+                legacy_conf = str(row.get("confidence") or "").strip().lower()
+                legacy_status = "approved" if legacy_conf in ("confirmed", "high") else "proposed"
+                if status and status != legacy_status:
+                    return None
+                return {
+                    "id": int(row["id"]) if row.get("id") is not None else None,
+                    "score_key": row["score_key"],
+                    "confidence": _mapping_confidence_value(row.get("confidence")) or 0.0,
+                    "units_per_pack": int(row.get("units_per_pack") or 1),
+                    "source": "llm",
+                    "status": legacy_status,
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("created_at"),
+                }
+            return None
+
+        if not row:
+            return None
+
+        return {
+            "id": int(row["id"]),
+            "score_key": row["score_key"],
+            "confidence": _mapping_confidence_value(row.get("confidence")) or 0.0,
+            "units_per_pack": int(row.get("units_per_pack") or 1),
+            "source": row.get("source") or "llm",
+            "status": row.get("status") or "proposed",
+            "proposed_at": row.get("proposed_at"),
+            "approved_at": row.get("approved_at"),
+            "approved_by": row.get("approved_by"),
+            "model": row.get("model"),
+            "prompt_version": row.get("prompt_version"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+
+def upsert_xero_line_mapping(
+    site_id: str,
+    description: str,
+    score_key: str,
+    confidence: float = None,
+    units_per_pack: int = 1,
+    source: str = "llm",
+    status: str = "proposed",
+    model: str = None,
+    prompt_version: str = None,
+    approved_by: str = None,
+) -> Optional[dict]:
+    """
+    Upsert a mapping with audit metadata.
+    Returns the current mapping row when available.
+    """
+    confidence_value = _mapping_confidence_value(confidence)
+    source_value = (source or "llm").strip().lower()
+    if source_value not in ("human", "llm", "rule"):
+        source_value = "llm"
+    status_value = (status or "proposed").strip().lower()
+    if status_value not in ("proposed", "approved", "rejected"):
+        status_value = "proposed"
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                _text(
+                    """
+                    INSERT INTO xero_line_mappings
+                        (site_id, xero_description, score_key, confidence, source, status,
+                         proposed_at, approved_at, approved_by, model, prompt_version,
+                         units_per_pack, created_at, updated_at)
+                    VALUES
+                        (:sid, :desc, :sk, :conf, :src, :status, NOW(),
+                         CASE WHEN :status = 'approved' THEN NOW() ELSE NULL END,
+                         CASE WHEN :status = 'approved' THEN :approved_by ELSE NULL END,
+                         :model, :prompt_version, :upp, NOW(), NOW())
+                    ON CONFLICT (site_id, xero_description) DO UPDATE SET
+                        score_key = EXCLUDED.score_key,
+                        confidence = EXCLUDED.confidence,
+                        source = EXCLUDED.source,
+                        model = EXCLUDED.model,
+                        prompt_version = EXCLUDED.prompt_version,
+                        units_per_pack = EXCLUDED.units_per_pack,
+                        status = CASE
+                            WHEN xero_line_mappings.status = 'approved'
+                                 AND EXCLUDED.status = 'proposed'
+                            THEN xero_line_mappings.status
+                            ELSE EXCLUDED.status
+                        END,
+                        proposed_at = CASE
+                            WHEN EXCLUDED.status = 'proposed' THEN NOW()
+                            ELSE xero_line_mappings.proposed_at
+                        END,
+                        approved_at = CASE
+                            WHEN EXCLUDED.status = 'approved' THEN NOW()
+                            ELSE xero_line_mappings.approved_at
+                        END,
+                        approved_by = CASE
+                            WHEN EXCLUDED.status = 'approved' THEN COALESCE(:approved_by, xero_line_mappings.approved_by)
+                            ELSE xero_line_mappings.approved_by
+                        END,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "desc": description,
+                    "sk": score_key,
+                    "conf": confidence_value,
+                    "src": source_value,
+                    "status": status_value,
+                    "approved_by": approved_by,
+                    "model": model,
+                    "prompt_version": prompt_version,
+                    "upp": max(1, int(units_per_pack or 1)),
+                },
+            )
+        except Exception:
+            # Legacy fallback for older table structure.
+            conn.execute(
+                _text(
+                    "INSERT INTO xero_line_mappings "
+                    "(site_id, xero_description, score_key, confidence, units_per_pack) "
+                    "VALUES (:sid, :desc, :sk, :conf, :upp) "
+                    "ON CONFLICT (site_id, xero_description) DO UPDATE SET "
+                    "score_key = EXCLUDED.score_key, "
+                    "confidence = EXCLUDED.confidence, "
+                    "units_per_pack = EXCLUDED.units_per_pack"
+                ),
+                {
+                    "sid": site_id,
+                    "desc": description,
+                    "sk": score_key,
+                    "conf": str(
+                        confidence_value if confidence_value is not None else "unconfirmed"
+                    ),
+                    "upp": max(1, int(units_per_pack or 1)),
+                },
+            )
+        conn.commit()
+
+    logger.debug(
+        "Upserted Xero mapping: '%s' → %s (status=%s, source=%s)",
+        description,
+        score_key,
+        status_value,
+        source_value,
+    )
+    return get_xero_line_mapping(site_id, description)
 
 
 def store_xero_line_mapping(
     site_id: str,
     description: str,
     score_key: str,
-    confidence: str = "unconfirmed",
+    confidence: float = None,
     units_per_pack: int = 1,
 ) -> None:
-    """Cache an LLM-generated mapping from Xero description to score_key."""
-    with engine.connect() as conn:
-        conn.execute(
-            _text(
-                "INSERT INTO xero_line_mappings "
-                "(site_id, xero_description, score_key, confidence, units_per_pack) "
-                "VALUES (:sid, :desc, :sk, :conf, :upp) "
-                "ON CONFLICT (site_id, xero_description) DO UPDATE SET "
-                "score_key = EXCLUDED.score_key, "
-                "confidence = EXCLUDED.confidence, "
-                "units_per_pack = EXCLUDED.units_per_pack"
-            ),
-            {
-                "sid": site_id,
-                "desc": description,
-                "sk": score_key,
-                "conf": confidence,
-                "upp": units_per_pack,
-            },
-        )
-        conn.commit()
+    """
+    Backward-compatible wrapper for historical call sites.
+    New mappings are stored as proposed LLM suggestions.
+    """
+    upsert_xero_line_mapping(
+        site_id=site_id,
+        description=description,
+        score_key=score_key,
+        confidence=confidence,
+        units_per_pack=units_per_pack,
+        source="llm",
+        status="proposed",
+    )
 
-    logger.debug("Cached Xero mapping: '%s' → %s", description, score_key)
+
+def update_xero_line_mapping_status(
+    site_id: str,
+    mapping_id: int,
+    status: str,
+    score_key: str = None,
+    approved_by: str = None,
+) -> bool:
+    """Update mapping status for operator review actions."""
+    status_value = (status or "").strip().lower()
+    if status_value not in ("proposed", "approved", "rejected"):
+        raise ValueError("status must be one of: proposed, approved, rejected")
+
+    with engine.connect() as conn:
+        try:
+            result = conn.execute(
+                _text(
+                    """
+                    UPDATE xero_line_mappings
+                    SET status = :status,
+                        score_key = COALESCE(:sk, score_key),
+                        approved_at = CASE WHEN :status = 'approved' THEN NOW() ELSE approved_at END,
+                        approved_by = CASE WHEN :status = 'approved' THEN COALESCE(:approved_by, approved_by) ELSE approved_by END,
+                        updated_at = NOW()
+                    WHERE site_id = :sid AND id = :mid
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "mid": mapping_id,
+                    "status": status_value,
+                    "sk": score_key,
+                    "approved_by": approved_by,
+                },
+            )
+        except Exception:
+            legacy_conf = "confirmed" if status_value == "approved" else "unconfirmed"
+            result = conn.execute(
+                _text(
+                    """
+                    UPDATE xero_line_mappings
+                    SET score_key = COALESCE(:sk, score_key),
+                        confidence = :conf
+                    WHERE site_id = :sid AND id = :mid
+                    """
+                ),
+                {"sid": site_id, "mid": mapping_id, "sk": score_key, "conf": legacy_conf},
+            )
+        conn.commit()
+        return result.rowcount > 0
+
+
+def get_xero_line_mapping_by_id(site_id: str, mapping_id: int) -> Optional[dict]:
+    """Fetch mapping row by integer id."""
+    with engine.connect() as conn:
+        try:
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT id, site_id, xero_description, score_key, confidence, source, status,
+                               proposed_at, approved_at, approved_by, model, prompt_version,
+                               units_per_pack, created_at, updated_at
+                        FROM xero_line_mappings
+                        WHERE site_id = :sid AND id = :mid
+                        LIMIT 1
+                        """
+                    ),
+                    {"sid": site_id, "mid": mapping_id},
+                )
+                .mappings()
+                .first()
+            )
+        except Exception:
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT id, site_id, xero_description, score_key, confidence,
+                               units_per_pack, created_at
+                        FROM xero_line_mappings
+                        WHERE site_id = :sid AND id = :mid
+                        LIMIT 1
+                        """
+                    ),
+                    {"sid": site_id, "mid": mapping_id},
+                )
+                .mappings()
+                .first()
+            )
+            if row:
+                return {
+                    "id": int(row["id"]),
+                    "site_id": str(row["site_id"]),
+                    "xero_description": row["xero_description"],
+                    "score_key": row["score_key"],
+                    "confidence": _mapping_confidence_value(row.get("confidence")) or 0.0,
+                    "source": "llm",
+                    "status": (
+                        "approved"
+                        if str(row.get("confidence") or "").strip().lower() in ("confirmed", "high")
+                        else "proposed"
+                    ),
+                    "units_per_pack": int(row.get("units_per_pack") or 1),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("created_at"),
+                }
+            return None
+
+        if not row:
+            return None
+        payload = dict(row)
+        payload["site_id"] = str(payload["site_id"])
+        payload["confidence"] = _mapping_confidence_value(payload.get("confidence")) or 0.0
+        payload["units_per_pack"] = int(payload.get("units_per_pack") or 1)
+        return payload
 
 
 def get_all_xero_mappings(site_id: str) -> list[dict]:
     """Get all cached Xero line-item mappings for review/display."""
     with engine.connect() as conn:
-        result = conn.execute(
-            _text(
-                "SELECT xero_description, score_key, confidence, units_per_pack, created_at "
-                "FROM xero_line_mappings "
-                "WHERE site_id = :sid "
-                "ORDER BY created_at DESC"
-            ),
-            {"sid": site_id},
-        )
-        return [dict(row) for row in result.mappings()]
+        try:
+            result = conn.execute(
+                _text(
+                    """
+                    SELECT id, xero_description, score_key, confidence, source, status,
+                           proposed_at, approved_at, approved_by, model, prompt_version,
+                           units_per_pack, created_at, updated_at
+                    FROM xero_line_mappings
+                    WHERE site_id = :sid
+                    ORDER BY created_at DESC
+                    """
+                ),
+                {"sid": site_id},
+            )
+            rows = []
+            for row in result.mappings():
+                payload = dict(row)
+                payload["confidence"] = _mapping_confidence_value(payload.get("confidence")) or 0.0
+                payload["units_per_pack"] = int(payload.get("units_per_pack") or 1)
+                rows.append(payload)
+            return rows
+        except Exception:
+            result = conn.execute(
+                _text(
+                    "SELECT id, xero_description, score_key, confidence, units_per_pack, created_at "
+                    "FROM xero_line_mappings "
+                    "WHERE site_id = :sid "
+                    "ORDER BY created_at DESC"
+                ),
+                {"sid": site_id},
+            )
+            rows = []
+            for row in result.mappings():
+                payload = dict(row)
+                payload["confidence"] = _mapping_confidence_value(payload.get("confidence")) or 0.0
+                payload["source"] = "llm"
+                payload["status"] = (
+                    "approved"
+                    if str(row.get("confidence") or "").strip().lower() in ("confirmed", "high")
+                    else "proposed"
+                )
+                payload["units_per_pack"] = int(payload.get("units_per_pack") or 1)
+                rows.append(payload)
+            return rows
+
+
+def enqueue_xero_review_item(
+    site_id: str,
+    reason_code: str,
+    line_description: str,
+    invoice_id: str = None,
+    invoice_number: str = None,
+    supplier: str = None,
+    line_quantity: float = None,
+    unit_amount: float = None,
+    line_total: float = None,
+    bill_date: date = None,
+    suggested_score_key: str = None,
+    suggested_confidence: float = None,
+    mapping_id: int = None,
+    payload: dict = None,
+) -> Optional[int]:
+    """Insert an open review queue item (deduped on core identity fields)."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_review_queue_table(conn)
+            if not _xero_table_exists(conn, "xero_review_queue"):
+                return None
+            existing = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT review_id
+                        FROM xero_review_queue
+                        WHERE site_id = :sid
+                          AND queue_status = 'open'
+                          AND reason_code = :reason
+                          AND COALESCE(invoice_id, '') = COALESCE(:invoice_id, '')
+                          AND line_description = :line_description
+                          AND COALESCE(suggested_score_key, '') = COALESCE(:suggested_score_key, '')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "sid": site_id,
+                        "reason": reason_code,
+                        "invoice_id": invoice_id,
+                        "line_description": line_description,
+                        "suggested_score_key": suggested_score_key,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+            if existing:
+                return int(existing["review_id"])
+
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        INSERT INTO xero_review_queue
+                            (site_id, reason_code, invoice_id, invoice_number, supplier,
+                             line_description, line_quantity, unit_amount, line_total, bill_date,
+                             suggested_score_key, suggested_confidence, mapping_id, payload)
+                        VALUES
+                            (:sid, :reason, :invoice_id, :invoice_number, :supplier,
+                             :line_description, :line_quantity, :unit_amount, :line_total, :bill_date,
+                             :suggested_score_key, :suggested_confidence, :mapping_id, :payload)
+                        RETURNING review_id
+                        """
+                    ),
+                    {
+                        "sid": site_id,
+                        "reason": reason_code,
+                        "invoice_id": invoice_id,
+                        "invoice_number": invoice_number,
+                        "supplier": supplier,
+                        "line_description": line_description or "",
+                        "line_quantity": line_quantity,
+                        "unit_amount": unit_amount,
+                        "line_total": line_total,
+                        "bill_date": bill_date,
+                        "suggested_score_key": suggested_score_key,
+                        "suggested_confidence": _mapping_confidence_value(suggested_confidence),
+                        "mapping_id": mapping_id,
+                        "payload": _json_dumps(payload) if payload is not None else None,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+            conn.commit()
+            return int(row["review_id"]) if row else None
+    except Exception as e:
+        logger.warning("enqueue_xero_review_item unavailable (non-fatal): %s", e)
+        return None
+
+
+def list_xero_review_queue(
+    site_id: str,
+    since: datetime = None,
+    queue_status: str = "open",
+    limit: int = 500,
+) -> list[dict]:
+    """List Xero review queue rows with optional time/status filtering."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_review_queue_table(conn)
+            if not _xero_table_exists(conn, "xero_review_queue"):
+                return []
+            rows = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT review_id, queue_status, reason_code, invoice_id, invoice_number, supplier,
+                               line_description, line_quantity, unit_amount, line_total, bill_date,
+                               suggested_score_key, suggested_confidence, mapping_id, payload,
+                               resolution_note, resolved_by, created_at, resolved_at
+                        FROM xero_review_queue
+                        WHERE site_id = :sid
+                          AND (:status IS NULL OR queue_status = :status)
+                          AND (:since IS NULL OR created_at >= :since)
+                        ORDER BY created_at DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {
+                        "sid": site_id,
+                        "status": queue_status,
+                        "since": since,
+                        "lim": max(1, int(limit or 500)),
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.warning("list_xero_review_queue unavailable (non-fatal): %s", e)
+        return []
+
+
+def resolve_xero_review_item(
+    site_id: str,
+    review_id: int,
+    resolved_by: str = "operator",
+    resolution_note: str = None,
+) -> bool:
+    """Mark one review item as resolved."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_review_queue_table(conn)
+            if not _xero_table_exists(conn, "xero_review_queue"):
+                return False
+            result = conn.execute(
+                _text(
+                    """
+                    UPDATE xero_review_queue
+                    SET queue_status = 'resolved',
+                        resolved_by = :resolved_by,
+                        resolution_note = :resolution_note,
+                        resolved_at = NOW()
+                    WHERE site_id = :sid
+                      AND review_id = :rid
+                      AND queue_status = 'open'
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "rid": review_id,
+                    "resolved_by": resolved_by,
+                    "resolution_note": resolution_note,
+                },
+            )
+            conn.commit()
+            return result.rowcount > 0
+    except Exception as e:
+        logger.warning("resolve_xero_review_item unavailable (non-fatal): %s", e)
+        return False
+
+
+def resolve_xero_review_items_for_mapping(
+    site_id: str,
+    mapping_id: int,
+    resolved_by: str = "operator",
+    resolution_note: str = None,
+) -> int:
+    """Resolve all open review items linked to a mapping id."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_review_queue_table(conn)
+            if not _xero_table_exists(conn, "xero_review_queue"):
+                return 0
+            result = conn.execute(
+                _text(
+                    """
+                    UPDATE xero_review_queue
+                    SET queue_status = 'resolved',
+                        resolved_by = :resolved_by,
+                        resolution_note = :resolution_note,
+                        resolved_at = NOW()
+                    WHERE site_id = :sid
+                      AND mapping_id = :mid
+                      AND queue_status = 'open'
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "mid": mapping_id,
+                    "resolved_by": resolved_by,
+                    "resolution_note": resolution_note,
+                },
+            )
+            conn.commit()
+            return int(result.rowcount or 0)
+    except Exception as e:
+        logger.warning("resolve_xero_review_items_for_mapping unavailable (non-fatal): %s", e)
+        return 0
+
+
+def get_xero_review_counts(site_id: str, queue_status: str = "open") -> dict:
+    """Return {reason_code: count} summary for review queue items."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_review_queue_table(conn)
+            if not _xero_table_exists(conn, "xero_review_queue"):
+                return {}
+            rows = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT reason_code, COUNT(*) AS count
+                        FROM xero_review_queue
+                        WHERE site_id = :sid
+                          AND (:status IS NULL OR queue_status = :status)
+                        GROUP BY reason_code
+                        """
+                    ),
+                    {"sid": site_id, "status": queue_status},
+                )
+                .mappings()
+                .all()
+            )
+        return {str(row["reason_code"]): int(row["count"] or 0) for row in rows}
+    except Exception as e:
+        logger.warning("get_xero_review_counts unavailable (non-fatal): %s", e)
+        return {}
+
+
+def store_xero_cost_history(
+    site_id: str,
+    score_key: str,
+    cost_cents: int,
+    observed_at: datetime = None,
+    source: str = "xero",
+    reference: str = None,
+) -> None:
+    """Append observed Xero unit cost history for guardrail bounds."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_cost_history_table(conn)
+            if not _xero_table_exists(conn, "xero_cost_history"):
+                return
+            conn.execute(
+                _text(
+                    """
+                    INSERT INTO xero_cost_history
+                        (site_id, score_key, cost_cents, observed_at, source, reference)
+                    VALUES
+                        (:sid, :score_key, :cost_cents, :observed_at, :source, :reference)
+                    """
+                ),
+                {
+                    "sid": site_id,
+                    "score_key": score_key,
+                    "cost_cents": int(cost_cents),
+                    "observed_at": observed_at or datetime.now(timezone.utc),
+                    "source": source or "xero",
+                    "reference": reference,
+                },
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning("store_xero_cost_history unavailable (non-fatal): %s", e)
+
+
+def get_recent_xero_cost_history(site_id: str, score_key: str, limit: int = 20) -> list[int]:
+    """Return recent cost_cents history ordered oldest→newest."""
+    try:
+        with engine.connect() as conn:
+            _ensure_xero_cost_history_table(conn)
+            if not _xero_table_exists(conn, "xero_cost_history"):
+                return []
+            rows = conn.execute(
+                _text(
+                    """
+                        SELECT cost_cents
+                        FROM xero_cost_history
+                        WHERE site_id = :sid AND score_key = :score_key
+                        ORDER BY observed_at DESC
+                        LIMIT :lim
+                        """
+                ),
+                {
+                    "sid": site_id,
+                    "score_key": score_key,
+                    "lim": max(1, int(limit or 20)),
+                },
+            ).all()
+        values = [int(row[0]) for row in rows if row and row[0] is not None]
+        values.reverse()
+        return values
+    except Exception as e:
+        logger.warning("get_recent_xero_cost_history unavailable (non-fatal): %s", e)
+        return []
 
 
 def _ensure_xero_financial_facts_table(conn) -> None:

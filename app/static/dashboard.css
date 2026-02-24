@@ -627,6 +627,147 @@ body {
   color: var(--danger);
 }
 
+/* --- Accuracy Dashboard --- */
+.accuracy-dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.accuracy-dash-header h2 {
+  margin: 0;
+}
+
+.accuracy-period-selector {
+  display: flex;
+  gap: 6px;
+}
+
+.period-btn {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(154, 164, 178, 0.3);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: 'IBM Plex Sans', sans-serif;
+  transition: background 0.15s, color 0.15s;
+}
+
+.period-btn:hover {
+  background: rgba(154, 164, 178, 0.12);
+  color: var(--text);
+}
+
+.period-btn.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.dow-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.dow-row .dow-label {
+  width: 36px;
+  text-align: right;
+  color: var(--muted);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.dow-bar-track {
+  flex: 1;
+  height: 20px;
+  background: var(--panel-alt);
+  border-radius: 4px;
+  position: relative;
+  overflow: hidden;
+}
+
+.dow-bar {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--bar-normal);
+  transition: width 0.3s ease;
+  display: flex;
+  align-items: center;
+  padding-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+}
+
+.dow-bar.best {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.dow-bar.worst {
+  background: var(--danger);
+  color: var(--bg);
+}
+
+.dow-row .dow-bias {
+  width: 50px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.accuracy-bar-green {
+  background: var(--success);
+}
+
+.accuracy-bar-yellow {
+  background: var(--accent);
+}
+
+.accuracy-bar-red {
+  background: var(--danger);
+}
+
+.accuracy-trend-chart {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 120px;
+  padding-top: 8px;
+}
+
+.accuracy-trend-chart .chart-bar-wrapper {
+  height: 100%;
+}
+
+.accuracy-target-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 2px dashed rgba(226, 177, 74, 0.5);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.accuracy-target-line::after {
+  content: "85%";
+  position: absolute;
+  right: 0;
+  top: -14px;
+  font-size: 10px;
+  color: var(--accent);
+}
+
 /* --- Loading & Error --- */
 .loading {
   color: var(--muted);

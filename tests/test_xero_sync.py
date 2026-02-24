@@ -18,8 +18,17 @@ class _DummyClient:
         return {"total_income_cents": 0, "from_date": str(from_date), "to_date": str(to_date)}
 
 
+def _patch_guardrail_dependencies(monkeypatch):
+    monkeypatch.setattr("data.xero.get_item_costs", lambda _sid: {})
+    monkeypatch.setattr("data.xero.get_recent_xero_cost_history", lambda *_a, **_k: [])
+    monkeypatch.setattr("data.xero.store_xero_cost_history", lambda **_kwargs: None)
+    monkeypatch.setattr("data.xero.enqueue_xero_review_item", lambda **_kwargs: 1)
+    monkeypatch.setattr("data.xero.resolve_xero_review_items_for_mapping", lambda **_kwargs: 0)
+
+
 class TestSyncXeroBills:
     def test_returns_zero_summary_when_no_bills(self, monkeypatch):
+        _patch_guardrail_dependencies(monkeypatch)
         monkeypatch.setattr("data.xero.XeroClient", lambda _sid: _DummyClient([]))
         monkeypatch.setattr(
             "data.xero.sync_xero_revenue",
@@ -32,20 +41,21 @@ class TestSyncXeroBills:
 
         result = sync_xero_bills("site-1")
 
-        assert result == {
-            "bills_fetched": 0,
-            "items_mapped": 0,
-            "costs_updated": 0,
-            "inventory_receipts_linked": 0,
-            "inventory_receipts_unmatched": 0,
-            "financial_transactions": 0,
-            "financial_days_updated": 0,
-            "revenue_weeks_processed": 0,
-            "revenue_weeks_reconciled": 0,
-            "revenue_days_reconciled": 0,
-        }
+        assert result["bills_fetched"] == 0
+        assert result["lines_processed"] == 0
+        assert result["items_mapped"] == 0
+        assert result["costs_updated"] == 0
+        assert result["items_updated"] == 0
+        assert result["inventory_receipts_linked"] == 0
+        assert result["inventory_receipts_unmatched"] == 0
+        assert result["financial_transactions"] == 0
+        assert result["financial_days_updated"] == 0
+        assert result["revenue_weeks_processed"] == 0
+        assert result["revenue_weeks_reconciled"] == 0
+        assert result["revenue_days_reconciled"] == 0
 
     def test_maps_and_upserts_line_items(self, monkeypatch):
+        _patch_guardrail_dependencies(monkeypatch)
         bills = [
             {
                 "invoice_number": "INV-1",
@@ -98,11 +108,16 @@ class TestSyncXeroBills:
         assert upserts[0]["source"] == "xero"
         assert result["financial_transactions"] == 0
         assert result["financial_days_updated"] == 0
+        assert result["mappings_approved_used"] == 0
+        assert result["mappings_proposed"] == 0
+        assert result["mappings_auto_applied"] == 0
+        assert result["review_queue_added"] == 0
         assert result["revenue_weeks_processed"] == 2
         assert result["revenue_weeks_reconciled"] == 1
         assert result["revenue_days_reconciled"] == 1
 
     def test_upserts_daily_financial_facts_from_bank_transactions(self, monkeypatch):
+        _patch_guardrail_dependencies(monkeypatch)
         txns = [
             {"date": "2026-02-18", "type": "RECEIVE", "total": 1250.75},
             {"date": "2026-02-18", "type": "SPEND", "total": 420.10},
@@ -142,6 +157,7 @@ class TestSyncXeroBills:
         assert result["revenue_days_reconciled"] == 0
 
     def test_links_inventory_receipts_when_score_key_matches_inventory_item(self, monkeypatch):
+        _patch_guardrail_dependencies(monkeypatch)
         bills = [
             {
                 "invoice_number": "INV-2",

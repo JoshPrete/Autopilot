@@ -491,8 +491,8 @@ CREATE TABLE IF NOT EXISTS xero_tokens (
     id            SERIAL PRIMARY KEY,
     site_id       UUID NOT NULL REFERENCES sites(site_id) UNIQUE,
     tenant_id     TEXT NOT NULL,
-    access_token  TEXT NOT NULL,
-    refresh_token TEXT NOT NULL,
+    access_token  TEXT NOT NULL, -- encrypted at rest
+    refresh_token TEXT NOT NULL, -- encrypted at rest
     expires_at    TIMESTAMPTZ NOT NULL,
     scope         TEXT,
     connected_at  TIMESTAMPTZ DEFAULT NOW(),
@@ -512,18 +512,73 @@ CREATE TABLE IF NOT EXISTS xero_oauth_states (
 CREATE INDEX IF NOT EXISTS idx_xero_oauth_states_expires ON xero_oauth_states(expires_at);
 
 -- ============================================================
--- Xero Line Mappings (cached LLM description → score_key)
+-- Xero Line Mappings (auditable proposal/approval workflow)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS xero_line_mappings (
     id               SERIAL PRIMARY KEY,
     site_id          UUID NOT NULL REFERENCES sites(site_id),
     xero_description TEXT NOT NULL,
     score_key        TEXT NOT NULL,
-    confidence       TEXT DEFAULT 'unconfirmed',
-    units_per_pack   INTEGER DEFAULT 1 NOT NULL,
+    confidence       REAL CHECK (confidence >= 0 AND confidence <= 1),
+    source           TEXT NOT NULL DEFAULT 'llm' CHECK (source IN ('human', 'llm', 'rule')),
+    status           TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'approved', 'rejected')),
+    proposed_at      TIMESTAMPTZ DEFAULT NOW(),
+    approved_at      TIMESTAMPTZ,
+    approved_by      TEXT,
+    model            TEXT,
+    prompt_version   TEXT,
+    units_per_pack   INTEGER DEFAULT 1 NOT NULL CHECK (units_per_pack >= 1),
     created_at       TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(site_id, xero_description)
 );
+CREATE INDEX IF NOT EXISTS idx_xero_line_mappings_site_status
+ON xero_line_mappings(site_id, status, proposed_at DESC);
+
+-- ============================================================
+-- Xero Review Queue (operator triage)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS xero_review_queue (
+    review_id               SERIAL PRIMARY KEY,
+    site_id                 UUID NOT NULL REFERENCES sites(site_id),
+    queue_status            TEXT NOT NULL DEFAULT 'open' CHECK (queue_status IN ('open', 'resolved')),
+    reason_code             TEXT NOT NULL,
+    invoice_id              TEXT,
+    invoice_number          TEXT,
+    supplier                TEXT,
+    line_description        TEXT NOT NULL,
+    line_quantity           NUMERIC,
+    unit_amount             NUMERIC,
+    line_total              NUMERIC,
+    bill_date               DATE,
+    suggested_score_key     TEXT,
+    suggested_confidence    REAL,
+    mapping_id              INTEGER REFERENCES xero_line_mappings(id),
+    payload                 JSONB,
+    resolution_note         TEXT,
+    resolved_by             TEXT,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at             TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_xero_review_queue_site_status
+ON xero_review_queue(site_id, queue_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_xero_review_queue_reason
+ON xero_review_queue(site_id, reason_code, created_at DESC);
+
+-- ============================================================
+-- Xero Cost History (for outlier guardrails)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS xero_cost_history (
+    history_id      SERIAL PRIMARY KEY,
+    site_id         UUID NOT NULL REFERENCES sites(site_id),
+    score_key       TEXT NOT NULL,
+    cost_cents      INT NOT NULL,
+    observed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source          TEXT NOT NULL DEFAULT 'xero',
+    reference       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_xero_cost_history_site_key_time
+ON xero_cost_history(site_id, score_key, observed_at DESC);
 
 -- ============================================================
 -- Xero Financial Facts (daily factual cash in/out from Xero)

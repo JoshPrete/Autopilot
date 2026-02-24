@@ -4,6 +4,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 class Settings:
     # Square POS
     SQUARE_ACCESS_TOKEN: str = os.environ.get("SQUARE_ACCESS_TOKEN", "")
@@ -44,6 +51,16 @@ class Settings:
     XERO_CLIENT_SECRET: str = os.environ.get("XERO_CLIENT_SECRET", "")
     XERO_REDIRECT_URI: str = os.environ.get(
         "XERO_REDIRECT_URI", "http://localhost:8000/api/xero/callback"
+    )
+    AUTOPILOT_TOKEN_ENC_KEY: str = os.environ.get("AUTOPILOT_TOKEN_ENC_KEY", "")
+    ALLOW_AUTO_APPLY_PROPOSED_MAPPINGS: bool = _env_bool(
+        "ALLOW_AUTO_APPLY_PROPOSED_MAPPINGS", False
+    )
+    MIN_CONFIDENCE_AUTO_APPLY: float = float(os.environ.get("MIN_CONFIDENCE_AUTO_APPLY", "0.90"))
+    MAX_COST_DELTA_PCT: float = float(os.environ.get("MAX_COST_DELTA_PCT", "40"))
+    XERO_MAPPING_PROMPT_VERSION: str = os.environ.get(
+        "XERO_MAPPING_PROMPT_VERSION",
+        "xero-mapping-v2",
     )
 
     # AI Chat (Claude API)

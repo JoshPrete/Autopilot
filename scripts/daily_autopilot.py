@@ -424,7 +424,7 @@ def step_xero(site_id: str, run_date: date, dry_run: bool = False) -> dict:
     Runs after deputy, before profitability. Follows fail-quiet pattern —
     skips silently if Xero is not connected for this site.
     """
-    from data.xero import XeroError, is_xero_configured, sync_xero_bills
+    from data.xero import XeroAuthError, XeroError, is_xero_configured, sync_xero_bills
 
     if not is_xero_configured(site_id):
         logger.info("Xero not configured — skipping bill sync")
@@ -438,9 +438,31 @@ def step_xero(site_id: str, run_date: date, dry_run: bool = False) -> dict:
 
     try:
         result = sync_xero_bills(site_id, days_back=7)
-        logger.info("Xero sync complete: %s", result)
+        review_by_reason = result.get("review_queue_by_reason") or {}
+        review_parts = [f"{k}:{v}" for k, v in sorted(review_by_reason.items())]
+        logger.info(
+            "Xero summary: bills=%s lines=%s approved=%s proposed=%s auto_applied=%s updated=%s review=%s%s",
+            result.get("bills_fetched", 0),
+            result.get("lines_processed", 0),
+            result.get("mappings_approved_used", 0),
+            result.get("mappings_proposed", 0),
+            result.get("mappings_auto_applied", 0),
+            result.get("items_updated", result.get("costs_updated", 0)),
+            result.get("review_queue_added", 0),
+            f" ({', '.join(review_parts)})" if review_parts else "",
+        )
         return {"status": "ok", **result}
 
+    except XeroAuthError as e:
+        logger.warning(
+            "Xero sync auth failed (non-fatal): %s. Next action: reauthorize Xero at /xero/setup and retry sync.",
+            e,
+        )
+        return {
+            "status": "error",
+            "error": str(e),
+            "next_action": "Reauthorize Xero at /xero/setup and retry sync",
+        }
     except XeroError as e:
         logger.warning("Xero sync failed (non-fatal): %s", e)
         return {"status": "error", "error": str(e)}

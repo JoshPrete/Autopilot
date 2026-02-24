@@ -44,9 +44,17 @@
         <div id="chart-content" class="loading">Loading chart...</div>
       </div>
 
-      <!-- 5. Accuracy & Adoption Strip -->
+      <!-- 5. Prediction Accuracy Dashboard -->
       <div class="panel full-width" id="panel-accuracy">
-        <h2>Accuracy &amp; Adoption</h2>
+        <div class="accuracy-dash-header">
+          <h2>Prediction Accuracy</h2>
+          <div class="accuracy-period-selector">
+            <button class="period-btn" data-days="7">7d</button>
+            <button class="period-btn active" data-days="30">30d</button>
+            <button class="period-btn" data-days="60">60d</button>
+            <button class="period-btn" data-days="90">90d</button>
+          </div>
+        </div>
         <div id="accuracy-content" class="loading">Loading metrics...</div>
       </div>
 

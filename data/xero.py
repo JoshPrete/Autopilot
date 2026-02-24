@@ -24,14 +24,17 @@ import requests
 
 from config.settings import settings
 from data.storage import (
-    get_all_xero_mappings,
+    enqueue_xero_review_item,
     get_inventory_item_by_score_key,
     get_item_costs,
+    get_recent_xero_cost_history,
     get_xero_line_mapping,
     list_inventory_items,
+    resolve_xero_review_items_for_mapping,
+    store_xero_cost_history,
     store_inventory_receipt,
     get_xero_tokens,
-    store_xero_line_mapping,
+    upsert_xero_line_mapping,
     upsert_xero_financial_fact,
     update_xero_tokens,
     upsert_item_cost,
@@ -48,6 +51,12 @@ XERO_MAX_RETRY_DELAY_SECONDS = 20.0
 
 class XeroError(Exception):
     """Raised when Xero API calls fail."""
+
+    pass
+
+
+class XeroAuthError(XeroError):
+    """Raised when Xero auth or token refresh fails and requires reauthorization."""
 
     pass
 
@@ -147,7 +156,7 @@ class XeroClient:
         logger.info("Xero token expired, refreshing...")
 
         if not settings.XERO_CLIENT_ID or not settings.XERO_CLIENT_SECRET:
-            raise XeroError("XERO_CLIENT_ID and XERO_CLIENT_SECRET required for token refresh")
+            raise XeroAuthError("XERO_CLIENT_ID and XERO_CLIENT_SECRET required for token refresh")
 
         try:
             resp = requests.post(
@@ -160,12 +169,24 @@ class XeroClient:
                 },
                 timeout=30,
             )
+            if resp.status_code in (400, 401, 403):
+                body = (resp.text or "").strip()[:500]
+                raise XeroAuthError(
+                    f"Xero token refresh unauthorized ({resp.status_code}). "
+                    f"Reauthorize at /xero/setup. {body}"
+                )
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as e:
-            raise XeroError(f"Token refresh failed: {e}") from e
+            raise XeroAuthError(f"Token refresh failed: {e}. Reauthorize at /xero/setup.") from e
+
+        if not data.get("access_token") or not data.get("refresh_token"):
+            raise XeroAuthError(
+                "Xero token refresh response missing rotated token(s). Reauthorize at /xero/setup."
+            )
 
         self.access_token = data["access_token"]
+        # Xero rotates refresh tokens. Always persist the NEW refresh token.
         self.refresh_token = data["refresh_token"]
         self.expires_at = datetime.now(timezone.utc) + timedelta(seconds=data["expires_in"])
 
@@ -208,6 +229,12 @@ class XeroClient:
                 continue
 
             status_code = int(resp.status_code)
+            if status_code in (401, 403):
+                body = (resp.text or "").strip()[:500]
+                raise XeroAuthError(
+                    f"Xero auth failed ({status_code}) for {endpoint}. "
+                    f"Reauthorize at /xero/setup. {body}"
+                )
             if status_code in XERO_RETRYABLE_STATUS_CODES and attempt < XERO_MAX_RETRIES:
                 delay = _retry_delay_seconds(attempt, resp.headers.get("Retry-After"))
                 logger.warning(
@@ -372,6 +399,7 @@ class XeroClient:
             supplier_name = contact.get("Name", "")
 
         return {
+            "invoice_id": raw.get("InvoiceID", ""),
             "invoice_number": raw.get("InvoiceNumber", ""),
             "supplier": supplier_name,
             "date": bill_date,
@@ -462,107 +490,194 @@ def is_xero_configured(site_id: str) -> bool:
 def map_xero_lines_to_score_keys(
     site_id: str,
     line_items: list[dict],
-) -> list[dict]:
+) -> dict:
     """
-    Map Xero line-item descriptions to score_keys using cached mappings
-    and Claude LLM for unmapped items.
+    Resolve line-item descriptions against approved mappings.
+    LLM may propose new mappings but they remain non-authoritative until approved.
 
     Args:
         site_id: Site UUID
         line_items: List of dicts with 'description', 'unit_amount', 'quantity'
 
     Returns:
-        List of dicts with 'description', 'score_key', 'category',
-        'unit_cost_cents', 'confidence', 'units_per_pack', 'line_quantity'
+        {
+            "mapped_lines": [...],  # lines allowed for downstream cost processing
+            "approved_used": int,
+            "proposals_created": int,
+            "proposals_auto_applied": int,
+            "review_additions": {reason: count}
+        }
     """
-    # Deduplicate descriptions
-    unique_descriptions = list({li["description"] for li in line_items})
+    unique_descriptions = sorted({str(li.get("description") or "").strip() for li in line_items})
+    unique_descriptions = [d for d in unique_descriptions if d]
+    review_additions: dict[str, int] = defaultdict(int)
 
-    # Check cache first
-    cached = {}
+    approved: dict[str, dict] = {}
+    existing_proposals: dict[str, dict] = {}
     uncached = []
+
     for desc in unique_descriptions:
-        mapping = get_xero_line_mapping(site_id, desc)
-        if mapping:
-            cached[desc] = mapping  # {score_key, units_per_pack}
-        else:
-            uncached.append(desc)
+        approved_mapping = get_xero_line_mapping(site_id, desc, status="approved")
+        if approved_mapping:
+            approved[desc] = approved_mapping
+            continue
+        proposed_mapping = get_xero_line_mapping(site_id, desc, status="proposed")
+        if proposed_mapping:
+            existing_proposals[desc] = proposed_mapping
+            continue
+        rejected_mapping = get_xero_line_mapping(site_id, desc, status="rejected")
+        if rejected_mapping:
+            existing_proposals[desc] = rejected_mapping
+            continue
+        uncached.append(desc)
 
     logger.info(
-        "Xero line mapping: %d cached, %d need LLM mapping",
-        len(cached),
+        "Xero line mapping workflow: %d approved, %d proposed, %d uncached",
+        len(approved),
+        len(existing_proposals),
         len(uncached),
     )
 
-    # LLM mapping for uncached items (batch in groups of 25 to avoid token limits)
-    llm_mapped = {}
+    llm_proposed: dict[str, dict] = {}
+    proposals_created = 0
     if uncached and settings.ANTHROPIC_API_KEY:
         batch_size = 25
         for i in range(0, len(uncached), batch_size):
             batch = uncached[i : i + batch_size]
             batch_result = _llm_map_descriptions(site_id, batch)
-            llm_mapped.update(batch_result)
-        # Cache new mappings
-        for desc, mapping in llm_mapped.items():
-            store_xero_line_mapping(
-                site_id,
-                desc,
-                mapping["score_key"],
-                mapping.get("confidence", "unconfirmed"),
-                units_per_pack=mapping.get("units_per_pack", 1),
+            llm_proposed.update(batch_result)
+
+        for desc, suggestion in llm_proposed.items():
+            mapping_row = upsert_xero_line_mapping(
+                site_id=site_id,
+                description=desc,
+                score_key=suggestion["score_key"],
+                confidence=suggestion.get("confidence"),
+                units_per_pack=suggestion.get("units_per_pack", 1),
+                source="llm",
+                status="proposed",
+                model=suggestion.get("model"),
+                prompt_version=suggestion.get("prompt_version"),
+            )
+            if mapping_row:
+                existing_proposals[desc] = mapping_row
+                proposals_created += 1
+
+    allow_auto_apply = bool(settings.ALLOW_AUTO_APPLY_PROPOSED_MAPPINGS)
+    min_auto_conf = float(settings.MIN_CONFIDENCE_AUTO_APPLY or 0.90)
+
+    mapped_lines = []
+    approved_used = 0
+    proposals_auto_applied = 0
+
+    for li in line_items:
+        desc = str(li.get("description") or "").strip()
+        if not desc:
+            continue
+
+        mapping = approved.get(desc)
+        mapping_status = "approved"
+        mapping_source = "approved"
+        apply_allowed = mapping is not None
+
+        if not mapping:
+            mapping = existing_proposals.get(desc)
+            mapping_status = str((mapping or {}).get("status") or "proposed")
+            mapping_source = str((mapping or {}).get("source") or "llm")
+            confidence = float((mapping or {}).get("confidence") or 0.0)
+            apply_allowed = (
+                mapping is not None
+                and mapping_status == "proposed"
+                and allow_auto_apply
+                and confidence >= min_auto_conf
             )
 
-    # Build result list — join back to line items
-    results = []
-    for li in line_items:
-        desc = li["description"]
-        score_key = None
-        category = "drink"  # default
-        units_per_pack = 1
+            reason = None
+            if not mapping:
+                reason = "UNMAPPED"
+            elif mapping_status == "rejected":
+                reason = "UNMAPPED"
+            elif confidence < min_auto_conf:
+                reason = "LOW_CONFIDENCE"
+            elif not allow_auto_apply:
+                reason = "PENDING_APPROVAL"
+            if reason:
+                enqueue_xero_review_item(
+                    site_id=site_id,
+                    reason_code=reason,
+                    invoice_id=li.get("_invoice_id"),
+                    invoice_number=li.get("_invoice_number"),
+                    supplier=li.get("_supplier"),
+                    line_description=desc,
+                    line_quantity=float(li.get("quantity", 1) or 1),
+                    unit_amount=float(li.get("unit_amount", 0) or 0),
+                    line_total=float(li.get("line_amount", 0) or 0),
+                    bill_date=li.get("_bill_date"),
+                    suggested_score_key=(mapping or {}).get("score_key"),
+                    suggested_confidence=(mapping or {}).get("confidence"),
+                    mapping_id=(mapping or {}).get("id"),
+                    payload={
+                        "mapping_status": mapping_status,
+                        "mapping_source": mapping_source,
+                        "auto_apply_enabled": allow_auto_apply,
+                        "min_confidence_auto_apply": min_auto_conf,
+                    },
+                )
+                review_additions[reason] += 1
 
-        if desc in cached:
-            score_key = cached[desc]["score_key"]
-            units_per_pack = cached[desc].get("units_per_pack", 1)
-            confidence = "confirmed"
-        elif desc in llm_mapped:
-            mapping = llm_mapped[desc]
-            score_key = mapping["score_key"]
-            category = mapping.get("category", "drink")
-            confidence = mapping.get("confidence", "unconfirmed")
-            units_per_pack = mapping.get("units_per_pack", 1)
-
-        if not score_key:
-            # Skip items that couldn't be mapped
-            logger.debug("Could not map Xero line: '%s'", desc)
+        if not mapping or not apply_allowed:
             continue
+
+        score_key = str(mapping.get("score_key") or "").strip()
+        if not score_key:
+            continue
+
+        units_per_pack = max(1, int(mapping.get("units_per_pack") or 1))
+        confidence = float(mapping.get("confidence") or 0.0)
+        category = str((mapping or {}).get("category") or "ingredient")
+        if mapping_status == "approved":
+            approved_used += 1
+        else:
+            proposals_auto_applied += 1
 
         raw_cost_cents = int(round(float(li.get("unit_amount", 0)) * 100))
         unit_cost_cents = raw_cost_cents // max(1, units_per_pack)
 
-        results.append(
+        mapped_lines.append(
             {
                 "description": desc,
                 "score_key": score_key,
                 "category": category,
                 "unit_cost_cents": unit_cost_cents,
                 "confidence": confidence,
-                "units_per_pack": max(1, int(units_per_pack)),
+                "units_per_pack": units_per_pack,
                 "line_quantity": float(li.get("quantity", 1) or 1),
                 "invoice_number": li.get("_invoice_number"),
+                "invoice_id": li.get("_invoice_id"),
                 "supplier": li.get("_supplier"),
                 "bill_date": li.get("_bill_date"),
                 "line_index": int(li.get("_line_index", 0) or 0),
+                "line_total": float(li.get("line_amount", 0) or 0),
+                "unit_amount": float(li.get("unit_amount", 0) or 0),
+                "mapping_id": mapping.get("id"),
+                "mapping_status": mapping_status,
             }
         )
 
-    return results
+    return {
+        "mapped_lines": mapped_lines,
+        "approved_used": approved_used,
+        "proposals_created": proposals_created,
+        "proposals_auto_applied": proposals_auto_applied,
+        "review_additions": dict(review_additions),
+    }
 
 
 def _llm_map_descriptions(site_id: str, descriptions: list[str]) -> dict:
     """
     Use Claude to map Xero line descriptions to score_keys.
 
-    Returns: {description: {score_key, category, confidence}}
+    Returns: {description: {score_key, category, confidence(float), units_per_pack, model, prompt_version}}
     """
     # Get existing score_keys for context
     existing_costs = get_item_costs(site_id)
@@ -583,7 +698,7 @@ Map each supplier line description to the most appropriate score_key.
 - If it clearly matches an existing key, use that key
 - If it's a new ingredient, create a snake_case key (e.g. "oat_milk", "vanilla_syrup")
 - Category should be one of: "drink", "food", "retail", "ingredient"
-- Confidence: "high" if clear match, "medium" if reasonable guess, "low" if uncertain
+- Confidence: numeric value from 0.00 to 1.00
 - units_per_pack: how many individual sellable units are in this line item.
   Examples: "12 Pack- Milk Choc Chip" → 12, "12x 1L Oat Barista" → 12,
   "6x 1L Soy Milk" → 6, "100 Peppermint Tea Bags" → 100,
@@ -594,7 +709,7 @@ Supplier line descriptions to map:
 {json.dumps(descriptions, indent=2)}
 
 Respond with ONLY valid JSON — an array of objects:
-[{{"description": "...", "score_key": "...", "category": "...", "confidence": "...", "units_per_pack": 1}}]
+[{{"description": "...", "score_key": "...", "category": "...", "confidence": 0.93, "units_per_pack": 1}}]
 
 If an item should be skipped (not food/drink related), omit it from the response."""
 
@@ -627,11 +742,18 @@ If an item should be skipped (not food/drink related), omit it from the response
         for m in mappings_list:
             desc = m.get("description", "")
             if desc and m.get("score_key"):
+                confidence = m.get("confidence", 0.0)
+                try:
+                    confidence = max(0.0, min(1.0, float(confidence)))
+                except (TypeError, ValueError):
+                    confidence = 0.0
                 result[desc] = {
                     "score_key": m["score_key"],
                     "category": m.get("category", "ingredient"),
-                    "confidence": m.get("confidence", "medium"),
+                    "confidence": confidence,
                     "units_per_pack": max(1, int(m.get("units_per_pack", 1))),
+                    "model": "claude-sonnet-4-5-20250929",
+                    "prompt_version": settings.XERO_MAPPING_PROMPT_VERSION,
                 }
 
         logger.info("LLM mapped %d/%d Xero descriptions", len(result), len(descriptions))
@@ -640,6 +762,69 @@ If an item should be skipped (not food/drink related), omit it from the response
     except Exception as e:
         logger.warning("LLM mapping failed (non-fatal): %s", e)
         return {}
+
+
+def _percentile(values: list[int], p: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    ordered = sorted(float(v) for v in values)
+    idx = max(0.0, min(1.0, p)) * (len(ordered) - 1)
+    lower = int(idx)
+    upper = min(len(ordered) - 1, lower + 1)
+    if lower == upper:
+        return ordered[lower]
+    frac = idx - lower
+    return ordered[lower] * (1 - frac) + ordered[upper] * frac
+
+
+def _iqr_bounds(values: list[int]) -> tuple[float, float]:
+    q1 = _percentile(values, 0.25)
+    q3 = _percentile(values, 0.75)
+    iqr = max(0.0, q3 - q1)
+    if iqr == 0:
+        return q1 * 0.6, q3 * 1.4 if q3 else q1 * 1.4
+    return q1 - (1.5 * iqr), q3 + (1.5 * iqr)
+
+
+def _evaluate_cost_guardrails(
+    *,
+    site_id: str,
+    score_key: str,
+    proposed_cost_cents: int,
+    current_cost_cents: Optional[int],
+) -> tuple[bool, Optional[str], dict]:
+    """
+    Validate a proposed cost against configured delta clamp and historical outlier bounds.
+    Returns (allowed, reason_code, context).
+    """
+    context: dict = {
+        "score_key": score_key,
+        "proposed_cost_cents": int(proposed_cost_cents),
+    }
+
+    if current_cost_cents is not None and int(current_cost_cents) > 0:
+        delta_pct = (
+            abs((int(proposed_cost_cents) - int(current_cost_cents)) / int(current_cost_cents))
+            * 100.0
+        )
+        context["current_cost_cents"] = int(current_cost_cents)
+        context["delta_pct"] = round(delta_pct, 2)
+        if delta_pct > float(settings.MAX_COST_DELTA_PCT or 40.0):
+            context["max_delta_pct"] = float(settings.MAX_COST_DELTA_PCT or 40.0)
+            return False, "EXCESSIVE_DELTA", context
+
+    history = get_recent_xero_cost_history(site_id, score_key, limit=30)
+    context["history_points"] = len(history)
+    if len(history) >= 4:
+        lower, upper = _iqr_bounds(history)
+        context["iqr_lower"] = round(lower, 2)
+        context["iqr_upper"] = round(upper, 2)
+        if proposed_cost_cents < lower or proposed_cost_cents > upper:
+            return False, "OUTLIER_COST", context
+
+    return True, None, context
 
 
 # ============================================================
@@ -686,39 +871,110 @@ def sync_xero_bills(site_id: str, days_back: int = 30) -> dict:
     """
     since_date = date.today() - timedelta(days=days_back)
 
+    review_additions: dict[str, int] = defaultdict(int)
+
     # 1. Fetch bills
-    client = XeroClient(site_id)
-    bills = client.fetch_bills(since_date=since_date)
+    try:
+        client = XeroClient(site_id)
+        bills = client.fetch_bills(since_date=since_date)
+    except XeroAuthError as e:
+        enqueue_xero_review_item(
+            site_id=site_id,
+            reason_code="TOKEN_ERROR",
+            line_description="Xero auth/token refresh failure",
+            payload={"error": str(e)},
+        )
+        raise
 
     # 2. Collect and map line items for COGS updates.
     all_lines = []
     for bill in bills:
         for idx, line in enumerate(bill.get("line_items", [])):
             enriched = dict(line)
+            enriched["_invoice_id"] = bill.get("invoice_id")
             enriched["_invoice_number"] = bill.get("invoice_number")
             enriched["_supplier"] = bill.get("supplier")
             enriched["_bill_date"] = bill.get("date")
             enriched["_line_index"] = idx
             all_lines.append(enriched)
 
-    mapped = map_xero_lines_to_score_keys(site_id, all_lines) if all_lines else []
+    mapping_result = (
+        map_xero_lines_to_score_keys(site_id, all_lines)
+        if all_lines
+        else {
+            "mapped_lines": [],
+            "approved_used": 0,
+            "proposals_created": 0,
+            "proposals_auto_applied": 0,
+            "review_additions": {},
+        }
+    )
+    if isinstance(mapping_result, list):
+        mapped = mapping_result
+        approved_used = 0
+        proposals_created = 0
+        proposals_auto_applied = 0
+    else:
+        mapped = mapping_result.get("mapped_lines", [])
+        approved_used = int(mapping_result.get("approved_used") or 0)
+        proposals_created = int(mapping_result.get("proposals_created") or 0)
+        proposals_auto_applied = int(mapping_result.get("proposals_auto_applied") or 0)
+        for reason, count in (mapping_result.get("review_additions") or {}).items():
+            review_additions[str(reason)] += int(count or 0)
 
     costs_updated = 0
     receipts_linked = 0
     receipts_unmatched = 0
+    current_costs = get_item_costs(site_id)
     for item in mapped:
+        score_key = item["score_key"]
+        proposed_cost = int(item["unit_cost_cents"])
+        allowed, reason_code, guard_context = _evaluate_cost_guardrails(
+            site_id=site_id,
+            score_key=score_key,
+            proposed_cost_cents=proposed_cost,
+            current_cost_cents=current_costs.get(score_key),
+        )
+        if not allowed:
+            enqueue_xero_review_item(
+                site_id=site_id,
+                reason_code=reason_code or "OUTLIER_COST",
+                invoice_id=item.get("invoice_id"),
+                invoice_number=item.get("invoice_number"),
+                supplier=item.get("supplier"),
+                line_description=item.get("description") or score_key,
+                line_quantity=float(item.get("line_quantity", 1) or 1),
+                unit_amount=float(item.get("unit_amount", 0) or 0),
+                line_total=float(item.get("line_total", 0) or 0),
+                bill_date=item.get("bill_date"),
+                suggested_score_key=score_key,
+                suggested_confidence=item.get("confidence"),
+                mapping_id=item.get("mapping_id"),
+                payload=guard_context,
+            )
+            review_additions[reason_code or "OUTLIER_COST"] += 1
+            continue
+
         upsert_item_cost(
             site_id=site_id,
-            score_key=item["score_key"],
+            score_key=score_key,
             category=item["category"],
-            cost_cents=item["unit_cost_cents"],
+            cost_cents=proposed_cost,
             description=item["description"],
             source="xero",
         )
+        store_xero_cost_history(
+            site_id=site_id,
+            score_key=score_key,
+            cost_cents=proposed_cost,
+            source="xero",
+            reference=item.get("invoice_number"),
+        )
+        current_costs[score_key] = proposed_cost
         costs_updated += 1
 
         # Optional stock receipt import: only if inventory item exists for this score_key.
-        inventory_item = get_inventory_item_by_score_key(site_id, item["score_key"])
+        inventory_item = get_inventory_item_by_score_key(site_id, score_key)
         if not inventory_item:
             receipts_unmatched += 1
             continue
@@ -752,6 +1008,14 @@ def sync_xero_bills(site_id: str, days_back: int = 30) -> dict:
         if receipt_id:
             receipts_linked += 1
 
+        if item.get("mapping_status") == "proposed" and item.get("mapping_id"):
+            resolve_xero_review_items_for_mapping(
+                site_id=site_id,
+                mapping_id=int(item["mapping_id"]),
+                resolved_by="system:auto_apply",
+                resolution_note="Auto-applied during Xero sync after guardrails passed.",
+            )
+
     if not bills:
         logger.info("No Xero bills found since %s", since_date)
     elif not all_lines:
@@ -777,6 +1041,15 @@ def sync_xero_bills(site_id: str, days_back: int = 30) -> dict:
                 )
                 financial_days_updated += 1
             financial_txns = len(txns)
+    except XeroAuthError as e:
+        enqueue_xero_review_item(
+            site_id=site_id,
+            reason_code="TOKEN_ERROR",
+            line_description="Xero auth/token refresh failure during bank transaction sync",
+            payload={"error": str(e)},
+        )
+        review_additions["TOKEN_ERROR"] += 1
+        logger.warning("Xero bank transaction sync auth failed (non-fatal): %s", e)
     except XeroError as e:
         logger.warning("Xero bank transaction sync failed (non-fatal): %s", e)
     except Exception as e:
@@ -795,29 +1068,45 @@ def sync_xero_bills(site_id: str, days_back: int = 30) -> dict:
             settlement_lag_days=2,
             client=client,
         )
+    except XeroAuthError as e:
+        enqueue_xero_review_item(
+            site_id=site_id,
+            reason_code="TOKEN_ERROR",
+            line_description="Xero auth/token refresh failure during revenue reconciliation",
+            payload={"error": str(e)},
+        )
+        review_additions["TOKEN_ERROR"] += 1
+        logger.warning("Xero revenue reconciliation auth failed (non-fatal): %s", e)
     except XeroError as e:
         logger.warning("Xero revenue reconciliation failed (non-fatal): %s", e)
     except Exception as e:
         logger.warning("Xero revenue reconciliation unexpected error (non-fatal): %s", e)
 
     logger.info(
-        "Xero sync complete: %d bills, %d lines, %d mapped, %d costs updated, %d receipts linked, %d txns, %d fact days, %d reconciled days",
+        "Xero sync complete: bills=%d lines=%d mapped=%d updated=%d approved=%d proposed=%d auto_applied=%d review=%d",
         len(bills),
         len(all_lines),
         len(mapped),
         costs_updated,
-        receipts_linked,
-        financial_txns,
-        financial_days_updated,
-        int(revenue_reconciliation.get("days_reconciled") or 0),
+        approved_used,
+        proposals_created,
+        proposals_auto_applied,
+        int(sum(review_additions.values())),
     )
 
     return {
         "bills_fetched": len(bills),
+        "lines_processed": len(all_lines),
         "items_mapped": len(mapped),
+        "mappings_approved_used": approved_used,
+        "mappings_proposed": proposals_created,
+        "mappings_auto_applied": proposals_auto_applied,
         "costs_updated": costs_updated,
+        "items_updated": costs_updated,
         "inventory_receipts_linked": receipts_linked,
         "inventory_receipts_unmatched": receipts_unmatched,
+        "review_queue_added": int(sum(review_additions.values())),
+        "review_queue_by_reason": dict(sorted(review_additions.items())),
         "financial_transactions": financial_txns,
         "financial_days_updated": financial_days_updated,
         "revenue_weeks_processed": int(revenue_reconciliation.get("weeks_processed") or 0),
