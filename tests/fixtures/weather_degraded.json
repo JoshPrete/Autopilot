@@ -1,0 +1,45 @@
+{
+  "description": "Weather API is down — prediction still generated without weather data",
+  "ingest": {
+    "status": "ok",
+    "orders": 130,
+    "items": 265,
+    "workload_units": 720.0,
+    "quality_guard": {"status": "clear"}
+  },
+  "deputy": {
+    "status": "ok",
+    "rosters": 5,
+    "stored": 5
+  },
+  "xero": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "profitability": {
+    "status": "ok",
+    "revenue_cents": 260000,
+    "labor_cost_cents": 68000,
+    "net_profit_cents": 128000,
+    "labor_pct": 26.2
+  },
+  "predict": {
+    "status": "ok",
+    "prediction_id": "00000000-0000-0000-0000-000000000100",
+    "total_drinks": 265,
+    "rush_count": 1,
+    "recommendations": 3,
+    "sms_sent": 1,
+    "sms_degraded": false,
+    "plan_length": 980,
+    "weather": null
+  },
+  "intelligence": {
+    "status": "ok",
+    "insights_generated": 2,
+    "patterns_detected": 0
+  },
+  "expected_overall_status": "ok",
+  "expected_degraded": [],
+  "expected_errors": []
+}

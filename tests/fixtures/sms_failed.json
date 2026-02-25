@@ -1,0 +1,44 @@
+{
+  "description": "Twilio SMS fails — plan is generated and printed but not delivered via SMS",
+  "ingest": {
+    "status": "ok",
+    "orders": 140,
+    "items": 280,
+    "workload_units": 760.0,
+    "quality_guard": {"status": "clear"}
+  },
+  "deputy": {
+    "status": "ok",
+    "rosters": 5,
+    "stored": 5
+  },
+  "xero": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "profitability": {
+    "status": "ok",
+    "revenue_cents": 275000,
+    "labor_cost_cents": 70000,
+    "net_profit_cents": 138000,
+    "labor_pct": 25.5
+  },
+  "predict": {
+    "status": "ok",
+    "prediction_id": "00000000-0000-0000-0000-000000000102",
+    "total_drinks": 280,
+    "rush_count": 1,
+    "recommendations": 3,
+    "sms_sent": 0,
+    "sms_degraded": true,
+    "plan_length": 1050
+  },
+  "intelligence": {
+    "status": "ok",
+    "insights_generated": 2,
+    "patterns_detected": 0
+  },
+  "expected_overall_status": "ok",
+  "expected_degraded": [],
+  "expected_errors": []
+}

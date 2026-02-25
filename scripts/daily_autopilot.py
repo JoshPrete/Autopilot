@@ -231,6 +231,91 @@ def _print_summary(
     print("=" * 60)
 
 
+def build_run_report(
+    site_id: str,
+    site_name: str,
+    run_date: date,
+    step: str,
+    dry_run: bool,
+    results: dict,
+    started_at: datetime,
+) -> dict:
+    """
+    Build a structured JSON report from the pipeline results.
+
+    Includes per-step status, trust metrics (accuracy, confidence,
+    data quality), and degraded service tracking. Suitable for
+    storage in pipeline_runs and consumption by the daily-loop
+    health endpoint.
+    """
+    finished_at = datetime.utcnow()
+    duration_ms = max(0, round((finished_at - started_at).total_seconds() * 1000))
+
+    # Classify each step
+    steps_report = {}
+    degraded = []
+    errors = []
+    for step_name, step_result in results.items():
+        if not isinstance(step_result, dict):
+            steps_report[step_name] = {"status": "ok"}
+            continue
+        status = step_result.get("status", "ok")
+        steps_report[step_name] = {"status": status}
+        if status == "error":
+            errors.append(step_name)
+            steps_report[step_name]["error"] = step_result.get("error", "")
+        elif status == "skipped":
+            reason = step_result.get("reason", "")
+            steps_report[step_name]["reason"] = reason
+            # Non-critical skips (deputy not configured, dry_run) are not degraded
+            if reason not in ("not_configured", "dry_run", "prediction_id_regeneration_mode"):
+                degraded.append(step_name)
+
+    # Trust metrics from predict result
+    predict_result = results.get("predict", {})
+    trust = {}
+    if isinstance(predict_result, dict) and predict_result.get("status") == "ok":
+        trust["prediction_id"] = predict_result.get("prediction_id")
+        trust["total_drinks"] = predict_result.get("total_drinks")
+        trust["rush_count"] = predict_result.get("rush_count")
+        trust["sms_sent"] = predict_result.get("sms_sent", 0)
+        trust["sms_degraded"] = predict_result.get("sms_degraded", False)
+        trust["plan_length"] = predict_result.get("plan_length", 0)
+
+    # Ingest metrics
+    ingest_result = results.get("ingest", {})
+    if isinstance(ingest_result, dict) and ingest_result.get("status") == "ok":
+        trust["orders_ingested"] = ingest_result.get("orders", 0)
+        trust["items_ingested"] = ingest_result.get("items", 0)
+        quality_guard = ingest_result.get("quality_guard", {})
+        if isinstance(quality_guard, dict):
+            trust["data_quality_status"] = quality_guard.get("status", "unknown")
+
+    # Overall status
+    if errors:
+        overall = "error"
+    elif degraded:
+        overall = "degraded"
+    else:
+        overall = "ok"
+
+    return {
+        "site_id": str(site_id),
+        "site_name": site_name,
+        "run_date": run_date.isoformat(),
+        "step": step,
+        "dry_run": dry_run,
+        "overall_status": overall,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_ms": duration_ms,
+        "steps": steps_report,
+        "degraded_services": degraded,
+        "errors": errors,
+        "trust": trust,
+    }
+
+
 # ============================================================
 # Pipeline Steps
 # ============================================================
@@ -545,15 +630,19 @@ def step_predict(
         prediction.get("confidence_label", "unknown"),
     )
 
-    # 2. Generate recommendations
+    # 2. Generate recommendations (degrade-not-die: failure must not block plan)
     if not dry_run:
-        recommendations = generate_daily_recommendations(
-            site_id=site_id,
-            prediction_id=prediction_id,
-            prediction=prediction,
-            staff_names=staff_names,
-        )
-        logger.info("Generated %d recommendations", len(recommendations))
+        try:
+            recommendations = generate_daily_recommendations(
+                site_id=site_id,
+                prediction_id=prediction_id,
+                prediction=prediction,
+                staff_names=staff_names,
+            )
+            logger.info("Generated %d recommendations", len(recommendations))
+        except Exception:
+            logger.exception("Recommendation generation failed (non-fatal)")
+            recommendations = []
     else:
         recommendations = []
         logger.info("DRY RUN: Skipping recommendation storage")
@@ -588,11 +677,17 @@ def step_predict(
     # Print plan to stdout (for review / piping to printer)
     print("\n" + plan_text + "\n")
 
-    # 4. Send SMS
+    # 4. Send SMS (degrade-not-die: SMS failure must not crash pipeline)
+    sms_degraded = False
     if not dry_run:
-        sms_results = send_tomorrow_plan_sms(site_id, plan_prediction, staff_names)
-        delivered = sum(1 for r in sms_results if r["delivered"])
-        logger.info("SMS sent: %d/%d delivered", delivered, len(sms_results))
+        try:
+            sms_results = send_tomorrow_plan_sms(site_id, plan_prediction, staff_names)
+            delivered = sum(1 for r in sms_results if r["delivered"])
+            logger.info("SMS sent: %d/%d delivered", delivered, len(sms_results))
+        except Exception:
+            logger.exception("SMS dispatch failed (non-fatal, plan still generated)")
+            sms_results = []
+            sms_degraded = True
     else:
         sms_results = []
         logger.info("DRY RUN: Skipping SMS")
@@ -604,6 +699,7 @@ def step_predict(
         "rush_count": prediction["rush_count"],
         "recommendations": len(recommendations),
         "sms_sent": len(sms_results),
+        "sms_degraded": sms_degraded,
         "plan_length": len(plan_text),
     }
 
@@ -837,7 +933,9 @@ def resolve_site(site_id: str = None) -> tuple[str, str]:
         if site:
             return str(site["site_id"]), site["name"]
 
-    logger.error("Cannot resolve site. Provide --site-id, set DEFAULT_SITE_ID, or set SQUARE_LOCATION_ID.")
+    logger.error(
+        "Cannot resolve site. Provide --site-id, set DEFAULT_SITE_ID, or set SQUARE_LOCATION_ID."
+    )
     sys.exit(1)
 
 
@@ -891,6 +989,7 @@ def main(argv: list[str]) -> int:
     )
 
     results = {}
+    started_at = datetime.utcnow()
 
     try:
         # Step 1: Ingest
@@ -971,6 +1070,31 @@ def main(argv: list[str]) -> int:
 
         # Operator-friendly summary
         _print_summary(site_id, site_name, run_date, args.step, args.dry_run, results)
+
+        # Structured run report with trust metrics
+        report = build_run_report(
+            site_id=site_id,
+            site_name=site_name,
+            run_date=run_date,
+            step=args.step,
+            dry_run=args.dry_run,
+            results=results,
+            started_at=started_at,
+        )
+        if not args.dry_run and args.step == "all":
+            try:
+                from data.storage import store_pipeline_run
+
+                store_pipeline_run(
+                    site_id=site_id,
+                    job_name="daily_loop",
+                    status=report["overall_status"],
+                    started_at=started_at,
+                    finished_at=datetime.utcnow(),
+                    result=report,
+                )
+            except Exception:
+                logger.exception("Failed to store run report (non-fatal)")
 
         return 0
 

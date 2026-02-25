@@ -1,0 +1,42 @@
+{
+  "description": "Partial ingest detected — prediction blocked by data quality guard",
+  "ingest": {
+    "status": "ok",
+    "orders": 45,
+    "items": 88,
+    "workload_units": 240.0,
+    "quality_guard": {
+      "status": "flagged",
+      "flag_type": "partial_ingest",
+      "reason": "Orders volume materially below baseline (45 vs expected ~140)"
+    }
+  },
+  "deputy": {
+    "status": "ok",
+    "rosters": 5,
+    "stored": 5
+  },
+  "xero": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "profitability": {
+    "status": "ok",
+    "revenue_cents": 88000,
+    "labor_cost_cents": 68000,
+    "net_profit_cents": -12000,
+    "labor_pct": 77.3
+  },
+  "predict": {
+    "status": "skipped",
+    "reason": "data_quality_flag",
+    "downstream_skipped": ["tomorrow_plan", "tomorrow_plan_sms", "intelligence"]
+  },
+  "intelligence": {
+    "status": "skipped",
+    "reason": "blocked_by_data_quality_flag"
+  },
+  "expected_overall_status": "degraded",
+  "expected_degraded": ["predict", "intelligence"],
+  "expected_errors": []
+}

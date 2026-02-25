@@ -251,8 +251,13 @@ def get_rolling_accuracy(
 
 DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 DAY_NAMES_FULL = [
-    "Sunday", "Monday", "Tuesday", "Wednesday",
-    "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
 ]
 
 
@@ -370,13 +375,15 @@ def get_accuracy_dashboard(
         error_pct = round(error / actual * 100, 1)
         errors.append(error)
         signed_errors.append(signed)
-        predicted_vs_actual.append({
-            "date": str(r["forecast_date"]),
-            "predicted": predicted,
-            "actual": actual,
-            "error": error,
-            "error_pct": error_pct,
-        })
+        predicted_vs_actual.append(
+            {
+                "date": str(r["forecast_date"]),
+                "predicted": predicted,
+                "actual": actual,
+                "error": error,
+                "error_pct": error_pct,
+            }
+        )
 
     avg_abs_error = round(sum(errors) / len(errors)) if errors else None
     avg_signed_error = round(sum(signed_errors) / len(signed_errors)) if signed_errors else None
@@ -385,13 +392,15 @@ def get_accuracy_dashboard(
     daily_trend = []
     for i, r in enumerate(rows):
         acc_pct = round(float(r["actual_accuracy"]) * 100, 1)
-        window = accuracies[max(0, i - 6): i + 1]
+        window = accuracies[max(0, i - 6) : i + 1]
         rolling = round(sum(window) / len(window) * 100, 1)
-        daily_trend.append({
-            "date": str(r["forecast_date"]),
-            "accuracy": acc_pct,
-            "rolling_7d_avg": rolling,
-        })
+        daily_trend.append(
+            {
+                "date": str(r["forecast_date"]),
+                "accuracy": acc_pct,
+                "rolling_7d_avg": rolling,
+            }
+        )
 
     # --- By day of week ---
     dow_buckets: dict[int, list] = {}
@@ -409,13 +418,15 @@ def get_accuracy_dashboard(
     for dow in sorted(dow_buckets.keys()):
         accs = dow_buckets[dow]
         errs = dow_errors.get(dow, [])
-        by_dow.append({
-            "dow": dow,
-            "day_name": DAY_NAMES[dow] if dow < len(DAY_NAMES) else str(dow),
-            "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
-            "sample_count": len(accs),
-            "avg_signed_error": round(sum(errs) / len(errs)) if errs else None,
-        })
+        by_dow.append(
+            {
+                "dow": dow,
+                "day_name": DAY_NAMES[dow] if dow < len(DAY_NAMES) else str(dow),
+                "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
+                "sample_count": len(accs),
+                "avg_signed_error": round(sum(errs) / len(errs)) if errs else None,
+            }
+        )
 
     worst_day = None
     best_day = None
@@ -447,12 +458,14 @@ def get_accuracy_dashboard(
     for band in ["high", "medium", "low"]:
         accs = conf_buckets[band]
         if accs:
-            by_confidence.append({
-                "band": band,
-                "label": band_labels[band],
-                "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
-                "sample_count": len(accs),
-            })
+            by_confidence.append(
+                {
+                    "band": band,
+                    "label": band_labels[band],
+                    "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
+                    "sample_count": len(accs),
+                }
+            )
 
     # Calibrated: high-conf band more accurate than low
     calibrated = None
@@ -471,11 +484,13 @@ def get_accuracy_dashboard(
     by_staffing_mode = []
     for mode in sorted(mode_buckets.keys()):
         accs = mode_buckets[mode]
-        by_staffing_mode.append({
-            "mode": mode,
-            "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
-            "sample_count": len(accs),
-        })
+        by_staffing_mode.append(
+            {
+                "mode": mode,
+                "avg_accuracy": round(sum(accs) / len(accs) * 100, 1),
+                "sample_count": len(accs),
+            }
+        )
 
     avg_accuracy = round(sum(accuracies) / len(accuracies) * 100, 1)
 
@@ -551,4 +566,152 @@ def get_adoption_metrics(
         "avg_helpfulness_rating": avg_helpful,
         "ratings_count": int(row[2]) if row else 0,
         "meets_target": (stats["adoption_rate"] is not None and stats["adoption_rate"] >= 0.60),
+    }
+
+
+# ============================================================
+# Daily-Loop Health Status
+# ============================================================
+
+
+def get_daily_loop_status(site_id: str) -> dict:
+    """
+    Health check for the daily pipeline loop.
+
+    Reports on last successful ingest, predict, and SMS delivery,
+    rolling 7-day accuracy, whether tomorrow's prediction exists,
+    and an overall readiness verdict.
+    """
+    from sqlalchemy import text
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    with engine.connect() as conn:
+        # Last pipeline runs by job
+        runs = (
+            conn.execute(
+                text(
+                    "SELECT job_name, status, started_at, finished_at, "
+                    "duration_ms, error_text, result_json "
+                    "FROM pipeline_runs "
+                    "WHERE site_id = :sid "
+                    "ORDER BY started_at DESC "
+                    "LIMIT 50"
+                ),
+                {"sid": site_id},
+            )
+            .mappings()
+            .all()
+        )
+
+        # Tomorrow's prediction
+        tomorrow_pred = (
+            conn.execute(
+                text(
+                    "SELECT prediction_id, confidence_score, "
+                    "forecast_data->>'total_predicted_drinks' AS predicted_drinks, "
+                    "forecast_data->>'staffing_mode' AS staffing_mode, "
+                    "generated_at "
+                    "FROM predictions "
+                    "WHERE site_id = :sid AND forecast_date = :fd"
+                ),
+                {"sid": site_id, "fd": tomorrow},
+            )
+            .mappings()
+            .first()
+        )
+
+    # Find last successful run per key job
+    last_runs = {}
+    for job in ("ingest", "predict", "daily_loop"):
+        for r in runs:
+            if r["job_name"] == job and r["status"] == "ok":
+                last_runs[job] = {
+                    "status": "ok",
+                    "at": str(r["started_at"]) if r["started_at"] else None,
+                    "duration_ms": r["duration_ms"],
+                }
+                break
+        if job not in last_runs:
+            # Check for any run (even failed)
+            for r in runs:
+                if r["job_name"] == job:
+                    last_runs[job] = {
+                        "status": r["status"],
+                        "at": str(r["started_at"]) if r["started_at"] else None,
+                        "error": r["error_text"],
+                    }
+                    break
+
+    # Last daily_loop report for SMS status
+    sms_status = "unknown"
+    for r in runs:
+        if r["job_name"] == "daily_loop" and r["result_json"]:
+            result = r["result_json"]
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except (json.JSONDecodeError, TypeError):
+                    result = {}
+            trust = result.get("trust", {}) if isinstance(result, dict) else {}
+            if trust.get("sms_degraded"):
+                sms_status = "degraded"
+            elif trust.get("sms_sent", 0) > 0:
+                sms_status = "ok"
+            elif trust.get("sms_sent") == 0:
+                sms_status = "no_recipients"
+            break
+
+    # Rolling accuracy
+    accuracy = get_rolling_accuracy(site_id, days_back=7)
+
+    # Tomorrow prediction info
+    tomorrow_info = None
+    if tomorrow_pred:
+        tomorrow_info = {
+            "prediction_id": str(tomorrow_pred["prediction_id"]),
+            "predicted_drinks": (
+                int(tomorrow_pred["predicted_drinks"])
+                if tomorrow_pred["predicted_drinks"]
+                else None
+            ),
+            "staffing_mode": tomorrow_pred["staffing_mode"],
+            "confidence": (
+                float(tomorrow_pred["confidence_score"])
+                if tomorrow_pred["confidence_score"]
+                else None
+            ),
+            "generated_at": (
+                str(tomorrow_pred["generated_at"]) if tomorrow_pred["generated_at"] else None
+            ),
+        }
+
+    # Overall readiness
+    has_ingest = last_runs.get("ingest", {}).get("status") == "ok"
+    has_predict = last_runs.get("predict", {}).get("status") == "ok" or tomorrow_info is not None
+    has_accuracy = accuracy.get("avg_accuracy") is not None
+    accuracy_ok = (accuracy.get("avg_accuracy") or 0) >= 75.0
+
+    if has_ingest and has_predict and accuracy_ok:
+        readiness = "green"
+    elif has_ingest and has_predict:
+        readiness = "yellow"
+    else:
+        readiness = "red"
+
+    return {
+        "site_id": str(site_id),
+        "checked_at": datetime.utcnow().isoformat(),
+        "readiness": readiness,
+        "last_runs": last_runs,
+        "sms_status": sms_status,
+        "tomorrow": tomorrow_info,
+        "accuracy_7d": {
+            "avg": accuracy.get("avg_accuracy"),
+            "trend": accuracy.get("trend"),
+            "alert": accuracy.get("alert", False),
+            "alert_reason": accuracy.get("alert_reason"),
+            "days_measured": accuracy.get("days_measured", 0),
+        },
     }

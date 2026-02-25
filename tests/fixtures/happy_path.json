@@ -1,0 +1,44 @@
+{
+  "description": "Normal day: full ingest, weather available, prediction generated, SMS delivered",
+  "ingest": {
+    "status": "ok",
+    "orders": 142,
+    "items": 287,
+    "workload_units": 780.0,
+    "quality_guard": {"status": "clear"}
+  },
+  "deputy": {
+    "status": "ok",
+    "rosters": 6,
+    "stored": 6
+  },
+  "xero": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "profitability": {
+    "status": "ok",
+    "revenue_cents": 285000,
+    "labor_cost_cents": 72000,
+    "net_profit_cents": 145000,
+    "labor_pct": 25.3
+  },
+  "predict": {
+    "status": "ok",
+    "prediction_id": "00000000-0000-0000-0000-000000000099",
+    "total_drinks": 287,
+    "rush_count": 2,
+    "recommendations": 5,
+    "sms_sent": 1,
+    "sms_degraded": false,
+    "plan_length": 1200
+  },
+  "intelligence": {
+    "status": "ok",
+    "insights_generated": 3,
+    "patterns_detected": 1
+  },
+  "expected_overall_status": "ok",
+  "expected_degraded": [],
+  "expected_errors": []
+}

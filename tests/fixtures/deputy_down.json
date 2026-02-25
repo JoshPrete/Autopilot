@@ -1,0 +1,43 @@
+{
+  "description": "Deputy API is unreachable — pipeline continues without roster data",
+  "ingest": {
+    "status": "ok",
+    "orders": 155,
+    "items": 310,
+    "workload_units": 850.0,
+    "quality_guard": {"status": "clear"}
+  },
+  "deputy": {
+    "status": "error",
+    "error": "Connection refused: https://install.au.deputy.com"
+  },
+  "xero": {
+    "status": "skipped",
+    "reason": "not_configured"
+  },
+  "profitability": {
+    "status": "ok",
+    "revenue_cents": 305000,
+    "labor_cost_cents": 78000,
+    "net_profit_cents": 155000,
+    "labor_pct": 25.6
+  },
+  "predict": {
+    "status": "ok",
+    "prediction_id": "00000000-0000-0000-0000-000000000101",
+    "total_drinks": 310,
+    "rush_count": 2,
+    "recommendations": 4,
+    "sms_sent": 1,
+    "sms_degraded": false,
+    "plan_length": 1150
+  },
+  "intelligence": {
+    "status": "ok",
+    "insights_generated": 2,
+    "patterns_detected": 1
+  },
+  "expected_overall_status": "degraded",
+  "expected_degraded": [],
+  "expected_errors": ["deputy"]
+}
