@@ -6,26 +6,7 @@ on:
   pull_request:
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install tools
-        run: pip install 'black==24.10.0' 'ruff==0.8.0'
-
-      - name: Black format check
-        run: black --check --config pyproject.toml .
-
-      - name: Ruff lint
-        run: ruff check --config pyproject.toml .
-
-  test:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,14 +21,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Syntax gate
-        run: |
-          python -m py_compile app/main.py
-          python -m py_compile scripts/daily_autopilot.py
-          python -m py_compile data/storage.py
-          python -m py_compile data/xero.py
-          python -m py_compile analysis/intelligence.py
-          python -m py_compile app/chat.py
+      - name: Lint
+        run: make lint
 
-      - name: Run tests
-        run: python -m pytest tests/ -x -q
+      - name: Syntax gate
+        run: make check
+
+      - name: Test
+        run: make test

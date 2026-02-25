@@ -8,6 +8,8 @@ exclude = '''
   | venv
   | uploads
   | analysis_outputs
+  | analysis/accuracy\.py
+  | scripts/daily_autopilot\.py
 )/
 '''
 

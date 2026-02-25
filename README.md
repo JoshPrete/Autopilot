@@ -40,6 +40,40 @@ If upgrading an existing database, also run:
 psql "$DATABASE_URL" -f scripts/migrations/2026-02-22_xero_controlled_enrichment.sql
 ```
 
+## Tomorrow Habit CLI
+
+Generate one operator report for tomorrow in under a minute:
+
+```bash
+make tomorrow
+```
+
+Optional arguments are passed via `ARGS`:
+
+```bash
+make tomorrow ARGS="--site-id <SITE_UUID> --date 2026-02-25"
+```
+
+Output file:
+- `reports/tomorrow_YYYY-MM-DD.md`
+
+Report sections:
+1. Forecast revenue + confidence
+2. Predicted rush windows + workload bands
+3. Wage% risk flag (green/amber/red)
+4. One recommended action
+
+If data is missing or partial, the command fails loudly and prints copy/paste fix commands.
+
+Verify accuracy and append one row to CSV:
+
+```bash
+make verify DATE=2026-02-26
+```
+
+Output file:
+- `logs/accuracy.csv`
+
 ## Architecture
 
 ### Pipeline Steps

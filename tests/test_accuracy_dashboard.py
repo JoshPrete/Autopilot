@@ -82,15 +82,17 @@ class TestFullWeek:
             dow = d.weekday()
             # Python weekday: Mon=0..Sun=6 → SQL DOW: Sun=0..Sat=6
             sql_dow = (dow + 1) % 7
-            rows.append(_make_row(
-                forecast_date=d,
-                actual_accuracy=0.85 + i * 0.01,
-                confidence_score=0.80,
-                predicted_drinks=250 + i * 5,
-                staffing_mode="2P",
-                actual_drinks=240 + i * 3,
-                dow_num=sql_dow,
-            ))
+            rows.append(
+                _make_row(
+                    forecast_date=d,
+                    actual_accuracy=0.85 + i * 0.01,
+                    confidence_score=0.80,
+                    predicted_drinks=250 + i * 5,
+                    staffing_mode="2P",
+                    actual_drinks=240 + i * 3,
+                    dow_num=sql_dow,
+                )
+            )
 
         engine_mock = _mock_execute(rows)
         mock_engine.connect = engine_mock.connect
