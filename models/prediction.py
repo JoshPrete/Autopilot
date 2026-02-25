@@ -18,14 +18,13 @@ import requests
 from config.settings import settings
 from data.processing import predict_workload
 from data.storage import (
-    check_special_events,
     get_dow_pattern,
     get_prediction,
     get_recent_pattern,
     get_yoy_pattern,
     store_prediction,
 )
-from models.workload import detect_rush_windows, generate_daily_forecast
+from models.workload import generate_daily_forecast
 
 logger = logging.getLogger("autopilot.prediction")
 
@@ -192,68 +191,6 @@ def generate_prediction(
     )
 
     return prediction
-
-
-# ============================================================
-# Prediction Accuracy Tracking
-# ============================================================
-
-
-def update_prediction_accuracy(
-    site_id: str,
-    forecast_date: date,
-    actual_drinks: int,
-    actual_workload: float,
-) -> Optional[float]:
-    """
-    Compare a prediction against actual results and store accuracy.
-
-    Accuracy = 1 - abs(predicted - actual) / actual
-    Clamped to [0.0, 1.0].
-
-    Called during the next day's data ingestion when actuals are known.
-    """
-    pred = get_prediction(site_id, forecast_date)
-    if not pred:
-        logger.warning("No prediction found for %s on %s", site_id, forecast_date)
-        return None
-
-    forecast_data = pred.get("forecast_data")
-    if isinstance(forecast_data, str):
-        forecast_data = json.loads(forecast_data)
-
-    predicted_drinks = forecast_data.get("total_predicted_drinks", 0)
-
-    if actual_drinks <= 0:
-        logger.warning("Actual drinks is 0, cannot compute accuracy")
-        return None
-
-    error = abs(predicted_drinks - actual_drinks) / actual_drinks
-    accuracy = max(0.0, min(1.0, 1.0 - error))
-
-    # Update in database
-    from config.database import engine
-    from sqlalchemy import text
-
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                "UPDATE predictions SET actual_accuracy = :acc "
-                "WHERE site_id = :sid AND forecast_date = :fd"
-            ),
-            {"acc": accuracy, "sid": site_id, "fd": forecast_date},
-        )
-        conn.commit()
-
-    logger.info(
-        "Accuracy for %s: predicted=%d actual=%d accuracy=%.1f%%",
-        forecast_date,
-        predicted_drinks,
-        actual_drinks,
-        accuracy * 100,
-    )
-
-    return accuracy
 
 
 # ============================================================

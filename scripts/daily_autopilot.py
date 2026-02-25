@@ -815,21 +815,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def resolve_site(site_id: str = None) -> tuple[str, str]:
-    """Resolve site_id and site_name from args or environment."""
+    """Resolve site_id and site_name from args, DEFAULT_SITE_ID, or SQUARE_LOCATION_ID."""
     if site_id:
         site = get_site(site_id)
         if site:
             return site["site_id"], site["name"]
         return site_id, "Unknown Site"
 
-    # Look up by Square location ID from env
+    # Fallback: DEFAULT_SITE_ID from env
+    default_id = settings.DEFAULT_SITE_ID
+    if default_id:
+        site = get_site(default_id)
+        if site:
+            return site["site_id"], site["name"]
+        return default_id, "Unknown Site"
+
+    # Fallback: look up by Square location ID from env
     loc_id = settings.SQUARE_LOCATION_ID
     if loc_id:
         site = get_site_by_location_id(loc_id)
         if site:
             return str(site["site_id"]), site["name"]
 
-    logger.error("Cannot resolve site. Provide --site-id or set SQUARE_LOCATION_ID.")
+    logger.error("Cannot resolve site. Provide --site-id, set DEFAULT_SITE_ID, or set SQUARE_LOCATION_ID.")
     sys.exit(1)
 
 

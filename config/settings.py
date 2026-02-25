@@ -33,6 +33,7 @@ class Settings:
     WEATHER_LON: float = float(os.environ.get("WEATHER_LON", "153.0590"))
 
     # Site Configuration
+    DEFAULT_SITE_ID: str = os.environ.get("DEFAULT_SITE_ID", "")
     SITE_TIMEZONE: str = os.environ.get("SITE_TIMEZONE", "Australia/Brisbane")
     MANAGER_PHONE: str = os.environ.get("MANAGER_PHONE", "")
 
