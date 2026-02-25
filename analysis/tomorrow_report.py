@@ -35,7 +35,9 @@ def classify_wage_risk(wage_pct: float | None) -> str:
     return "red"
 
 
-def classify_workload_band(predicted_workload: float | int | None, duration_minutes: int | None) -> str:
+def classify_workload_band(
+    predicted_workload: float | int | None, duration_minutes: int | None
+) -> str:
     workload = float(predicted_workload or 0.0)
     duration = max(15, int(duration_minutes or 15))
     intervals = max(1, round(duration / 15))

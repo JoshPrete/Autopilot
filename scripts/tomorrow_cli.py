@@ -106,13 +106,11 @@ def _normalize_prediction_row(row: dict) -> dict:
     prediction["rush_windows"] = rush_windows
     prediction["prediction_id"] = str(row.get("prediction_id", ""))
     prediction["confidence"] = prediction.get("confidence", row.get("confidence_score"))
-    prediction["confidence_label"] = prediction.get("confidence_label") or normalize_confidence_label(
-        prediction["confidence"]
-    )
+    prediction["confidence_label"] = prediction.get(
+        "confidence_label"
+    ) or normalize_confidence_label(prediction["confidence"])
     prediction["total_predicted_drinks"] = int(
-        prediction.get("total_predicted_drinks")
-        or forecast.get("total_predicted_drinks")
-        or 0
+        prediction.get("total_predicted_drinks") or forecast.get("total_predicted_drinks") or 0
     )
     return prediction
 
@@ -158,8 +156,8 @@ def _build_fix_block(site_id: str, run_date: date, reasons: list[str]) -> str:
     )
     clear_flag_cmd = (
         f"curl -X DELETE "
-        f"\"http://localhost:8000/api/sites/{site_id}/analysis/data-quality/"
-        f"flags/partial-ingest?flag_date={run_date.isoformat()}\""
+        f'"http://localhost:8000/api/sites/{site_id}/analysis/data-quality/'
+        f'flags/partial-ingest?flag_date={run_date.isoformat()}"'
     )
 
     lines = [
@@ -303,18 +301,22 @@ def _get_actual_revenue_cents(site_id: str, target_date: date) -> int:
         return int(profitability_rows[0]["revenue_cents"])
 
     with engine.connect() as conn:
-        result = conn.execute(
-            text(
-                """
+        result = (
+            conn.execute(
+                text(
+                    """
                 SELECT
                     COALESCE(xero_revenue_cents, gross_sales_cents, 0) AS revenue_cents
                 FROM daily_sales_history
                 WHERE site_id = :site_id
                   AND sale_date = :target_date
                 """
-            ),
-            {"site_id": site_id, "target_date": target_date},
-        ).mappings().first()
+                ),
+                {"site_id": site_id, "target_date": target_date},
+            )
+            .mappings()
+            .first()
+        )
     if result and int(result.get("revenue_cents") or 0) > 0:
         return int(result["revenue_cents"])
 
@@ -350,7 +352,9 @@ def run_tomorrow(site_id: str | None, run_date: date, reports_dir: Path) -> Path
     )
     forecast_revenue_cents = round(predicted_drinks * baseline.avg_revenue_per_drink_cents)
     if forecast_revenue_cents <= 0:
-        raise TomorrowPlanBlockedError("Tomorrow Plan blocked: forecast revenue calculated as zero.")
+        raise TomorrowPlanBlockedError(
+            "Tomorrow Plan blocked: forecast revenue calculated as zero."
+        )
 
     scheduled_labor_cents = estimate_scheduled_labor_cents(
         site_id=resolved_site_id,

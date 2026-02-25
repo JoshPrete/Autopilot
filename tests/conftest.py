@@ -156,8 +156,13 @@ def sample_weather():
 @pytest.fixture
 def mock_db():
     """Mock the database engine for tests that don't need real DB."""
-    with patch("config.database.engine") as mock_engine:
+    with (
+        patch("config.database.engine") as mock_engine,
+        patch("analysis.accuracy.engine") as mock_accuracy_engine,
+    ):
         mock_conn = MagicMock()
         mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_accuracy_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_accuracy_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         yield mock_engine, mock_conn

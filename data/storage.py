@@ -3111,12 +3111,29 @@ def bootstrap_default_inventory_rules(site_id: str) -> dict:
 
 def _ensure_daily_profitability_quality_columns(conn) -> None:
     """Backwards-safe migration for labor quality metadata columns."""
-    conn.execute(
-        _text("ALTER TABLE daily_profitability " "ADD COLUMN IF NOT EXISTS labor_data_quality TEXT")
-    )
-    conn.execute(
-        _text("ALTER TABLE daily_profitability " "ADD COLUMN IF NOT EXISTS labor_data_issues JSONB")
-    )
+    try:
+        conn.execute(
+            _text(
+                "ALTER TABLE daily_profitability "
+                "ADD COLUMN IF NOT EXISTS labor_data_quality TEXT"
+            )
+        )
+        conn.execute(
+            _text(
+                "ALTER TABLE daily_profitability "
+                "ADD COLUMN IF NOT EXISTS labor_data_issues JSONB"
+            )
+        )
+    except Exception as exc:  # pragma: no cover - depends on DB privileges
+        # Runtime should remain read-capable even when app role cannot run DDL.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.info(
+            "Skipping daily_profitability quality-column ensure (non-fatal): %s",
+            exc,
+        )
 
 
 def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) -> None:
@@ -3187,21 +3204,47 @@ def get_daily_profitability(site_id: str, start_date: date, end_date: date) -> l
     """Retrieve daily P&L records for a date range."""
     with engine.connect() as conn:
         _ensure_daily_profitability_quality_columns(conn)
-        result = conn.execute(
-            _text(
+        try:
+            result = conn.execute(
+                _text(
+                    """
+                    SELECT profit_date, revenue_cents, labor_cost_cents,
+                           cogs_cents, gross_profit_cents, net_profit_cents,
+                           order_count, item_count, drink_count, labor_hours,
+                           revenue_per_labor_hour, cost_per_drink, labor_pct,
+                           labor_data_quality, labor_data_issues
+                    FROM daily_profitability
+                    WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
+                    ORDER BY profit_date
                 """
-                SELECT profit_date, revenue_cents, labor_cost_cents,
-                       cogs_cents, gross_profit_cents, net_profit_cents,
-                       order_count, item_count, drink_count, labor_hours,
-                       revenue_per_labor_hour, cost_per_drink, labor_pct,
-                       labor_data_quality, labor_data_issues
-                FROM daily_profitability
-                WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
-                ORDER BY profit_date
-            """
-            ),
-            {"sid": site_id, "s": start_date, "e": end_date},
-        )
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            include_quality = True
+        except Exception as exc:  # pragma: no cover - depends on DB schema state
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.info(
+                "daily_profitability quality columns unavailable (non-fatal): %s",
+                exc,
+            )
+            result = conn.execute(
+                _text(
+                    """
+                    SELECT profit_date, revenue_cents, labor_cost_cents,
+                           cogs_cents, gross_profit_cents, net_profit_cents,
+                           order_count, item_count, drink_count, labor_hours,
+                           revenue_per_labor_hour, cost_per_drink, labor_pct
+                    FROM daily_profitability
+                    WHERE site_id = :sid AND profit_date BETWEEN :s AND :e
+                    ORDER BY profit_date
+                """
+                ),
+                {"sid": site_id, "s": start_date, "e": end_date},
+            )
+            include_quality = False
         return [
             {
                 "date": str(row[0]),
@@ -3217,8 +3260,8 @@ def get_daily_profitability(site_id: str, start_date: date, end_date: date) -> l
                 "revenue_per_labor_hour": int(row[10]) if row[10] is not None else None,
                 "cost_per_drink": int(row[11]) if row[11] is not None else None,
                 "labor_pct": float(row[12]) if row[12] is not None else None,
-                "labor_data_quality": row[13] if len(row) > 13 else None,
-                "labor_data_issues": row[14] if len(row) > 14 else None,
+                "labor_data_quality": row[13] if include_quality and len(row) > 13 else None,
+                "labor_data_issues": row[14] if include_quality and len(row) > 14 else None,
             }
             for row in result
         ]
@@ -5021,7 +5064,7 @@ def get_day_ingest_diagnostics(site_id: str, target_date: date) -> dict:
                 WHERE site_id = :sid
                   AND closed_at IS NOT NULL
                   AND DATE(closed_at) < :d
-                  AND EXTRACT(DOW FROM closed_at) = EXTRACT(DOW FROM :d::date)
+                  AND EXTRACT(DOW FROM closed_at) = EXTRACT(DOW FROM CAST(:d AS date))
                 GROUP BY DATE(closed_at)
                 ORDER BY trade_date DESC
                 LIMIT 8
