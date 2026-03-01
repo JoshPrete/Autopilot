@@ -154,6 +154,32 @@ def sample_weather():
 
 
 @pytest.fixture
+def manager_token():
+    """JWT token for a MANAGER user."""
+    from app.auth import create_jwt
+
+    return create_jwt(
+        contact_id="00000000-0000-0000-0000-000000000020",
+        site_id=TEST_SITE_ID,
+        role="MANAGER",
+        name="Josh Manager",
+    )
+
+
+@pytest.fixture
+def staff_token():
+    """JWT token for a P1 (staff) user."""
+    from app.auth import create_jwt
+
+    return create_jwt(
+        contact_id="00000000-0000-0000-0000-000000000010",
+        site_id=TEST_SITE_ID,
+        role="P1",
+        name="Sarah Barista",
+    )
+
+
+@pytest.fixture
 def mock_db():
     """Mock the database engine for tests that don't need real DB."""
     with (

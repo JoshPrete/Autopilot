@@ -8,6 +8,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Frontend
+frontend/node_modules/
+app/static/frontend/
+
 # Data exports
 /data/imports/
 *.csv

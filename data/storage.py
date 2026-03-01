@@ -1039,6 +1039,32 @@ def get_contacts_by_role(site_id: str, role_label: str) -> list[dict]:
         return [dict(row) for row in result.mappings()]
 
 
+def get_contact_by_phone(phone_e164: str) -> Optional[dict]:
+    """Look up an active contact by E.164 phone number (across all sites)."""
+    with engine.connect() as conn:
+        result = conn.execute(
+            _text(
+                "SELECT contact_id, site_id, full_name, phone_e164, role_label, pin_hash "
+                "FROM contacts "
+                "WHERE phone_e164 = :phone AND is_active = TRUE "
+                "LIMIT 1"
+            ),
+            {"phone": phone_e164},
+        )
+        row = result.mappings().first()
+        return dict(row) if row else None
+
+
+def update_contact_pin(contact_id: str, pin_hash: str) -> None:
+    """Set or update the pin_hash for a contact."""
+    with engine.connect() as conn:
+        conn.execute(
+            _text("UPDATE contacts SET pin_hash = :hash WHERE contact_id = :cid"),
+            {"hash": pin_hash, "cid": contact_id},
+        )
+        conn.commit()
+
+
 # ============================================================
 # Manual Signals (fallback toggles)
 # ============================================================
@@ -3140,57 +3166,100 @@ def store_daily_profitability(site_id: str, profit_date: date, metrics: dict) ->
     """Upsert a daily profitability record."""
     with engine.connect() as conn:
         _ensure_daily_profitability_quality_columns(conn)
-        conn.execute(
-            _text(
+        params = {
+            "sid": site_id,
+            "pd": profit_date,
+            "rev": metrics["revenue_cents"],
+            "labor": metrics["labor_cost_cents"],
+            "cogs": metrics.get("cogs_cents"),
+            "gross": metrics.get("gross_profit_cents"),
+            "net": metrics.get("net_profit_cents"),
+            "orders": metrics.get("order_count"),
+            "items": metrics.get("item_count"),
+            "drinks": metrics.get("drink_count"),
+            "hours": metrics.get("labor_hours"),
+            "rev_hr": metrics.get("revenue_per_labor_hour"),
+            "cpd": metrics.get("cost_per_drink"),
+            "labor_pct": metrics.get("labor_pct"),
+            "ldq": metrics.get("labor_data_quality"),
+            "ldi": _json_dumps(metrics.get("labor_data_issues", [])),
+        }
+
+        try:
+            conn.execute(
+                _text(
+                    """
+                    INSERT INTO daily_profitability
+                        (site_id, profit_date, revenue_cents, labor_cost_cents,
+                         cogs_cents, gross_profit_cents, net_profit_cents,
+                         order_count, item_count, drink_count, labor_hours,
+                         revenue_per_labor_hour, cost_per_drink, labor_pct,
+                         labor_data_quality, labor_data_issues)
+                    VALUES
+                        (:sid, :pd, :rev, :labor, :cogs, :gross, :net,
+                         :orders, :items, :drinks, :hours,
+                         :rev_hr, :cpd, :labor_pct, :ldq, :ldi)
+                    ON CONFLICT (site_id, profit_date) DO UPDATE SET
+                        revenue_cents = EXCLUDED.revenue_cents,
+                        labor_cost_cents = EXCLUDED.labor_cost_cents,
+                        cogs_cents = EXCLUDED.cogs_cents,
+                        gross_profit_cents = EXCLUDED.gross_profit_cents,
+                        net_profit_cents = EXCLUDED.net_profit_cents,
+                        order_count = EXCLUDED.order_count,
+                        item_count = EXCLUDED.item_count,
+                        drink_count = EXCLUDED.drink_count,
+                        labor_hours = EXCLUDED.labor_hours,
+                        revenue_per_labor_hour = EXCLUDED.revenue_per_labor_hour,
+                        cost_per_drink = EXCLUDED.cost_per_drink,
+                        labor_pct = EXCLUDED.labor_pct,
+                        labor_data_quality = EXCLUDED.labor_data_quality,
+                        labor_data_issues = EXCLUDED.labor_data_issues,
+                        computed_at = NOW()
                 """
-                INSERT INTO daily_profitability
-                    (site_id, profit_date, revenue_cents, labor_cost_cents,
-                     cogs_cents, gross_profit_cents, net_profit_cents,
-                     order_count, item_count, drink_count, labor_hours,
-                     revenue_per_labor_hour, cost_per_drink, labor_pct,
-                     labor_data_quality, labor_data_issues)
-                VALUES
-                    (:sid, :pd, :rev, :labor, :cogs, :gross, :net,
-                     :orders, :items, :drinks, :hours,
-                     :rev_hr, :cpd, :labor_pct, :ldq, :ldi)
-                ON CONFLICT (site_id, profit_date) DO UPDATE SET
-                    revenue_cents = EXCLUDED.revenue_cents,
-                    labor_cost_cents = EXCLUDED.labor_cost_cents,
-                    cogs_cents = EXCLUDED.cogs_cents,
-                    gross_profit_cents = EXCLUDED.gross_profit_cents,
-                    net_profit_cents = EXCLUDED.net_profit_cents,
-                    order_count = EXCLUDED.order_count,
-                    item_count = EXCLUDED.item_count,
-                    drink_count = EXCLUDED.drink_count,
-                    labor_hours = EXCLUDED.labor_hours,
-                    revenue_per_labor_hour = EXCLUDED.revenue_per_labor_hour,
-                    cost_per_drink = EXCLUDED.cost_per_drink,
-                    labor_pct = EXCLUDED.labor_pct,
-                    labor_data_quality = EXCLUDED.labor_data_quality,
-                    labor_data_issues = EXCLUDED.labor_data_issues,
-                    computed_at = NOW()
-            """
-            ),
-            {
-                "sid": site_id,
-                "pd": profit_date,
-                "rev": metrics["revenue_cents"],
-                "labor": metrics["labor_cost_cents"],
-                "cogs": metrics.get("cogs_cents"),
-                "gross": metrics.get("gross_profit_cents"),
-                "net": metrics.get("net_profit_cents"),
-                "orders": metrics.get("order_count"),
-                "items": metrics.get("item_count"),
-                "drinks": metrics.get("drink_count"),
-                "hours": metrics.get("labor_hours"),
-                "rev_hr": metrics.get("revenue_per_labor_hour"),
-                "cpd": metrics.get("cost_per_drink"),
-                "labor_pct": metrics.get("labor_pct"),
-                "ldq": metrics.get("labor_data_quality"),
-                "ldi": _json_dumps(metrics.get("labor_data_issues", [])),
-            },
-        )
-        conn.commit()
+                ),
+                params,
+            )
+            conn.commit()
+        except Exception as exc:  # pragma: no cover - depends on DB schema state
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.info(
+                "daily_profitability quality columns unavailable on write (non-fatal): %s",
+                exc,
+            )
+            conn.execute(
+                _text(
+                    """
+                    INSERT INTO daily_profitability
+                        (site_id, profit_date, revenue_cents, labor_cost_cents,
+                         cogs_cents, gross_profit_cents, net_profit_cents,
+                         order_count, item_count, drink_count, labor_hours,
+                         revenue_per_labor_hour, cost_per_drink, labor_pct)
+                    VALUES
+                        (:sid, :pd, :rev, :labor, :cogs, :gross, :net,
+                         :orders, :items, :drinks, :hours,
+                         :rev_hr, :cpd, :labor_pct)
+                    ON CONFLICT (site_id, profit_date) DO UPDATE SET
+                        revenue_cents = EXCLUDED.revenue_cents,
+                        labor_cost_cents = EXCLUDED.labor_cost_cents,
+                        cogs_cents = EXCLUDED.cogs_cents,
+                        gross_profit_cents = EXCLUDED.gross_profit_cents,
+                        net_profit_cents = EXCLUDED.net_profit_cents,
+                        order_count = EXCLUDED.order_count,
+                        item_count = EXCLUDED.item_count,
+                        drink_count = EXCLUDED.drink_count,
+                        labor_hours = EXCLUDED.labor_hours,
+                        revenue_per_labor_hour = EXCLUDED.revenue_per_labor_hour,
+                        cost_per_drink = EXCLUDED.cost_per_drink,
+                        labor_pct = EXCLUDED.labor_pct,
+                        computed_at = NOW()
+                """
+                ),
+                params,
+            )
+            conn.commit()
 
     logger.info(
         "Stored daily profitability for %s: rev=$%.2f, net=$%.2f",
@@ -4842,42 +4911,51 @@ def get_data_freshness(site_id: str) -> Optional[str]:
 # ============================================================
 
 
-def _ensure_data_quality_flags_table(conn) -> None:
-    conn.execute(
-        _text(
-            """
-            CREATE TABLE IF NOT EXISTS data_quality_flags (
-                flag_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                site_id UUID REFERENCES sites(site_id),
-                flag_date DATE NOT NULL,
-                flag_type TEXT NOT NULL,
-                severity TEXT NOT NULL DEFAULT 'medium',
-                source TEXT NOT NULL DEFAULT 'system',
-                reason TEXT,
-                metadata JSONB,
-                active BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                resolved_at TIMESTAMPTZ
+def _ensure_data_quality_flags_table(conn) -> bool:
+    try:
+        conn.execute(
+            _text(
+                """
+                CREATE TABLE IF NOT EXISTS data_quality_flags (
+                    flag_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    site_id UUID REFERENCES sites(site_id),
+                    flag_date DATE NOT NULL,
+                    flag_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'medium',
+                    source TEXT NOT NULL DEFAULT 'system',
+                    reason TEXT,
+                    metadata JSONB,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    resolved_at TIMESTAMPTZ
+                )
+                """
             )
-            """
         )
-    )
-    conn.execute(
-        _text(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_data_quality_unique_active
-            ON data_quality_flags(site_id, flag_date, flag_type, source, active)
-            """
+        conn.execute(
+            _text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_data_quality_unique_active
+                ON data_quality_flags(site_id, flag_date, flag_type, source, active)
+                """
+            )
         )
-    )
-    conn.execute(
-        _text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_data_quality_site_date
-            ON data_quality_flags(site_id, flag_date DESC)
-            """
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_data_quality_site_date
+                ON data_quality_flags(site_id, flag_date DESC)
+                """
+            )
         )
-    )
+        return True
+    except Exception as exc:  # pragma: no cover - depends on DB privileges
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.info("data_quality_flags table unavailable (non-fatal): %s", exc)
+        return False
 
 
 def upsert_data_quality_flag(
@@ -4890,7 +4968,8 @@ def upsert_data_quality_flag(
     metadata: dict | None = None,
 ) -> str:
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
+        if not _ensure_data_quality_flags_table(conn):
+            return ""
         existing = conn.execute(
             _text(
                 """
@@ -4958,7 +5037,8 @@ def resolve_data_quality_flag(
     source: str | None = None,
 ) -> int:
     with engine.connect() as conn:
-        _ensure_data_quality_flags_table(conn)
+        if not _ensure_data_quality_flags_table(conn):
+            return 0
         result = conn.execute(
             _text(
                 """
@@ -5139,6 +5219,8 @@ def apply_partial_ingest_guard(site_id: str, target_date: date) -> dict:
             reason="Day appears partially ingested vs same-weekday baseline.",
             metadata=diag,
         )
+        if not flag_id:
+            return {"status": "skipped", "reason": "data_quality_flags_unavailable", "diagnostics": diag}
         return {"status": "flagged", "flag_id": flag_id, "diagnostics": diag}
 
     resolved = resolve_data_quality_flag(site_id, target_date, "partial_ingest", source="system")
@@ -5150,42 +5232,51 @@ def apply_partial_ingest_guard(site_id: str, target_date: date) -> dict:
 # ============================================================
 
 
-def _ensure_pipeline_runs_table(conn) -> None:
+def _ensure_pipeline_runs_table(conn) -> bool:
     """Backwards-safe migration for pipeline run observability."""
-    conn.execute(
-        _text(
-            """
-            CREATE TABLE IF NOT EXISTS pipeline_runs (
-                run_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                site_id UUID REFERENCES sites(site_id),
-                job_name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                finished_at TIMESTAMPTZ,
-                duration_ms INT,
-                result_json JSONB,
-                error_text TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+    try:
+        conn.execute(
+            _text(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_runs (
+                    run_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    site_id UUID REFERENCES sites(site_id),
+                    job_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    finished_at TIMESTAMPTZ,
+                    duration_ms INT,
+                    result_json JSONB,
+                    error_text TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
             )
-            """
         )
-    )
-    conn.execute(
-        _text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_started
-            ON pipeline_runs(site_id, started_at DESC)
-            """
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_started
+                ON pipeline_runs(site_id, started_at DESC)
+                """
+            )
         )
-    )
-    conn.execute(
-        _text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_job_started
-            ON pipeline_runs(site_id, job_name, started_at DESC)
-            """
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pipeline_runs_site_job_started
+                ON pipeline_runs(site_id, job_name, started_at DESC)
+                """
+            )
         )
-    )
+        return True
+    except Exception as exc:  # pragma: no cover - depends on DB privileges
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.info("pipeline_runs table unavailable (non-fatal): %s", exc)
+        return False
 
 
 def store_pipeline_run(
@@ -5205,7 +5296,8 @@ def store_pipeline_run(
         duration_ms = max(0, round((finished - started).total_seconds() * 1000))
 
     with engine.connect() as conn:
-        _ensure_pipeline_runs_table(conn)
+        if not _ensure_pipeline_runs_table(conn):
+            return ""
         run_id = conn.execute(
             _text(
                 """
@@ -5238,7 +5330,8 @@ def get_recent_pipeline_runs(
     """Get recent pipeline run rows for operator/debug visibility."""
     lim = max(1, min(limit, 200))
     with engine.connect() as conn:
-        _ensure_pipeline_runs_table(conn)
+        if not _ensure_pipeline_runs_table(conn):
+            return []
         rows = (
             conn.execute(
                 _text(
@@ -5265,7 +5358,17 @@ def get_pipeline_health(site_id: str, hours: int = 24) -> dict:
     """Summarize run success/failed/skipped rates for recent scheduler reliability."""
     window_hours = max(1, min(hours, 24 * 30))
     with engine.connect() as conn:
-        _ensure_pipeline_runs_table(conn)
+        if not _ensure_pipeline_runs_table(conn):
+            return {
+                "window_hours": window_hours,
+                "status": "unknown",
+                "overall_success_rate": None,
+                "total_runs": 0,
+                "ok_runs": 0,
+                "error_runs": 0,
+                "skipped_runs": 0,
+                "components": [],
+            }
         rows = (
             conn.execute(
                 _text(

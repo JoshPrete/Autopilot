@@ -7,12 +7,13 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.routers import (
     analysis,
+    auth,
     chat,
     delivery,
     documents,
@@ -44,6 +45,21 @@ def _resolve_site_id() -> tuple[str, str] | None:
     site = get_site_by_location_id(settings.SQUARE_LOCATION_ID)
     if site:
         return str(site["site_id"]), site["name"]
+    return None
+
+
+def _resolve_default_site_id() -> str | None:
+    """Resolve a best-effort default site_id for UI routes."""
+    from data.storage import get_site
+
+    scheduled = _resolve_site_id()
+    if scheduled:
+        return scheduled[0]
+
+    if settings.DEFAULT_SITE_ID:
+        site = get_site(settings.DEFAULT_SITE_ID)
+        if site:
+            return str(site["site_id"])
     return None
 
 
@@ -463,17 +479,32 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def dashboard():
+def dashboard(request: Request):
+    site_id = request.query_params.get("site_id")
+    if not site_id:
+        default_site_id = _resolve_default_site_id()
+        if default_site_id:
+            return RedirectResponse(url=f"/dashboard?site_id={default_site_id}", status_code=307)
     return (_static_dir / "dashboard.html").read_text()
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
-def dashboard_alias():
+def dashboard_alias(request: Request):
+    site_id = request.query_params.get("site_id")
+    if not site_id:
+        default_site_id = _resolve_default_site_id()
+        if default_site_id:
+            return RedirectResponse(url=f"/dashboard?site_id={default_site_id}", status_code=307)
     return (_static_dir / "dashboard.html").read_text()
 
 
 @app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
-def chat_page():
+def chat_page(request: Request):
+    site_id = request.query_params.get("site_id")
+    if not site_id:
+        default_site_id = _resolve_default_site_id()
+        if default_site_id:
+            return RedirectResponse(url=f"/chat?site_id={default_site_id}", status_code=307)
     return (_static_dir / "chat.html").read_text()
 
 
@@ -495,6 +526,7 @@ def health_check():
     return {"status": "ok", "scheduled_jobs": jobs}
 
 
+app.include_router(auth.router)
 app.include_router(sites.router)
 app.include_router(predictions.router)
 app.include_router(recommendations.router)
@@ -506,3 +538,28 @@ app.include_router(tomorrow_plan.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(xero.router)
+
+# ============================================================
+# React Frontend (served from built Vite output)
+# ============================================================
+
+_frontend_dir = Path(__file__).resolve().parent / "static" / "frontend"
+
+if _frontend_dir.exists():
+    app.mount(
+        "/app/assets",
+        StaticFiles(directory=str(_frontend_dir / "assets")),
+        name="frontend-assets",
+    )
+
+    @app.get("/app/{rest_of_path:path}", response_class=HTMLResponse, include_in_schema=False)
+    def serve_frontend(rest_of_path: str = ""):
+        return (_frontend_dir / "index.html").read_text()
+else:
+
+    @app.get("/app/{rest_of_path:path}", response_class=HTMLResponse, include_in_schema=False)
+    def serve_frontend_dev(rest_of_path: str = ""):
+        return HTMLResponse(
+            content="<p>Frontend not built. Run <code>cd frontend && npm run build</code></p>",
+            status_code=503,
+        )

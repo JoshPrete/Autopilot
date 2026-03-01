@@ -5,7 +5,7 @@ BLACK ?= $(if $(VENV_BIN),$(VENV_BIN)/black,black)
 PYTEST ?= $(if $(VENV_BIN),$(VENV_BIN)/pytest,pytest)
 UVICORN ?= $(if $(VENV_BIN),$(VENV_BIN)/uvicorn,uvicorn)
 
-.PHONY: lint format check test run tomorrow verify
+.PHONY: lint format check test run tomorrow verify frontend-install frontend-dev frontend-build
 
 lint:
 	$(RUFF) check . --config pyproject.toml
@@ -45,3 +45,12 @@ run-daily:
 
 run-daily-dry:
 	$(PYTHON) scripts/daily_autopilot.py --step all --dry-run
+
+frontend-install:
+	cd frontend && npm install
+
+frontend-dev:
+	cd frontend && npm run dev
+
+frontend-build:
+	cd frontend && npm run build

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 
+from app.auth import require_role
 from app.dependencies import get_validated_site
 from app.schemas import SendRequest
 from config.database import engine
@@ -10,7 +11,7 @@ router = APIRouter(prefix="/api/sites/{site_id}/delivery", tags=["delivery"])
 
 
 @router.post("/send")
-def send_message(body: SendRequest, site: dict = Depends(get_validated_site)):
+def send_message(body: SendRequest, site: dict = Depends(get_validated_site), _user: dict = Depends(require_role("MANAGER"))):
     results = send_to_role(
         site_id=site["site_id"],
         role=body.role,

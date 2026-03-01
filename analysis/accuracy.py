@@ -587,40 +587,45 @@ def get_daily_loop_status(site_id: str) -> dict:
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
-    with engine.connect() as conn:
-        # Last pipeline runs by job
-        runs = (
-            conn.execute(
-                text(
-                    "SELECT job_name, status, started_at, finished_at, "
-                    "duration_ms, error_text, result_json "
-                    "FROM pipeline_runs "
-                    "WHERE site_id = :sid "
-                    "ORDER BY started_at DESC "
-                    "LIMIT 50"
-                ),
-                {"sid": site_id},
+    try:
+        with engine.connect() as conn:
+            # Last pipeline runs by job
+            runs = (
+                conn.execute(
+                    text(
+                        "SELECT job_name, status, started_at, finished_at, "
+                        "duration_ms, error_text, result_json "
+                        "FROM pipeline_runs "
+                        "WHERE site_id = :sid "
+                        "ORDER BY started_at DESC "
+                        "LIMIT 50"
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
 
-        # Tomorrow's prediction
-        tomorrow_pred = (
-            conn.execute(
-                text(
-                    "SELECT prediction_id, confidence_score, "
-                    "forecast_data->>'total_predicted_drinks' AS predicted_drinks, "
-                    "forecast_data->>'staffing_mode' AS staffing_mode, "
-                    "generated_at "
-                    "FROM predictions "
-                    "WHERE site_id = :sid AND forecast_date = :fd"
-                ),
-                {"sid": site_id, "fd": tomorrow},
+            # Tomorrow's prediction
+            tomorrow_pred = (
+                conn.execute(
+                    text(
+                        "SELECT prediction_id, confidence_score, "
+                        "forecast_data->>'total_predicted_drinks' AS predicted_drinks, "
+                        "forecast_data->>'staffing_mode' AS staffing_mode, "
+                        "generated_at "
+                        "FROM predictions "
+                        "WHERE site_id = :sid AND forecast_date = :fd"
+                    ),
+                    {"sid": site_id, "fd": tomorrow},
+                )
+                .mappings()
+                .first()
             )
-            .mappings()
-            .first()
-        )
+    except Exception as exc:  # pragma: no cover - depends on DB schema/permissions
+        logger.info("daily loop status fallback (non-fatal DB issue): %s", exc)
+        runs = []
+        tomorrow_pred = None
 
     # Find last successful run per key job
     last_runs = {}

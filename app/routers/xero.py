@@ -9,9 +9,10 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import requests
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
+from app.auth import require_role
 from config.settings import settings
 from data.storage import (
     consume_xero_oauth_state,
@@ -41,7 +42,7 @@ XERO_SCOPES = (
 
 
 @router.get("/connect")
-def xero_connect(site_id: str = Query(..., description="Site UUID")):
+def xero_connect(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
     """Redirect to Xero authorization page to begin OAuth2 flow."""
     if not settings.XERO_CLIENT_ID:
         raise HTTPException(status_code=500, detail="XERO_CLIENT_ID not configured")
@@ -159,7 +160,7 @@ def xero_callback(
 
 
 @router.get("/status")
-def xero_status(site_id: str = Query(..., description="Site UUID")):
+def xero_status(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
     """Return Xero connection status for a site."""
     site = get_site(site_id)
     if not site:
@@ -204,7 +205,7 @@ def xero_status(site_id: str = Query(..., description="Site UUID")):
 
 
 @router.post("/sync")
-def xero_sync(site_id: str = Query(..., description="Site UUID")):
+def xero_sync(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
     """Manually trigger a Xero bill sync."""
     site = get_site(site_id)
     if not site:
@@ -230,6 +231,7 @@ def xero_sync(site_id: str = Query(..., description="Site UUID")):
 def xero_sync_revenue(
     site_id: str = Query(..., description="Site UUID"),
     months_back: int = Query(2, description="How many months to cross-check"),
+    _user: dict = Depends(require_role("MANAGER")),
 ):
     """Cross-check Square revenue against Xero P&L and store adjusted daily figures."""
     site = get_site(site_id)
@@ -253,7 +255,7 @@ def xero_sync_revenue(
 
 
 @router.get("/mappings")
-def xero_mappings(site_id: str = Query(..., description="Site UUID")):
+def xero_mappings(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
     """Get all Xero line-item mappings for review."""
     site = get_site(site_id)
     if not site:

@@ -1,4 +1,6 @@
 import os
+import secrets
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,6 +65,9 @@ class Settings:
         "XERO_MAPPING_PROMPT_VERSION",
         "xero-mapping-v2",
     )
+
+    # JWT Auth (auto-generated if not set)
+    JWT_SECRET: str = os.environ.get("JWT_SECRET", "") or secrets.token_urlsafe(32)
 
     # AI Chat (Claude API)
     ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
