@@ -42,6 +42,11 @@ export function AppLayout() {
             Scorecard
           </NavLink>
         )}
+        {isManager && (
+          <NavLink to="/admin" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+            Admin
+          </NavLink>
+        )}
         <NavLink to="/accuracy" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Accuracy
         </NavLink>

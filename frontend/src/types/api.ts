@@ -143,6 +143,51 @@ export interface NextActionsResponse {
   data_health: Record<string, unknown>;
 }
 
+// Admin / Data Quality
+export interface DataQualityFlag {
+  flag_id: string;
+  flag_date: string;
+  flag_type: string;
+  severity: string;
+  source: string;
+  reason: string | null;
+  active: boolean;
+  created_at: string | null;
+}
+
+export interface DataQualityFlagsResponse {
+  site_id: string;
+  flags: DataQualityFlag[];
+}
+
+export interface DayDiagnostics {
+  date: string;
+  day: {
+    completed_orders: number;
+    completed_revenue_cents: number;
+    active_hours: number;
+    total_orders: number;
+  };
+  baseline_same_dow: {
+    sample_days: number;
+    median_completed_orders: number | null;
+    median_completed_revenue_cents: number | null;
+    median_active_hours: number | null;
+  };
+  suspected_partial_ingest: boolean;
+  signals: string[];
+}
+
+export interface PipelineStepResult {
+  status: string;
+  orders?: number;
+  items?: number;
+  workload_units?: number;
+  storage?: Record<string, unknown>;
+  quality_guard?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 // Accuracy Dashboard
 export interface AccuracySummary {
   avg_accuracy: number | null;

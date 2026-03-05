@@ -480,6 +480,281 @@ body {
 }
 
 /* ============================================================
+   Admin Page
+   ============================================================ */
+
+.admin-section {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin-bottom: 1.5rem;
+}
+
+.admin-section h2 {
+  font-size: 1.05rem;
+  margin-bottom: 1rem;
+}
+
+.admin-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.admin-section-header h2 { margin-bottom: 0; }
+
+.admin-empty {
+  color: #2e7d32;
+  font-size: 0.9rem;
+  padding: 0.5rem 0;
+}
+
+.btn-refresh {
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.btn-refresh:hover { border-color: #1a237e; color: #1a237e; }
+
+/* Flag rows */
+
+.flag-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.flag-row:last-child { border-bottom: none; }
+
+.flag-row.flag-sev-high { border-left: 3px solid #e53935; padding-left: 0.75rem; }
+.flag-row.flag-sev-medium { border-left: 3px solid #fb8c00; padding-left: 0.75rem; }
+.flag-row.flag-sev-low { border-left: 3px solid #bdbdbd; padding-left: 0.75rem; }
+
+.flag-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.flag-date {
+  font-weight: 700;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.flag-type-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+}
+
+.flag-type-partial_ingest { background: #fce4ec; color: #b71c1c; }
+.flag-type-manual_exclude_forecast { background: #e3f2fd; color: #1565c0; }
+
+.flag-source {
+  font-size: 0.8rem;
+  color: #999;
+  font-style: italic;
+}
+
+.flag-reason {
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.flag-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.flag-err {
+  font-size: 0.8rem;
+  color: #c62828;
+}
+
+.btn-clear {
+  background: #fff;
+  border: 1px solid #e53935;
+  color: #e53935;
+  border-radius: 4px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-clear:hover { background: #ffebee; }
+.btn-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Run controls */
+
+.run-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.run-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #555;
+}
+
+.run-date-input {
+  padding: 0.35rem 0.6rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+.run-date-input:focus {
+  outline: none;
+  border-color: #1a237e;
+}
+
+.run-dry-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.btn-run {
+  padding: 0.45rem 1rem;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-run-ingest { background: #1a237e; color: #fff; }
+.btn-run-ingest:hover { background: #283593; }
+.btn-run-predict { background: #2e7d32; color: #fff; }
+.btn-run-predict:hover { background: #1b5e20; }
+.btn-run:not(.btn-run-ingest):not(.btn-run-predict) { background: #546e7a; color: #fff; }
+.btn-run:not(.btn-run-ingest):not(.btn-run-predict):hover { background: #37474f; }
+.btn-run:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Step result */
+
+.step-result {
+  margin-top: 0.75rem;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+}
+
+.step-ok { background: #e8f5e9; }
+.step-err { background: #fce4ec; }
+
+.step-result-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.step-status-ok { color: #2e7d32; font-weight: 600; }
+.step-status-err { color: #c62828; font-weight: 600; }
+
+.step-result-stats {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  color: #333;
+}
+
+.step-flagged { color: #e65100; font-weight: 600; }
+.step-dry { color: #777; font-style: italic; }
+
+.step-error-text {
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #b71c1c;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Day diagnostics */
+
+.diag-panel {
+  margin-top: 0.75rem;
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+}
+
+.diag-ok { background: #e8f5e9; }
+.diag-warn { background: #fff8e1; }
+
+.diag-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.verdict-ok { color: #2e7d32; font-weight: 600; }
+.verdict-warn { color: #e65100; font-weight: 600; }
+
+.diag-stats {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.diag-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.diag-val { font-size: 1.2rem; font-weight: 700; color: #1a237e; }
+.diag-label { font-size: 0.75rem; color: #666; }
+.diag-vs { font-size: 0.78rem; color: #555; }
+.diag-low { color: #c62828; font-weight: 600; }
+
+.diag-signals {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.diag-signal {
+  background: #ffcc02;
+  color: #5d4000;
+  padding: 0.15rem 0.6rem;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+/* ============================================================
    Accuracy Dashboard
    ============================================================ */
 
