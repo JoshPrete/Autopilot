@@ -42,6 +42,9 @@ export function AppLayout() {
             Scorecard
           </NavLink>
         )}
+        <NavLink to="/pipeline" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+          Pipeline
+        </NavLink>
         <NavLink to="/chat" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Chat
         </NavLink>

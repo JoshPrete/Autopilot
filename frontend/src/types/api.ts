@@ -143,6 +143,74 @@ export interface NextActionsResponse {
   data_health: Record<string, unknown>;
 }
 
+// Pipeline Status
+export interface PipelineLastRun {
+  status: string;
+  at: string | null;
+  duration_ms: number | null;
+  error?: string | null;
+}
+
+export interface PipelineTomorrow {
+  prediction_id: string;
+  predicted_drinks: number | null;
+  staffing_mode: string | null;
+  confidence: number | null;
+  generated_at: string | null;
+}
+
+export interface DailyLoopStatus {
+  site_id: string;
+  checked_at: string;
+  readiness: "green" | "yellow" | "red";
+  last_runs: Record<string, PipelineLastRun>;
+  sms_status: "ok" | "degraded" | "no_recipients" | "unknown";
+  tomorrow: PipelineTomorrow | null;
+  accuracy_7d: {
+    avg: number | null;
+    trend: string | null;
+    alert: boolean;
+    alert_reason: string | null;
+    days_measured: number;
+  };
+}
+
+export interface PipelineHealthComponent {
+  job_name: string;
+  total_runs: number;
+  ok_runs: number;
+  error_runs: number;
+  skipped_runs: number;
+  success_rate: number | null;
+  last_started_at: string | null;
+}
+
+export interface PipelineHealth {
+  window_hours: number;
+  status: "green" | "yellow" | "red" | "unknown";
+  overall_success_rate: number | null;
+  total_runs: number;
+  ok_runs: number;
+  error_runs: number;
+  skipped_runs: number;
+  components: PipelineHealthComponent[];
+}
+
+export interface PipelineRun {
+  run_id: string;
+  job_name: string;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  error_text: string | null;
+}
+
+export interface PipelineRunsResponse {
+  site_id: string;
+  runs: PipelineRun[];
+}
+
 // Staffing Variance
 export interface StaffingInterval {
   interval_start: string;
