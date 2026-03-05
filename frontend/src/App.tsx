@@ -4,6 +4,10 @@ import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { LoginPage } from "./auth/LoginPage";
 import { AppLayout } from "./layout/AppLayout";
 import { TomorrowPlanPage } from "./pages/TomorrowPlanPage";
+import { ChatPage } from "./pages/ChatPage";
+import { ScorecardPage } from "./pages/ScorecardPage";
+import { InsightsPage } from "./pages/InsightsPage";
+import { RosterPage } from "./pages/RosterPage";
 
 export default function App() {
   return (
@@ -13,6 +17,10 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route path="/plan" element={<TomorrowPlanPage />} />
+            <Route path="/chat" element={<ChatPage />} />
+            <Route path="/scorecard" element={<ScorecardPage />} />
+            <Route path="/insights" element={<InsightsPage />} />
+            <Route path="/roster" element={<RosterPage />} />
             <Route path="/" element={<Navigate to="/plan" replace />} />
           </Route>
         </Route>

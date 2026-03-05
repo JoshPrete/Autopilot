@@ -191,6 +191,33 @@ body {
   background: rgba(255, 255, 255, 0.25);
 }
 
+.app-nav {
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  gap: 0;
+  padding: 0 1.5rem;
+}
+
+.nav-link {
+  display: inline-block;
+  padding: 0.75rem 1rem;
+  color: #555;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+}
+
+.nav-link:hover {
+  color: #1a237e;
+}
+
+.nav-link.active {
+  color: #1a237e;
+  border-bottom-color: #1a237e;
+}
+
 .app-main {
   flex: 1;
   padding: 1.5rem;
@@ -422,6 +449,484 @@ body {
   color: #999;
   position: absolute;
   top: 0;
+}
+
+/* ============================================================
+   Shared page helpers
+   ============================================================ */
+
+.page-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.page-title {
+  font-size: 1.5rem;
+}
+
+.page-subtitle {
+  color: #777;
+  font-size: 0.9rem;
+}
+
+.stat-bad {
+  color: #c62828;
+}
+
+.stat-warn {
+  color: #f57f17;
+}
+
+/* ============================================================
+   Chat Page
+   ============================================================ */
+
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 120px);
+}
+
+.chat-page .page-title {
+  margin-bottom: 1rem;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  margin-bottom: 1rem;
+}
+
+.chat-empty {
+  text-align: center;
+  color: #999;
+  padding: 3rem 1rem;
+  font-size: 0.95rem;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble-user {
+  align-self: flex-end;
+  background: #1a237e;
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-bubble-assistant {
+  align-self: flex-start;
+  background: #fff;
+  color: #1a1a1a;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border-bottom-left-radius: 4px;
+}
+
+.chat-bubble-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+  opacity: 0.7;
+}
+
+.chat-bubble-content {
+  display: inline;
+}
+
+.chat-cursor::after {
+  content: "▋";
+  animation: blink 0.8s step-start infinite;
+  font-size: 0.85em;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.chat-input {
+  flex: 1;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  resize: none;
+  line-height: 1.5;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: #1a237e;
+  box-shadow: 0 0 0 2px rgba(26, 35, 126, 0.15);
+}
+
+.btn-send {
+  padding: 0.7rem 1.25rem;
+  background: #1a237e;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-send:hover {
+  background: #283593;
+}
+
+.btn-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-stop {
+  padding: 0.7rem 1.25rem;
+  background: #c62828;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-stop:hover {
+  background: #b71c1c;
+}
+
+/* ============================================================
+   Scorecard Page
+   ============================================================ */
+
+.scorecard-headline {
+  color: #555;
+  margin-bottom: 1.5rem;
+  font-size: 0.95rem;
+}
+
+.scorecard-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.kpi-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.kpi-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #1a237e;
+}
+
+.kpi-label {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.kpi-dir {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-top: 0.1rem;
+}
+
+.kpi-dir.up {
+  color: #2e7d32;
+}
+
+.kpi-dir.down {
+  color: #c62828;
+}
+
+.scorecard-section {
+  margin-bottom: 2rem;
+}
+
+.scorecard-section h2 {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.rec-stats {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.rec-stat {
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  text-align: center;
+  min-width: 120px;
+}
+
+.rec-val {
+  display: block;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #1a237e;
+}
+
+.rec-label {
+  display: block;
+  font-size: 0.8rem;
+  color: #666;
+  margin-top: 0.15rem;
+}
+
+.proven-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.proven-label {
+  color: #555;
+}
+
+.action-tag {
+  background: #e8eaf6;
+  color: #283593;
+  padding: 0.2rem 0.6rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* ============================================================
+   Insights / Next Actions Page
+   ============================================================ */
+
+.insights-page .page-header {
+  margin-bottom: 0.5rem;
+}
+
+.phase-reason {
+  color: #555;
+  font-size: 0.9rem;
+  margin-bottom: 1.5rem;
+}
+
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.action-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.25rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border-left: 4px solid #1a237e;
+}
+
+.action-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.action-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.action-conf {
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 0.15rem 0.5rem;
+  border-radius: 12px;
+}
+
+.conf-high {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.conf-med {
+  background: #fff8e1;
+  color: #f57f17;
+}
+
+.conf-low {
+  background: #fce4ec;
+  color: #c62828;
+}
+
+.action-reason {
+  color: #555;
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.action-meta {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.action-stat {
+  color: #333;
+}
+
+.action-stat.proven {
+  color: #2e7d32;
+}
+
+.action-phase {
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 0.15rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  margin-left: auto;
+}
+
+/* ============================================================
+   Roster Page
+   ============================================================ */
+
+.roster-summary {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+  flex-wrap: wrap;
+}
+
+.roster-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #fff;
+  border-radius: 8px;
+  padding: 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.roster-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 60px 60px 70px;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+.roster-row.status-under {
+  background: #fff3e0;
+}
+
+.roster-row.status-nostaff {
+  background: #fce4ec;
+}
+
+.roster-time {
+  color: #555;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.roster-bar-wrap {
+  background: #f0f0f0;
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.roster-bar {
+  height: 100%;
+  background: #c5cae9;
+  border-radius: 3px;
+  transition: width 0.2s;
+}
+
+.status-under .roster-bar {
+  background: #ef6c00;
+}
+
+.status-nostaff .roster-bar {
+  background: #c62828;
+}
+
+.roster-wu {
+  color: #555;
+  text-align: right;
+  font-size: 0.8rem;
+}
+
+.roster-staff {
+  text-align: right;
+  font-weight: 600;
+  color: #333;
+}
+
+.roster-status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: right;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+}
+
+.roster-status.status-under {
+  background: transparent;
+  color: #e65100;
+}
+
+.roster-status.status-nostaff {
+  background: transparent;
+  color: #c62828;
+}
+
+.roster-status.status-over {
+  color: #1565c0;
+}
+
+.roster-status.status-ok {
+  color: #2e7d32;
 }
 
 /* Footer */

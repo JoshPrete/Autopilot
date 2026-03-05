@@ -70,3 +70,104 @@ export interface LoginResponse {
   name: string;
   role: string;
 }
+
+// Scorecard
+export interface ScorecardKPIs {
+  revenue_cents: number | null;
+  labor_cost_cents: number | null;
+  cogs_cents: number | null;
+  gross_profit_cents: number | null;
+  net_profit_cents: number | null;
+  labor_pct: number | null;
+  revenue_per_labor_hour: number | null;
+  days_with_data: number;
+}
+
+export interface ScorecardTrendWindow {
+  revenue_cents: number | null;
+  labor_cost_cents: number | null;
+  net_profit_cents: number | null;
+  labor_pct: number | null;
+}
+
+export interface ScorecardTrend {
+  current_window: ScorecardTrendWindow;
+  previous_window: ScorecardTrendWindow;
+  deltas: Record<string, number | null>;
+  directions: Record<string, string>;
+}
+
+export interface ScorecardActions {
+  recommendations_generated: number;
+  recommendations_adopted: number;
+  adoption_rate: number | null;
+  realized_actions: number;
+  avg_realized_weekly_profit_delta_cents: number | null;
+  total_realized_weekly_profit_delta_cents: number | null;
+  top_proven_action_types: string[];
+}
+
+export interface ScorecardResponse {
+  site_id: string;
+  window: { days: number; compare_days: number; start_date: string; end_date: string };
+  headline: string;
+  kpis: ScorecardKPIs;
+  trend: ScorecardTrend;
+  actions: ScorecardActions;
+}
+
+// Next Actions / Insights
+export interface ActionMemory {
+  sample_count: number;
+  avg_realized_weekly_profit_delta_cents: number | null;
+}
+
+export interface NextAction {
+  action_key: string;
+  action_type: string;
+  title: string;
+  reason: string;
+  confidence: number;
+  expected_weekly_profit_uplift_cents: number | null;
+  proven_weekly_impact_cents: number | null;
+  memory: ActionMemory | null;
+  optimization_phase: string | null;
+}
+
+export interface NextActionsResponse {
+  site_id: string;
+  target_date: string;
+  actions: NextAction[];
+  optimization_phase: string | null;
+  phase_reason: string | null;
+  data_health: Record<string, unknown>;
+}
+
+// Staffing Variance
+export interface StaffingInterval {
+  interval_start: string;
+  workload_units: number;
+  items_count: number;
+  staff_on: number;
+  expected_staff: number;
+  workload_per_staff: number | null;
+  status: "understaffed" | "overstaffed" | "balanced" | "no_staff" | "no_workload";
+  severity: "high" | "medium" | "low";
+}
+
+export interface StaffingVarianceSummary {
+  date: string;
+  interval_count: number;
+  understaffed_intervals: number;
+  overstaffed_intervals: number;
+  balanced_intervals: number;
+  no_staff_intervals: number;
+  peak_workload_units: number;
+}
+
+export interface StaffingVarianceResponse {
+  site_id: string;
+  target_date: string;
+  summary: StaffingVarianceSummary;
+  intervals: StaffingInterval[];
+}

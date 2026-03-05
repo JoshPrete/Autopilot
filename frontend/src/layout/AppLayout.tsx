@@ -1,8 +1,9 @@
-import { Outlet, Link } from "react-router-dom";
+import { Outlet, Link, NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
 export function AppLayout() {
   const { user, logout } = useAuth();
+  const isManager = user?.role === "MANAGER";
 
   return (
     <div className="app-layout">
@@ -26,6 +27,25 @@ export function AppLayout() {
           )}
         </div>
       </header>
+      <nav className="app-nav">
+        <NavLink to="/plan" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+          Tomorrow
+        </NavLink>
+        <NavLink to="/insights" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+          Insights
+        </NavLink>
+        <NavLink to="/roster" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+          Roster
+        </NavLink>
+        {isManager && (
+          <NavLink to="/scorecard" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+            Scorecard
+          </NavLink>
+        )}
+        <NavLink to="/chat" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+          Chat
+        </NavLink>
+      </nav>
       <main className="app-main">
         <Outlet />
       </main>
