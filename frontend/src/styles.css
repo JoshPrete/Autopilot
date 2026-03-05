@@ -480,6 +480,244 @@ body {
 }
 
 /* ============================================================
+   Accuracy Dashboard
+   ============================================================ */
+
+.accuracy-page .page-header {
+  align-items: center;
+  gap: 1rem;
+}
+
+.days-toggle {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.days-btn {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.85rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #555;
+  cursor: pointer;
+}
+
+.days-btn:hover {
+  border-color: #1a237e;
+  color: #1a237e;
+}
+
+.days-btn.active {
+  background: #1a237e;
+  color: #fff;
+  border-color: #1a237e;
+}
+
+.acc-alert {
+  margin-bottom: 1.25rem;
+}
+
+.acc-summary {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.acc-trend { font-size: 1.4rem; }
+.trend-up   { color: #2e7d32; }
+.trend-down { color: #c62828; }
+.trend-stable { color: #555; }
+
+.bias-over  { color: #c62828; }
+.bias-under { color: #1565c0; }
+.cal-ok     { color: #2e7d32; }
+.cal-warn   { color: #f57f17; }
+.stat-sm    { font-size: 1.1rem; }
+
+.acc-section {
+  margin-bottom: 2rem;
+}
+
+.acc-section h2 {
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+}
+
+.acc-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.acc-section-header h2 {
+  margin-bottom: 0;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.78rem;
+  color: #666;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.legend-item::before {
+  content: "";
+  display: inline-block;
+  width: 20px;
+  height: 2px;
+}
+
+.legend-acc::before { background: #1a237e; }
+.legend-roll::before { background: #90a4ae; border-top: 2px dashed #90a4ae; }
+.legend-thresh::before { background: #ef9a9a; border-top: 2px dashed #ef9a9a; }
+
+.chart-wrap {
+  background: #fff;
+  border-radius: 8px;
+  padding: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  overflow-x: auto;
+}
+
+.trend-chart {
+  width: 100%;
+  max-width: 600px;
+  display: block;
+}
+
+/* DOW bars */
+
+.dow-bars {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.dow-row {
+  display: grid;
+  grid-template-columns: 40px 1fr 52px 80px;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.dow-name {
+  font-weight: 600;
+  color: #555;
+  font-size: 0.8rem;
+}
+
+.dow-bar-wrap {
+  background: #f0f0f0;
+  border-radius: 3px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.dow-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+
+.bar-good { background: #43a047; }
+.bar-mid  { background: #fb8c00; }
+.bar-bad  { background: #e53935; }
+
+.dow-pct {
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.dow-bias {
+  font-size: 0.8rem;
+  text-align: right;
+}
+
+/* Two column layout */
+
+.acc-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+@media (max-width: 640px) {
+  .acc-two-col { grid-template-columns: 1fr; }
+}
+
+.acc-section-half {
+  margin-bottom: 0;
+}
+
+/* Accuracy tables */
+
+.acc-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  font-size: 0.875rem;
+}
+
+.acc-table th {
+  text-align: left;
+  padding: 0.55rem 0.9rem;
+  background: #f5f5f5;
+  font-size: 0.78rem;
+  color: #555;
+  font-weight: 600;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.acc-table td {
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.acc-table tr:last-child td { border-bottom: none; }
+.acc-table .row-warn { background: #fff8e1; }
+
+.cell-muted { color: #777; font-size: 0.8rem; }
+.cell-ok    { color: #2e7d32; font-weight: 600; }
+.cell-err   { color: #c62828; font-weight: 600; }
+.cell-warn  { color: #e65100; }
+.cell-mode  { font-weight: 500; }
+
+.conf-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.conf-high   { background: #e8f5e9; color: #2e7d32; }
+.conf-medium { background: #fff8e1; color: #f57f17; }
+.conf-low    { background: #fce4ec; color: #c62828; }
+
+.pva-table { font-size: 0.85rem; }
+
+/* ============================================================
    Pipeline Status Page
    ============================================================ */
 

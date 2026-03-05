@@ -143,6 +143,65 @@ export interface NextActionsResponse {
   data_health: Record<string, unknown>;
 }
 
+// Accuracy Dashboard
+export interface AccuracySummary {
+  avg_accuracy: number | null;
+  trend: "improving" | "declining" | "stable";
+  avg_abs_error: number | null;
+  avg_signed_error: number | null;
+  worst_day: string | null;
+  best_day: string | null;
+  calibrated: boolean | null;
+}
+
+export interface AccuracyDailyPoint {
+  date: string;
+  accuracy: number;
+  rolling_7d_avg: number;
+}
+
+export interface AccuracyPredictedVsActual {
+  date: string;
+  predicted: number;
+  actual: number;
+  error: number;
+  error_pct: number;
+}
+
+export interface AccuracyByDow {
+  dow: number;
+  day_name: string;
+  avg_accuracy: number;
+  sample_count: number;
+  avg_signed_error: number | null;
+}
+
+export interface AccuracyByConfidence {
+  band: string;
+  label: string;
+  avg_accuracy: number;
+  sample_count: number;
+}
+
+export interface AccuracyByStaffingMode {
+  mode: string;
+  avg_accuracy: number;
+  sample_count: number;
+}
+
+export interface AccuracyDashboard {
+  days_back: number;
+  days_measured: number;
+  summary: AccuracySummary;
+  alert: boolean;
+  alert_reason: string | null;
+  daily_trend: AccuracyDailyPoint[];
+  predicted_vs_actual: AccuracyPredictedVsActual[];
+  by_dow: AccuracyByDow[];
+  by_confidence: AccuracyByConfidence[];
+  by_staffing_mode: AccuracyByStaffingMode[];
+}
+
 // Pipeline Status
 export interface PipelineLastRun {
   status: string;
