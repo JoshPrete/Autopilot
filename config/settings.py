@@ -84,5 +84,61 @@ class Settings:
     # Workload Interval
     WORKLOAD_INTERVAL_MINUTES: int = 15
 
+    # Scheduler control — set true when an external orchestrator owns cron runs
+    AUTOPILOT_DISABLE_SCHEDULER: bool = _env_bool("AUTOPILOT_DISABLE_SCHEDULER", False)
+
+    def validate_startup(self) -> list[str]:
+        """
+        Check env configuration at startup. Returns a list of warning strings.
+
+        Logs warnings prominently so operators discover misconfiguration at boot
+        rather than when a scheduled job silently fails at 5pm.
+        """
+        warnings: list[str] = []
+
+        if not self.SQUARE_ACCESS_TOKEN:
+            warnings.append("SQUARE_ACCESS_TOKEN not set — ingest step will fail")
+        if not self.SQUARE_LOCATION_ID:
+            warnings.append("SQUARE_LOCATION_ID not set — scheduled jobs will be skipped")
+
+        twilio_fields = [self.TWILIO_ACCOUNT_SID, self.TWILIO_AUTH_TOKEN, self.TWILIO_PHONE_NUMBER]
+        if not all(twilio_fields):
+            missing = [
+                n
+                for n, v in [
+                    ("TWILIO_ACCOUNT_SID", self.TWILIO_ACCOUNT_SID),
+                    ("TWILIO_AUTH_TOKEN", self.TWILIO_AUTH_TOKEN),
+                    ("TWILIO_PHONE_NUMBER", self.TWILIO_PHONE_NUMBER),
+                ]
+                if not v
+            ]
+            warnings.append(
+                f"Twilio credentials incomplete ({', '.join(missing)}) — SMS delivery disabled"
+            )
+
+        if not self.ANTHROPIC_API_KEY:
+            warnings.append(
+                "ANTHROPIC_API_KEY not set — intelligence LLM synthesis and chat disabled"
+            )
+        if not self.DEPUTY_ACCESS_TOKEN:
+            warnings.append("DEPUTY_ACCESS_TOKEN not set — Deputy roster sync disabled")
+        if not self.XERO_CLIENT_ID or not self.XERO_CLIENT_SECRET:
+            warnings.append("Xero credentials not set — Xero sync disabled (fail-quiet)")
+
+        if not os.environ.get("JWT_SECRET"):
+            warnings.append(
+                "JWT_SECRET not set — secret auto-generated at startup, all sessions "
+                "will be invalidated on every restart. Set JWT_SECRET in .env for "
+                "persistent authentication."
+            )
+
+        if (self.XERO_CLIENT_ID or self.XERO_CLIENT_SECRET) and not self.AUTOPILOT_TOKEN_ENC_KEY:
+            warnings.append(
+                "AUTOPILOT_TOKEN_ENC_KEY not set — Xero OAuth tokens cannot be persisted "
+                "and will be lost on restart"
+            )
+
+        return warnings
+
 
 settings = Settings()

@@ -401,6 +401,23 @@ def scheduled_weekly_kpi_snapshot():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup: validate environment
+    startup_warnings = settings.validate_startup()
+    if startup_warnings:
+        for w in startup_warnings:
+            logger.warning("CONFIG: %s", w)
+    else:
+        logger.info("CONFIG: all integrations configured")
+
+    # Scheduler guard — skip if an external orchestrator owns the cron runs
+    if settings.AUTOPILOT_DISABLE_SCHEDULER:
+        logger.info(
+            "Scheduler disabled (AUTOPILOT_DISABLE_SCHEDULER=true) — "
+            "expecting external orchestrator to drive pipeline runs"
+        )
+        yield
+        return
+
     # Startup: schedule daily jobs
     scheduler.add_job(
         scheduled_ingest,
@@ -555,6 +572,7 @@ if _frontend_dir.exists():
     @app.get("/app/{rest_of_path:path}", response_class=HTMLResponse, include_in_schema=False)
     def serve_frontend(rest_of_path: str = ""):
         return (_frontend_dir / "index.html").read_text()
+
 else:
 
     @app.get("/app/{rest_of_path:path}", response_class=HTMLResponse, include_in_schema=False)
