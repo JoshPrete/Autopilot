@@ -4,8 +4,11 @@ RUFF ?= $(if $(VENV_BIN),$(VENV_BIN)/ruff,ruff)
 BLACK ?= $(if $(VENV_BIN),$(VENV_BIN)/black,black)
 PYTEST ?= $(if $(VENV_BIN),$(VENV_BIN)/pytest,pytest)
 UVICORN ?= $(if $(VENV_BIN),$(VENV_BIN)/uvicorn,uvicorn)
+ALEMBIC ?= $(if $(VENV_BIN),$(VENV_BIN)/alembic,alembic)
 
-.PHONY: lint format check test run tomorrow verify frontend-install frontend-dev frontend-build
+.PHONY: lint format check test run tomorrow verify \
+        frontend-install frontend-dev frontend-build \
+        migrate db-stamp db-current db-history db-downgrade
 
 lint:
 	$(RUFF) check . --config pyproject.toml
@@ -54,3 +57,26 @@ frontend-dev:
 
 frontend-build:
 	cd frontend && npm run build
+
+# ── Database migrations (Alembic) ────────────────────────────────────────────
+
+## Apply all pending migrations to head
+migrate:
+	$(ALEMBIC) upgrade head
+
+## Stamp an EXISTING database at baseline without running migrations.
+## Use this once on any DB that was set up via psql -f schema.sql.
+db-stamp:
+	$(ALEMBIC) stamp 0001
+
+## Show current applied revision
+db-current:
+	$(ALEMBIC) current
+
+## Show full migration history
+db-history:
+	$(ALEMBIC) history --verbose
+
+## Roll back one revision (use with care)
+db-downgrade:
+	$(ALEMBIC) downgrade -1
