@@ -98,7 +98,6 @@ def weekly_review(
 @router.get("/weekly-roi")
 def weekly_roi(
     site: dict = Depends(get_validated_site),
-    _user: dict = Depends(require_role("MANAGER")),
     week_end: Optional[date] = Query(default=None),
 ):
     return generate_weekly_roi_report(
@@ -111,7 +110,6 @@ def weekly_roi(
 @router.get("/bottom-line-scorecard")
 def bottom_line_scorecard(
     site: dict = Depends(get_validated_site),
-    _user: dict = Depends(require_role("MANAGER")),
     days: int = Query(default=30, ge=7, le=120),
     compare_days: int = Query(default=7, ge=3, le=28),
 ):
@@ -136,7 +134,6 @@ def staffing_variance(
 @router.get("/daily-efficiency")
 def daily_efficiency(
     site: dict = Depends(get_validated_site),
-    _user: dict = Depends(require_role("MANAGER")),
     target_date: Optional[date] = Query(default=None),
 ):
     return get_daily_efficiency_snapshot(
@@ -398,7 +395,6 @@ def workflow(
 @router.get("/workflow/roster-plan")
 def workflow_roster_plan(
     site: dict = Depends(get_validated_site),
-    _user: dict = Depends(require_role("MANAGER")),
     start_date: Optional[date] = Query(default=None),
     days: int = Query(default=14, ge=7, le=56),
     target_wu_per_person: float = Query(default=3.0, ge=1.5, le=6.0),
