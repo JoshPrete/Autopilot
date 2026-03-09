@@ -35,7 +35,7 @@ XERO_TOKEN_URL = "https://identity.xero.com/connect/token"
 XERO_CONNECTIONS_URL = "https://api.xero.com/connections"
 
 XERO_SCOPES = (
-    "openid offline_access accounting.transactions.read "
+    "openid offline_access accounting.transactions.read accounting.reports.read "
     "payroll.employees.read payroll.payruns.read "
     "payroll.payslip.read payroll.settings.read payroll.timesheets.read"
 )

@@ -231,9 +231,15 @@ class XeroClient:
             status_code = int(resp.status_code)
             if status_code in (401, 403):
                 body = (resp.text or "").strip()[:500]
+                hint = ""
+                if endpoint.startswith("Reports/"):
+                    hint = (
+                        " This endpoint typically requires Xero reports access and the "
+                        "'accounting.reports.read' OAuth scope."
+                    )
                 raise XeroAuthError(
                     f"Xero auth failed ({status_code}) for {endpoint}. "
-                    f"Reauthorize at /xero/setup. {body}"
+                    f"Reauthorize at /xero/setup.{hint} {body}"
                 )
             if status_code in XERO_RETRYABLE_STATUS_CODES and attempt < XERO_MAX_RETRIES:
                 delay = _retry_delay_seconds(attempt, resp.headers.get("Retry-After"))

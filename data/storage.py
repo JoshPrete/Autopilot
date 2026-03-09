@@ -4812,6 +4812,7 @@ def upsert_xero_financial_fact(
 
     with engine.connect() as conn:
         try:
+            _ensure_xero_financial_facts_table(conn)
             conn.execute(
                 _text(
                     """
@@ -4856,6 +4857,7 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
     row = None
     try:
         with engine.connect() as conn:
+            _ensure_xero_financial_facts_table(conn)
             row = (
                 conn.execute(
                     _text(
