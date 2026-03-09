@@ -16,7 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user
 from app.dependencies import get_validated_site
 from data.storage import (
     confirm_operator_rule,
@@ -60,7 +60,7 @@ def add_rule(
     site_id: str,
     body: RuleCreateRequest,
     _site: dict = Depends(get_validated_site),
-    user: dict = Depends(require_role("MANAGER", "P1")),
+    user: dict = Depends(get_current_user),
 ):
     """Manually create an operator rule (bypasses chat capture flow)."""
     rule = create_operator_rule(
@@ -83,7 +83,7 @@ def confirm_rule(
     site_id: str,
     rule_id: str,
     _site: dict = Depends(get_validated_site),
-    user: dict = Depends(require_role("MANAGER", "P1")),
+    user: dict = Depends(get_current_user),
 ):
     """Confirm a proposed rule, making it active operating knowledge."""
     rule = confirm_operator_rule(
@@ -101,7 +101,7 @@ def reject_rule(
     site_id: str,
     rule_id: str,
     _site: dict = Depends(get_validated_site),
-    user: dict = Depends(require_role("MANAGER", "P1")),
+    user: dict = Depends(get_current_user),
 ):
     """Reject a proposed rule."""
     rule = reject_operator_rule(
