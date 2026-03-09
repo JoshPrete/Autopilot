@@ -6,9 +6,10 @@ PYTEST ?= $(if $(VENV_BIN),$(VENV_BIN)/pytest,pytest)
 UVICORN ?= $(if $(VENV_BIN),$(VENV_BIN)/uvicorn,uvicorn)
 ALEMBIC ?= $(if $(VENV_BIN),$(VENV_BIN)/alembic,alembic)
 
-.PHONY: lint format check test run tomorrow verify \
+.PHONY: lint format check test run tomorrow tomorrow-demo verify \
         frontend-install frontend-dev frontend-build \
-        migrate db-stamp db-current db-history db-downgrade
+        migrate db-bootstrap db-stamp db-current db-history db-downgrade \
+        seed-demo
 
 lint:
 	$(RUFF) check . --config pyproject.toml
@@ -32,7 +33,15 @@ test:
 	$(PYTEST) tests/ -x -q
 
 tomorrow:
-	$(PYTHON) scripts/tomorrow_cli.py tomorrow $(ARGS)
+	$(PYTHON) scripts/tomorrow_cli.py tomorrow --demo-if-blocked $(ARGS)
+
+## Generate tomorrow plan using purely the bundled demo fixture (no DB required)
+tomorrow-demo:
+	$(PYTHON) scripts/tomorrow_cli.py tomorrow --demo $(ARGS)
+
+## Seed a local DB with demo site + 30d profitability + tomorrow roster for live mode
+seed-demo:
+	$(PYTHON) scripts/seed_demo.py
 
 verify:
 ifndef DATE
@@ -63,6 +72,10 @@ frontend-build:
 ## Apply all pending migrations to head
 migrate:
 	$(ALEMBIC) upgrade head
+
+## Bootstrap a fresh local Postgres database with the current schema + missing-table migration.
+db-bootstrap:
+	ALEMBIC_BIN="$(ALEMBIC)" bash scripts/bootstrap_db.sh
 
 ## Stamp an EXISTING database at baseline without running migrations.
 ## Use this once on any DB that was set up via psql -f schema.sql.

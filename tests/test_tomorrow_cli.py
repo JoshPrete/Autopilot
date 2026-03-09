@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from analysis.tomorrow_report import build_tomorrow_report_payload, render_tomorrow_report_markdown
-from scripts.tomorrow_cli import TomorrowPlanBlockedError, ensure_tomorrow_inputs_ready
+from scripts.tomorrow_cli import TomorrowPlanBlockedError, ensure_tomorrow_inputs_ready, run_tomorrow
 
 
 def test_tomorrow_report_golden_fixture():
@@ -49,3 +49,25 @@ def test_ensure_tomorrow_inputs_ready_blocks_partial_ingest(monkeypatch):
     assert "--step ingest --date 2026-02-25" in message
     assert "--step predict --date 2026-02-25" in message
     assert "flags/partial-ingest?flag_date=2026-02-25" in message
+
+
+def test_run_tomorrow_force_demo_writes_markdown(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "scripts.tomorrow_cli._resolve_site",
+        lambda _site_id: ("demo-site", "Demo Cafe"),
+    )
+
+    result = run_tomorrow(
+        site_id=None,
+        run_date=date(2026, 2, 25),
+        reports_dir=tmp_path,
+        force_demo=True,
+        demo_fixture_path=Path("demo/tomorrow_plan.json"),
+    )
+
+    content = result.output_path.read_text(encoding="utf-8")
+    assert result.mode == "demo"
+    assert result.output_path.exists()
+    assert "Demo mode fallback used" in content
+    assert "# Tomorrow Plan - 2026-02-26" in content
+    assert "Demo Cafe (demo-site)" in content

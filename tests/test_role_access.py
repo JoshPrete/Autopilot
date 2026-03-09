@@ -40,13 +40,18 @@ def _staff_token():
     )
 
 
-# Financial endpoints that require MANAGER role
+# Endpoints that still require MANAGER role (401 without auth, 403 for staff)
 LOCKED_GET_ENDPOINTS = [
+    f"/api/sites/{TEST_SITE_ID}/analysis/weekly-review",
+    f"/api/sites/{TEST_SITE_ID}/analysis/optimized-shifts",
+]
+
+# Endpoints intentionally opened to all authenticated site members
+# (MANAGER guard removed so staff can view scorecard, ROI, efficiency dashboards)
+OPEN_GET_ENDPOINTS = [
     f"/api/sites/{TEST_SITE_ID}/analysis/bottom-line-scorecard",
     f"/api/sites/{TEST_SITE_ID}/analysis/weekly-roi",
-    f"/api/sites/{TEST_SITE_ID}/analysis/weekly-review",
     f"/api/sites/{TEST_SITE_ID}/analysis/daily-efficiency",
-    f"/api/sites/{TEST_SITE_ID}/analysis/optimized-shifts",
 ]
 
 

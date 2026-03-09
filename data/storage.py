@@ -4810,41 +4810,50 @@ def upsert_xero_financial_fact(
     net_cash = income - expense
     txns = int(txn_count or 0)
 
+    params = {
+        "sid": site_id,
+        "d": fact_date,
+        "income": income,
+        "expense": expense,
+        "payroll": payroll,
+        "net_cash": net_cash,
+        "txns": txns,
+        "src": source,
+        "comp": completeness,
+    }
+    statement = _text(
+        """
+        INSERT INTO xero_financial_facts
+            (site_id, fact_date, income_cents, expense_cents, payroll_cents,
+             net_cash_cents, txn_count, source, completeness, updated_at)
+        VALUES
+            (:sid, :d, :income, :expense, :payroll,
+             :net_cash, :txns, :src, :comp, NOW())
+        ON CONFLICT (site_id, fact_date) DO UPDATE SET
+            income_cents = EXCLUDED.income_cents,
+            expense_cents = EXCLUDED.expense_cents,
+            payroll_cents = EXCLUDED.payroll_cents,
+            net_cash_cents = EXCLUDED.net_cash_cents,
+            txn_count = EXCLUDED.txn_count,
+            source = EXCLUDED.source,
+            completeness = EXCLUDED.completeness,
+            updated_at = NOW()
+        """
+    )
+
     with engine.connect() as conn:
         try:
+            conn.execute(statement, params)
+            conn.commit()
+            return
+        except Exception as e:
+            if "xero_financial_facts" not in str(e) or "does not exist" not in str(e):
+                logger.warning("Skipping xero_financial_facts upsert (non-fatal): %s", e)
+                return
+
+        try:
             _ensure_xero_financial_facts_table(conn)
-            conn.execute(
-                _text(
-                    """
-                    INSERT INTO xero_financial_facts
-                        (site_id, fact_date, income_cents, expense_cents, payroll_cents,
-                         net_cash_cents, txn_count, source, completeness, updated_at)
-                    VALUES
-                        (:sid, :d, :income, :expense, :payroll,
-                         :net_cash, :txns, :src, :comp, NOW())
-                    ON CONFLICT (site_id, fact_date) DO UPDATE SET
-                        income_cents = EXCLUDED.income_cents,
-                        expense_cents = EXCLUDED.expense_cents,
-                        payroll_cents = EXCLUDED.payroll_cents,
-                        net_cash_cents = EXCLUDED.net_cash_cents,
-                        txn_count = EXCLUDED.txn_count,
-                        source = EXCLUDED.source,
-                        completeness = EXCLUDED.completeness,
-                        updated_at = NOW()
-                    """
-                ),
-                {
-                    "sid": site_id,
-                    "d": fact_date,
-                    "income": income,
-                    "expense": expense,
-                    "payroll": payroll,
-                    "net_cash": net_cash,
-                    "txns": txns,
-                    "src": source,
-                    "comp": completeness,
-                },
-            )
+            conn.execute(statement, params)
             conn.commit()
         except Exception as e:
             logger.warning("Skipping xero_financial_facts upsert (non-fatal): %s", e)
@@ -4855,35 +4864,52 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
     Aggregate factual Xero cashflow for a date window.
     """
     row = None
+    query = _text(
+        """
+        SELECT
+            COUNT(*) AS days_covered,
+            COALESCE(SUM(income_cents), 0) AS income_cents,
+            COALESCE(SUM(expense_cents), 0) AS expense_cents,
+            COALESCE(SUM(payroll_cents), 0) AS payroll_cents,
+            COALESCE(SUM(net_cash_cents), 0) AS net_cash_cents,
+            COALESCE(SUM(txn_count), 0) AS txn_count,
+            MAX(fact_date) AS latest_fact_date,
+            MAX(updated_at)::date AS latest_update_date,
+            COALESCE(SUM(CASE WHEN completeness = 'full' THEN 1 ELSE 0 END), 0) AS full_days
+        FROM xero_financial_facts
+        WHERE site_id = :sid
+          AND fact_date BETWEEN :s AND :e
+        """
+    )
     try:
         with engine.connect() as conn:
-            _ensure_xero_financial_facts_table(conn)
             row = (
                 conn.execute(
-                    _text(
-                        """
-                    SELECT
-                        COUNT(*) AS days_covered,
-                        COALESCE(SUM(income_cents), 0) AS income_cents,
-                        COALESCE(SUM(expense_cents), 0) AS expense_cents,
-                        COALESCE(SUM(payroll_cents), 0) AS payroll_cents,
-                        COALESCE(SUM(net_cash_cents), 0) AS net_cash_cents,
-                        COALESCE(SUM(txn_count), 0) AS txn_count,
-                        MAX(fact_date) AS latest_fact_date,
-                        MAX(updated_at)::date AS latest_update_date,
-                        COALESCE(SUM(CASE WHEN completeness = 'full' THEN 1 ELSE 0 END), 0) AS full_days
-                    FROM xero_financial_facts
-                    WHERE site_id = :sid
-                      AND fact_date BETWEEN :s AND :e
-                    """
-                    ),
+                    query,
                     {"sid": site_id, "s": start_date, "e": end_date},
                 )
                 .mappings()
                 .first()
             )
     except Exception as e:
-        logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", e)
+        if "xero_financial_facts" in str(e) and "does not exist" in str(e):
+            try:
+                with engine.connect() as conn:
+                    _ensure_xero_financial_facts_table(conn)
+                    row = (
+                        conn.execute(
+                            query,
+                            {"sid": site_id, "s": start_date, "e": end_date},
+                        )
+                        .mappings()
+                        .first()
+                    )
+            except Exception as inner_e:
+                logger.warning(
+                    "xero_financial_facts summary unavailable (non-fatal): %s", inner_e
+                )
+        else:
+            logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", e)
 
     return {
         "days_covered": int((row or {}).get("days_covered") or 0),

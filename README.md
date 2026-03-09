@@ -12,32 +12,62 @@ It focuses on the daily spine:
 
 - Python 3.11+
 - PostgreSQL 14+
-- Square API credentials
-- Deputy credentials (optional, fail-quiet)
-- Xero credentials (optional, fail-quiet; requires `AUTOPILOT_TOKEN_ENC_KEY` when enabled)
-- Twilio credentials (optional, fail-quiet)
-- OpenWeatherMap API key (optional, fail-quiet)
-- Anthropic API key (optional, for intelligence LLM synthesis)
+- No external API credentials are required for local Tomorrow Plan demo mode
+- Square, Deputy, Xero, Twilio, OpenWeatherMap, and Anthropic stay optional/fail-quiet for local setup
 
-## Install
+## 5-Minute Quickstart
+
+### Option A — Zero-config demo (no DB required)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+make tomorrow-demo            # writes reports/tomorrow_YYYY-MM-DD.md
+```
+
+That's it. No `.env`, no Postgres, no API keys needed.
+
+---
+
+### Option B — Live mode with seeded local data
+
+Requires PostgreSQL 14+ running locally.
+
+```bash
+# 1. Install
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
+# Edit .env: set DATABASE_URL (and optionally SQUARE_LOCATION_ID, etc.)
+
+# 2. Bootstrap DB
+createdb clubhouse_autopilot          # or your preferred DB name
+export DATABASE_URL="postgresql://$(whoami)@localhost:5432/clubhouse_autopilot"
+make db-bootstrap                     # applies schema.sql + stamps Alembic baseline
+make migrate                          # applies incremental migrations (0002–0005)
+
+# 3. Seed demo data (30 days profitability + tomorrow roster)
+make seed-demo
+
+# 4. Generate live-backed report
+make tomorrow
 ```
 
-Create schema:
+The report is written to `reports/tomorrow_YYYY-MM-DD.md`.
+
+`make tomorrow` always tries the live path first and falls back to the bundled demo fixture
+if data is incomplete — so it never hangs or crashes on a fresh environment.
+
+---
+
+### Option C — Full production pipeline (all integrations)
+
+Set all credentials in `.env` (Square, Deputy, Xero, Twilio, Anthropic), then:
 
 ```bash
-psql "$DATABASE_URL" -f schema.sql
-```
-
-If upgrading an existing database, also run:
-
-```bash
-psql "$DATABASE_URL" -f scripts/migrations/2026-02-22_xero_controlled_enrichment.sql
+make run-daily     # ingest → deputy → profitability → xero → predict → intelligence
+make tomorrow      # generate operator report
+make run           # start the FastAPI + React dashboard on :8080
 ```
 
 ## Tomorrow Habit CLI
@@ -63,7 +93,7 @@ Report sections:
 3. Wage% risk flag (green/amber/red)
 4. One recommended action
 
-If data is missing or partial, the command fails loudly and prints copy/paste fix commands.
+If you run the CLI directly without demo fallback and data is missing or partial, it fails loudly and prints copy/paste fix commands.
 
 Verify accuracy and append one row to CSV:
 

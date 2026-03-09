@@ -1,0 +1,33 @@
+{
+  "input": {
+    "site_name": "Clubhouse Nundah",
+    "site_id": "00000000-0000-0000-0000-000000000001",
+    "forecast_date": "2026-02-26",
+    "prediction_id": "11111111-1111-1111-1111-111111111111",
+    "predicted_drinks": 312,
+    "forecast_revenue_cents": 286104,
+    "confidence_score": 0.84,
+    "confidence_label": "high",
+    "rush_windows": [
+      {
+        "start": "2026-02-26T07:45:00",
+        "end": "2026-02-26T09:00:00",
+        "predicted_drinks": 81,
+        "predicted_workload": 170.0,
+        "duration_minutes": 75
+      },
+      {
+        "start": "2026-02-26T10:30:00",
+        "end": "2026-02-26T11:15:00",
+        "predicted_drinks": 41,
+        "predicted_workload": 62.0,
+        "duration_minutes": 45
+      }
+    ],
+    "scheduled_labor_cents": 90200,
+    "wage_pct": 31.52,
+    "baseline_days": 14,
+    "baseline_revenue_per_drink_cents": 917.0,
+    "generated_at": "2026-02-25T18:00:00"
+  }
+}

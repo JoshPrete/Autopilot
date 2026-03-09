@@ -61,6 +61,7 @@ ACCURACY_HEADERS = [
     "confidence_label",
     "confidence_score",
 ]
+DEFAULT_DEMO_FIXTURE = PROJECT_ROOT / "demo" / "tomorrow_plan.json"
 
 
 class TomorrowPlanBlockedError(RuntimeError):
@@ -71,6 +72,13 @@ class TomorrowPlanBlockedError(RuntimeError):
 class RevenueBaseline:
     avg_revenue_per_drink_cents: float
     days_count: int
+
+
+@dataclass
+class TomorrowRunResult:
+    output_path: Path
+    mode: str
+    note: str | None = None
 
 
 def _safe_json(value: Any) -> Any:
@@ -113,6 +121,64 @@ def _normalize_prediction_row(row: dict) -> dict:
         prediction.get("total_predicted_drinks") or forecast.get("total_predicted_drinks") or 0
     )
     return prediction
+
+
+def _rewrite_demo_timestamp(raw_value: str | None, forecast_date: date) -> str | None:
+    if not raw_value or "T" not in str(raw_value):
+        return raw_value
+    return f"{forecast_date.isoformat()}T{str(raw_value).split('T', 1)[1]}"
+
+
+def _load_demo_payload(
+    fixture_path: Path,
+    forecast_date: date,
+    site_id: str | None = None,
+    site_name: str | None = None,
+) -> dict:
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture_input = dict(fixture["input"])
+
+    if site_id:
+        fixture_input["site_id"] = site_id
+    if site_name:
+        fixture_input["site_name"] = site_name
+
+    fixture_input["forecast_date"] = forecast_date.isoformat()
+    fixture_input["generated_at"] = datetime.now().isoformat(timespec="seconds")
+    fixture_input["rush_windows"] = [
+        {
+            **window,
+            "start": _rewrite_demo_timestamp(window.get("start"), forecast_date),
+            "end": _rewrite_demo_timestamp(window.get("end"), forecast_date),
+        }
+        for window in fixture_input.get("rush_windows", [])
+    ]
+    return build_tomorrow_report_payload(**fixture_input)
+
+
+def _write_demo_report(
+    reports_dir: Path,
+    forecast_date: date,
+    fixture_path: Path,
+    site_id: str | None = None,
+    site_name: str | None = None,
+    note: str | None = None,
+) -> TomorrowRunResult:
+    payload = _load_demo_payload(
+        fixture_path=fixture_path,
+        forecast_date=forecast_date,
+        site_id=site_id,
+        site_name=site_name,
+    )
+    markdown = render_tomorrow_report_markdown(payload)
+    demo_note = "> Demo mode fallback used: bundled fixture data."
+    if note:
+        demo_note = f"{demo_note} {note}"
+    markdown = f"{demo_note}\n\n{markdown}"
+    _ensure_reports_dir(reports_dir)
+    output_path = reports_dir / f"tomorrow_{forecast_date.isoformat()}.md"
+    _write_report(output_path, markdown)
+    return TomorrowRunResult(output_path=output_path, mode="demo", note=note)
 
 
 def _resolve_site(site_id: str | None) -> tuple[str, str]:
@@ -330,60 +396,102 @@ def _get_actual_revenue_cents(site_id: str, target_date: date) -> int:
     )
 
 
-def run_tomorrow(site_id: str | None, run_date: date, reports_dir: Path) -> Path:
-    resolved_site_id, site_name = _resolve_site(site_id)
-    ensure_tomorrow_inputs_ready(resolved_site_id, run_date)
-
+def run_tomorrow(
+    site_id: str | None,
+    run_date: date,
+    reports_dir: Path,
+    *,
+    force_demo: bool = False,
+    demo_if_blocked: bool = False,
+    demo_fixture_path: Path = DEFAULT_DEMO_FIXTURE,
+) -> TomorrowRunResult:
     forecast_date = run_date + timedelta(days=1)
-    prediction = load_or_generate_prediction(resolved_site_id, forecast_date)
-    predicted_drinks = int(prediction.get("total_predicted_drinks") or 0)
-    if predicted_drinks <= 0:
-        raise TomorrowPlanBlockedError(
-            "Tomorrow Plan blocked: prediction contains zero drinks.\n"
-            f"- Forecast date: {forecast_date.isoformat()}\n"
-            "- Fix: rerun predict step after confirming ingest completeness."
+
+    try:
+        resolved_site_id, site_name = _resolve_site(site_id)
+    except Exception as exc:
+        if not (force_demo or demo_if_blocked):
+            raise
+        return _write_demo_report(
+            reports_dir=reports_dir,
+            forecast_date=forecast_date,
+            fixture_path=demo_fixture_path,
+            note=f"Live site resolution unavailable ({exc}).",
         )
 
-    baseline = compute_revenue_baseline(
-        site_id=resolved_site_id,
-        start_date=run_date - timedelta(days=28),
-        end_date=run_date,
-        min_days=7,
-    )
-    forecast_revenue_cents = round(predicted_drinks * baseline.avg_revenue_per_drink_cents)
-    if forecast_revenue_cents <= 0:
-        raise TomorrowPlanBlockedError(
-            "Tomorrow Plan blocked: forecast revenue calculated as zero."
+    if force_demo:
+        return _write_demo_report(
+            reports_dir=reports_dir,
+            forecast_date=forecast_date,
+            fixture_path=demo_fixture_path,
+            site_id=resolved_site_id,
+            site_name=site_name,
+            note="Live data bypassed by --demo.",
         )
 
-    scheduled_labor_cents = estimate_scheduled_labor_cents(
-        site_id=resolved_site_id,
-        forecast_date=forecast_date,
-        run_date=run_date,
-    )
-    wage_pct = (scheduled_labor_cents / forecast_revenue_cents) * 100
+    try:
+        ensure_tomorrow_inputs_ready(resolved_site_id, run_date)
 
-    payload = build_tomorrow_report_payload(
-        site_name=site_name,
-        site_id=resolved_site_id,
-        forecast_date=forecast_date.isoformat(),
-        prediction_id=str(prediction.get("prediction_id", "unknown")),
-        predicted_drinks=predicted_drinks,
-        forecast_revenue_cents=forecast_revenue_cents,
-        confidence_score=prediction.get("confidence"),
-        confidence_label=prediction.get("confidence_label"),
-        rush_windows=prediction.get("rush_windows", []),
-        scheduled_labor_cents=scheduled_labor_cents,
-        wage_pct=wage_pct,
-        baseline_days=baseline.days_count,
-        baseline_revenue_per_drink_cents=baseline.avg_revenue_per_drink_cents,
-    )
+        prediction = load_or_generate_prediction(resolved_site_id, forecast_date)
+        predicted_drinks = int(prediction.get("total_predicted_drinks") or 0)
+        if predicted_drinks <= 0:
+            raise TomorrowPlanBlockedError(
+                "Tomorrow Plan blocked: prediction contains zero drinks.\n"
+                f"- Forecast date: {forecast_date.isoformat()}\n"
+                "- Fix: rerun predict step after confirming ingest completeness."
+            )
 
-    markdown = render_tomorrow_report_markdown(payload)
-    _ensure_reports_dir(reports_dir)
-    output_path = reports_dir / f"tomorrow_{forecast_date.isoformat()}.md"
-    _write_report(output_path, markdown)
-    return output_path
+        baseline = compute_revenue_baseline(
+            site_id=resolved_site_id,
+            start_date=run_date - timedelta(days=28),
+            end_date=run_date,
+            min_days=7,
+        )
+        forecast_revenue_cents = round(predicted_drinks * baseline.avg_revenue_per_drink_cents)
+        if forecast_revenue_cents <= 0:
+            raise TomorrowPlanBlockedError(
+                "Tomorrow Plan blocked: forecast revenue calculated as zero."
+            )
+
+        scheduled_labor_cents = estimate_scheduled_labor_cents(
+            site_id=resolved_site_id,
+            forecast_date=forecast_date,
+            run_date=run_date,
+        )
+        wage_pct = (scheduled_labor_cents / forecast_revenue_cents) * 100
+
+        payload = build_tomorrow_report_payload(
+            site_name=site_name,
+            site_id=resolved_site_id,
+            forecast_date=forecast_date.isoformat(),
+            prediction_id=str(prediction.get("prediction_id", "unknown")),
+            predicted_drinks=predicted_drinks,
+            forecast_revenue_cents=forecast_revenue_cents,
+            confidence_score=prediction.get("confidence"),
+            confidence_label=prediction.get("confidence_label"),
+            rush_windows=prediction.get("rush_windows", []),
+            scheduled_labor_cents=scheduled_labor_cents,
+            wage_pct=wage_pct,
+            baseline_days=baseline.days_count,
+            baseline_revenue_per_drink_cents=baseline.avg_revenue_per_drink_cents,
+        )
+
+        markdown = render_tomorrow_report_markdown(payload)
+        _ensure_reports_dir(reports_dir)
+        output_path = reports_dir / f"tomorrow_{forecast_date.isoformat()}.md"
+        _write_report(output_path, markdown)
+        return TomorrowRunResult(output_path=output_path, mode="live")
+    except Exception as exc:
+        if not demo_if_blocked:
+            raise
+        return _write_demo_report(
+            reports_dir=reports_dir,
+            forecast_date=forecast_date,
+            fixture_path=demo_fixture_path,
+            site_id=resolved_site_id,
+            site_name=site_name,
+            note=f"Live mode unavailable ({exc}).",
+        )
 
 
 def append_verify_csv(csv_path: Path, row: dict) -> None:
@@ -458,6 +566,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="reports",
         help="Directory for tomorrow_YYYY-MM-DD.md output.",
     )
+    tomorrow.add_argument(
+        "--demo",
+        action="store_true",
+        help="Bypass live data and render the bundled demo Tomorrow Plan fixture.",
+    )
+    tomorrow.add_argument(
+        "--demo-if-blocked",
+        action="store_true",
+        help="Fallback to the bundled demo Tomorrow Plan when live data is unavailable.",
+    )
+    tomorrow.add_argument(
+        "--demo-fixture",
+        default=str(DEFAULT_DEMO_FIXTURE.relative_to(PROJECT_ROOT)),
+        help="Fixture JSON to use for demo Tomorrow Plan generation.",
+    )
 
     verify = subparsers.add_parser("verify", help="Verify prediction vs actuals for a date.")
     verify.add_argument("--site-id", help="Site UUID (optional if SQUARE_LOCATION_ID resolves).")
@@ -471,19 +594,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    if not os.getenv("DATABASE_URL"):
-        print("DATABASE_URL is required. Set it in .env before running this CLI.", file=sys.stderr)
-        return 2
-
     args = parse_args(argv)
+    demo_mode = bool(getattr(args, "demo", False) or getattr(args, "demo_if_blocked", False))
+    if args.command != "tomorrow" or not demo_mode:
+        if not os.getenv("DATABASE_URL"):
+            print(
+                "DATABASE_URL is required. Set it in .env before running this CLI.",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         if args.command == "tomorrow":
-            output_path = run_tomorrow(
+            result = run_tomorrow(
                 site_id=args.site_id,
                 run_date=date.fromisoformat(args.date),
                 reports_dir=PROJECT_ROOT / args.reports_dir,
+                force_demo=bool(args.demo),
+                demo_if_blocked=bool(args.demo_if_blocked),
+                demo_fixture_path=PROJECT_ROOT / args.demo_fixture,
             )
-            print(f"Tomorrow report written: {output_path}")
+            mode_suffix = " (demo)" if result.mode == "demo" else ""
+            print(f"Tomorrow report written: {result.output_path}{mode_suffix}")
             return 0
 
         if args.command == "verify":
