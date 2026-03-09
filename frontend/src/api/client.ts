@@ -12,6 +12,31 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+/** Decode the JWT exp claim without a library. Returns seconds-since-epoch or null. */
+export function getTokenExp(): number | null {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Call /api/auth/refresh and store the new token. Returns false if it fails. */
+export async function refreshToken(): Promise<boolean> {
+  try {
+    const data = await apiFetch<{ access_token: string }>("/api/auth/refresh", {
+      method: "POST",
+    });
+    setToken(data.access_token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}

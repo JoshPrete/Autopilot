@@ -6,8 +6,18 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { apiFetch, setToken, clearToken, getToken } from "../api/client";
+import {
+  apiFetch,
+  setToken,
+  clearToken,
+  getToken,
+  getTokenExp,
+  refreshToken,
+} from "../api/client";
 import type { AuthUser, LoginResponse } from "../types/api";
+
+const REFRESH_THRESHOLD_SECS = 24 * 60 * 60; // refresh if < 24h remaining
+const REFRESH_CHECK_INTERVAL_MS = 60 * 60 * 1000; // check every hour
 
 interface AuthState {
   user: AuthUser | null;
@@ -28,12 +38,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLoading(false);
       return;
     }
+
     apiFetch<AuthUser>("/api/auth/me")
-      .then(setUser)
+      .then(async (me) => {
+        setUser(me);
+        // Silently refresh if token expires within 24 hours
+        const exp = getTokenExp();
+        if (exp && exp - Date.now() / 1000 < REFRESH_THRESHOLD_SECS) {
+          await refreshToken();
+        }
+      })
       .catch(() => {
         clearToken();
       })
       .finally(() => setLoading(false));
+
+    // Hourly check: refresh proactively before expiry
+    const interval = setInterval(async () => {
+      const exp = getTokenExp();
+      if (!exp) return;
+      if (exp - Date.now() / 1000 < REFRESH_THRESHOLD_SECS) {
+        const ok = await refreshToken();
+        if (!ok) {
+          clearToken();
+          setUser(null);
+        }
+      }
+    }, REFRESH_CHECK_INTERVAL_MS);
+
+    return () => clearInterval(interval);
   }, []);
 
   const login = useCallback(async (phone: string, pin: string) => {
