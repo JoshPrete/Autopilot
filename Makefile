@@ -6,7 +6,7 @@ PYTEST ?= $(if $(VENV_BIN),$(VENV_BIN)/pytest,pytest)
 UVICORN ?= $(if $(VENV_BIN),$(VENV_BIN)/uvicorn,uvicorn)
 ALEMBIC ?= $(if $(VENV_BIN),$(VENV_BIN)/alembic,alembic)
 
-.PHONY: lint format check test run tomorrow tomorrow-demo verify \
+.PHONY: lint format check test run tomorrow tomorrow-demo verify pipeline \
         frontend-install frontend-dev frontend-build \
         migrate db-bootstrap db-stamp db-current db-history db-downgrade \
         seed-demo
@@ -38,6 +38,14 @@ tomorrow:
 ## Generate tomorrow plan using purely the bundled demo fixture (no DB required)
 tomorrow-demo:
 	$(PYTHON) scripts/tomorrow_cli.py tomorrow --demo $(ARGS)
+
+## Run the clean 3-layer pipeline directly (auto-detects DB; --offline for fixture mode)
+pipeline:
+	$(PYTHON) pipeline.py $(ARGS)
+
+## Run pipeline in offline/fixture mode — no DB or credentials required
+pipeline-offline:
+	$(PYTHON) pipeline.py --offline $(ARGS)
 
 ## Seed a local DB with demo site + 30d profitability + tomorrow roster for live mode
 seed-demo:
