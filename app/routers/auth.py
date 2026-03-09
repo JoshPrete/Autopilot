@@ -1,11 +1,12 @@
 """
-Auth endpoints: login, me, set-pin.
+Auth endpoints: login, me, refresh, set-pin.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from app.auth import create_jwt, get_current_user, hash_pin, verify_pin
+from app.limiter import limiter
 from data.storage import get_contact_by_phone, update_contact_pin
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -22,7 +23,8 @@ class SetPinRequest(BaseModel):
 
 
 @router.post("/login")
-def login(body: LoginRequest):
+@limiter.limit("10/minute")
+def login(request: Request, body: LoginRequest):
     """Authenticate with phone + PIN and return a JWT."""
     contact = get_contact_by_phone(body.phone_e164)
     if not contact:
@@ -67,6 +69,18 @@ def me(user: dict = Depends(get_current_user)):
         "role": user["role"],
         "name": user["name"],
     }
+
+
+@router.post("/refresh")
+def refresh(user: dict = Depends(get_current_user)):
+    """Re-issue a fresh 72-hour JWT for an authenticated user."""
+    token = create_jwt(
+        contact_id=user["sub"],
+        site_id=user["site_id"],
+        role=user["role"],
+        name=user["name"],
+    )
+    return {"access_token": token, "token_type": "bearer"}
 
 
 @router.post("/set-pin")

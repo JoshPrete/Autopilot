@@ -3,18 +3,21 @@ Clubhouse Autopilot - Chat API Endpoint
 POST /api/sites/{site_id}/chat/message → SSE streaming response
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from app.chat import stream_chat_response
 from app.dependencies import get_validated_site
+from app.limiter import limiter
 from app.schemas import ChatRequest
 
 router = APIRouter(prefix="/api/sites/{site_id}/chat", tags=["chat"])
 
 
 @router.post("/message")
+@limiter.limit("30/minute")
 async def chat_message(
+    request: Request,
     body: ChatRequest,
     site: dict = Depends(get_validated_site),
 ):

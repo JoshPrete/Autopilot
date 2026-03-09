@@ -8,8 +8,13 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+
+from app.limiter import limiter
 
 from app.routers import (
     analysis,
@@ -490,6 +495,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _static_dir = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
