@@ -25,6 +25,7 @@ from app.routers import (
     pipeline,
     predictions,
     recommendations,
+    rules,
     sites,
     tomorrow_plan,
     workload,
@@ -564,6 +565,7 @@ app.include_router(tomorrow_plan.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(xero.router)
+app.include_router(rules.router)
 
 # ============================================================
 # React Frontend (served from built Vite output)

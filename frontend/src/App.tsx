@@ -11,6 +11,7 @@ import { RosterPage } from "./pages/RosterPage";
 import { PipelinePage } from "./pages/PipelinePage";
 import { AccuracyPage } from "./pages/AccuracyPage";
 import { AdminPage } from "./pages/AdminPage";
+import { RulesPage } from "./pages/RulesPage";
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
             <Route path="/pipeline" element={<PipelinePage />} />
             <Route path="/accuracy" element={<AccuracyPage />} />
             <Route path="/admin" element={<AdminPage />} />
+            <Route path="/rules" element={<RulesPage />} />
             <Route path="/" element={<Navigate to="/plan" replace />} />
           </Route>
         </Route>
