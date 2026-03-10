@@ -203,6 +203,7 @@ def generate_roster_change_plan(
     )
     templates = range_plan.get("weekly_templates", [])
     daily = range_plan.get("daily", [])
+    profitability_context = (range_plan.get("summary") or {}).get("profitability_context") or {}
 
     # Map day name -> inferred workflow mode from recurring shift blocks.
     mode_by_day: dict[str, int] = {}
@@ -234,14 +235,26 @@ def generate_roster_change_plan(
 
         day_name = date.fromisoformat(d["target_date"]).strftime("%a")
         mode = mode_by_day.get(day_name, max(1, min(4, len(d.get("recommended_shifts") or []))))
-        roles = WORKFLOW_ROLES.get(mode, WORKFLOW_ROLES[1])
+        roles = [dict(role) for role in WORKFLOW_ROLES.get(mode, WORKFLOW_ROLES[1])]
         summary = d.get("summary") or {}
         labor_delta = summary.get("estimated_labor_delta_cents")
+        constraints = d.get("constraints") or []
+        profitability_alignment = d.get("profitability_alignment") or {}
+        constraint_notes = [str(c.get("note") or "").strip() for c in constraints if c.get("note")]
+        if any(c.get("requires_senior") for c in constraints):
+            if roles:
+                roles[0]["senior_required"] = True
+            if len(roles) > 1 and any((c.get("daypart") or "") == "close" for c in constraints):
+                roles[-1]["senior_required"] = True
         notes = "Use standard priorities: greet/serve, deliver, shots, prep."
         if labor_delta is not None and labor_delta > 0:
             notes = "Added staffing recommended to prevent throughput bottlenecks."
         elif labor_delta is not None and labor_delta < 0:
             notes = "Labor trim recommended in lower-demand windows while preserving service flow."
+        if profitability_alignment.get("note"):
+            notes += " " + str(profitability_alignment.get("note"))
+        if constraint_notes:
+            notes += " Constraints: " + "; ".join(dict.fromkeys(constraint_notes))
 
         day_rows.append(
             {
@@ -249,9 +262,11 @@ def generate_roster_change_plan(
                 "status": "ok",
                 "workflow_mode": f"{mode}p",
                 "role_assignments": roles,
+                "constraints": constraints,
                 "recommended_shift_count": summary.get("recommended_shift_count"),
                 "recommended_total_hours": summary.get("recommended_total_hours"),
                 "estimated_labor_delta_cents": labor_delta,
+                "profitability_alignment": profitability_alignment,
                 "notes": notes,
             }
         )
@@ -262,6 +277,7 @@ def generate_roster_change_plan(
         "days": horizon,
         "priorities": PRIORITIES,
         "summary": range_plan.get("summary", {}),
+        "profitability_context": profitability_context,
         "days_plan": day_rows,
         "weekly_templates": templates,
     }

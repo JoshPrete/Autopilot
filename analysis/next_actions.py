@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
+from config.constants import LABOR_PCT_TARGET_HIGH, LABOR_PCT_TARGET_LOW
 from data.storage import (
     backfill_realized_impacts,
     get_action_type_outcome_summary,
+    get_bottom_line_scorecard,
     get_data_health,
     get_daily_efficiency_snapshot,
     recommendation_exists_for_action_key,
@@ -23,8 +25,6 @@ from analysis.workflow import analyze_workflow
 
 logger = logging.getLogger("autopilot.next_actions")
 PROVEN_IMPACT_MIN_REALIZED_SAMPLES = 2
-LABOR_PCT_TARGET_LOW = 24.0
-LABOR_PCT_TARGET_HIGH = 28.0
 SERVICE_RISK_CAP_RATIO = 0.12
 OVERSTAFFED_WASTE_RATIO_TRIGGER = 0.18
 PHASE_MIN_WORKING_INTERVALS = 8
@@ -80,7 +80,159 @@ def _phase_priority_bonus(action: dict, optimization_phase: str) -> int:
     return 0
 
 
-def _rank_score(action: dict, optimization_phase: str) -> int:
+def _profitability_priority_bonus(action: dict, profitability_targets: dict | None) -> int:
+    if not isinstance(profitability_targets, dict):
+        return 0
+
+    focus = str((profitability_targets.get("primary_lever") or {}).get("focus") or "").strip()
+    gaps = profitability_targets.get("gaps") or {}
+    action_type = action.get("action_type")
+    labor_delta = int(action.get("expected_weekly_labor_change_cents") or 0)
+    profit_uplift = int(action.get("expected_weekly_profit_uplift_cents") or 0)
+
+    labor_gap = int(gaps.get("weekly_labor_reduction_needed_cents") or 0)
+    cogs_gap = int(gaps.get("weekly_cogs_reduction_needed_cents") or 0)
+    prime_gap = int(gaps.get("weekly_prime_cost_reduction_needed_cents") or 0)
+    revenue_gap = int(gaps.get("weekly_revenue_needed_for_net_margin_target_cents") or 0)
+
+    if focus == "labor_efficiency":
+        if action_type == "CUT_STAFF_BLOCK":
+            return 1800 + min(3200, labor_gap // 25)
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return 1200 if labor_delta < 0 else 300
+        if action_type == "PRICE_TEST_UP":
+            return -900
+        return 0
+
+    if focus == "cogs_control":
+        if action_type == "PRICE_TEST_UP":
+            return 2800 + min(3800, max(cogs_gap, prime_gap) // 20)
+        if action_type == "CUT_STAFF_BLOCK":
+            return -1400
+        if action_type == "ADD_STAFF_BLOCK":
+            return -900
+        return 350 if action_type == "WORKFLOW_SHIFT_REALLOC" and profit_uplift > 0 else 0
+
+    if focus == "mixed_margin_repair":
+        if action_type == "PRICE_TEST_UP":
+            return 1800 + min(2500, cogs_gap // 20)
+        if action_type == "CUT_STAFF_BLOCK":
+            return 1800 + min(2500, labor_gap // 25)
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return 900 if profit_uplift > 0 else 250
+        return -350 if action_type == "ADD_STAFF_BLOCK" else 0
+
+    if focus == "revenue_growth":
+        if action_type == "ADD_STAFF_BLOCK":
+            return 1800 + min(3200, revenue_gap // 35)
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return 1500 if profit_uplift > 0 else 450
+        if action_type == "PRICE_TEST_UP":
+            return 1200 + min(1800, revenue_gap // 45)
+        if action_type == "CUT_STAFF_BLOCK":
+            return -1800
+        return 0
+
+    return 0
+
+
+def _focus_gap_details(profitability_targets: dict | None) -> tuple[str | None, int]:
+    if not isinstance(profitability_targets, dict):
+        return None, 0
+
+    focus = str((profitability_targets.get("primary_lever") or {}).get("focus") or "").strip() or None
+    gaps = profitability_targets.get("gaps") or {}
+
+    if focus == "labor_efficiency":
+        return "labor gap", int(gaps.get("weekly_labor_reduction_needed_cents") or 0)
+    if focus == "cogs_control":
+        return "COGS gap", int(gaps.get("weekly_cogs_reduction_needed_cents") or 0)
+    if focus == "mixed_margin_repair":
+        return "prime-cost gap", int(gaps.get("weekly_prime_cost_reduction_needed_cents") or 0)
+    if focus == "revenue_growth":
+        return (
+            "revenue gap",
+            int(gaps.get("weekly_revenue_needed_for_net_margin_target_cents") or 0),
+        )
+    return None, 0
+
+
+def _format_cents_compact(cents: int) -> str:
+    dollars = abs(int(cents)) / 100
+    if dollars >= 1000:
+        return f"${dollars:,.0f}/wk"
+    return f"${dollars:,.0f}/wk"
+
+
+def _describe_profitability_alignment(action: dict, profitability_targets: dict | None) -> str | None:
+    if not isinstance(profitability_targets, dict):
+        return None
+
+    focus = str((profitability_targets.get("primary_lever") or {}).get("focus") or "").strip()
+    if not focus:
+        return None
+
+    action_type = action.get("action_type")
+    labor_delta = int(action.get("expected_weekly_labor_change_cents") or 0)
+    gap_label, gap_cents = _focus_gap_details(profitability_targets)
+    gap_text = _format_cents_compact(gap_cents) if gap_cents > 0 else None
+
+    if focus == "labor_efficiency":
+        if action_type == "CUT_STAFF_BLOCK":
+            return (
+                f"Targets labor efficiency by directly trimming labor against the remaining "
+                f"{gap_label or 'labor gap'} of {gap_text}."
+                if gap_text
+                else "Targets labor efficiency by directly trimming labor."
+            )
+        if action_type == "WORKFLOW_SHIFT_REALLOC" and labor_delta < 0:
+            return (
+                f"Targets labor efficiency by reassigning work while reducing labor against the "
+                f"remaining {gap_label or 'labor gap'} of {gap_text}."
+                if gap_text
+                else "Targets labor efficiency by reassigning work while reducing labor."
+            )
+        if action_type == "ADD_STAFF_BLOCK":
+            return "Protects profitability by avoiding service loss in peak intervals while labor remains the primary constraint."
+        return "Secondary lever while labor efficiency remains the main profitability priority."
+
+    if focus == "cogs_control":
+        if action_type == "PRICE_TEST_UP":
+            return (
+                f"Targets COGS control by improving gross margin against the remaining "
+                f"{gap_label or 'COGS gap'} of {gap_text}."
+                if gap_text
+                else "Targets COGS control by improving gross margin."
+            )
+        return "Secondary lever while COGS control remains the main profitability priority."
+
+    if focus == "mixed_margin_repair":
+        if action_type == "PRICE_TEST_UP":
+            return "Targets mixed margin repair through price and product-margin improvement."
+        if action_type == "CUT_STAFF_BLOCK":
+            return "Targets mixed margin repair through labor savings while prime cost remains above target."
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return "Targets mixed margin repair by improving throughput without proportionate labor growth."
+        return "Supports mixed margin repair while prime cost remains above target."
+
+    if focus == "revenue_growth":
+        if action_type == "ADD_STAFF_BLOCK":
+            return (
+                f"Targets revenue growth by protecting throughput against the remaining "
+                f"{gap_label or 'revenue gap'} of {gap_text}."
+                if gap_text
+                else "Targets revenue growth by protecting throughput."
+            )
+        if action_type == "WORKFLOW_SHIFT_REALLOC":
+            return "Targets revenue growth by improving service flow during high-demand windows."
+        if action_type == "PRICE_TEST_UP":
+            return "Supports revenue growth by lifting contribution margin without adding labor."
+        return "Secondary lever while revenue growth remains the main profitability priority."
+
+    return None
+
+
+def _rank_score(action: dict, optimization_phase: str, profitability_targets: dict | None) -> int:
     """
     Composite ranking:
       expected impact + weighted proven historical impact for action type.
@@ -95,8 +247,14 @@ def _rank_score(action: dict, optimization_phase: str) -> int:
         -250 if action.get("proven_gate_status") == "insufficient_realized_history" else 0
     )
     phase_bonus = _phase_priority_bonus(action, optimization_phase)
+    profitability_bonus = _profitability_priority_bonus(action, profitability_targets)
     return round(
-        expected + (proven * proven_weight) + confidence_bonus + exploration_penalty + phase_bonus
+        expected
+        + (proven * proven_weight)
+        + confidence_bonus
+        + exploration_penalty
+        + phase_bonus
+        + profitability_bonus
     )
 
 
@@ -230,6 +388,12 @@ def generate_next_actions(
     workflow = analyze_workflow(site_id, target_date)
     risk_metrics = _staffing_risk_metrics(intervals)
     optimization_phase, phase_reason = _determine_optimization_phase(summary, risk_metrics)
+    try:
+        scorecard = get_bottom_line_scorecard(site_id, days=30, compare_days=7, top_actions_limit=3)
+        profitability_targets = scorecard.get("targets", {}) if isinstance(scorecard, dict) else {}
+    except Exception:
+        logger.exception("Unable to load profitability targets for next actions")
+        profitability_targets = {}
 
     actions: list[dict] = []
     labor_cost_per_hour = 0.0
@@ -421,7 +585,24 @@ def generate_next_actions(
             gated_actions = preferred
 
     for action in gated_actions:
-        action["ranking_score_cents"] = _rank_score(action, optimization_phase)
+        profitability_bonus = _profitability_priority_bonus(action, profitability_targets)
+        gap_label, focus_gap_cents = _focus_gap_details(profitability_targets)
+        action["ranking_score_cents"] = _rank_score(
+            action,
+            optimization_phase,
+            profitability_targets,
+        )
+        action["profitability_alignment"] = {
+            "primary_lever": (
+                (profitability_targets.get("primary_lever") or {}).get("focus")
+                if isinstance(profitability_targets, dict)
+                else None
+            ),
+            "bonus_cents": profitability_bonus,
+            "focus_gap_label": gap_label,
+            "focus_gap_cents": focus_gap_cents,
+            "reason": _describe_profitability_alignment(action, profitability_targets),
+        }
         action["data_health"] = {
             "status": data_health.get("status") if isinstance(data_health, dict) else None,
             "score": data_health.get("score") if isinstance(data_health, dict) else None,
@@ -434,6 +615,18 @@ def generate_next_actions(
     return {
         "site_id": site_id,
         "target_date": target_date.isoformat(),
+        "optimization_phase": optimization_phase,
+        "phase_reason": phase_reason,
+        "profitability_goal": (
+            profitability_targets.get("primary_lever") if isinstance(profitability_targets, dict) else {}
+        ),
+        "profitability_gaps": (
+            profitability_targets.get("gaps") if isinstance(profitability_targets, dict) else {}
+        ),
+        "data_health": {
+            "status": data_health.get("status") if isinstance(data_health, dict) else None,
+            "score": data_health.get("score") if isinstance(data_health, dict) else None,
+        },
         "summary": {
             "actions_generated": len(actions),
             "revenue_per_labor_hour_cents": summary.get("revenue_per_labor_hour_cents"),
@@ -446,6 +639,14 @@ def generate_next_actions(
             ),
             "optimization_phase": optimization_phase,
             "phase_reason": phase_reason,
+            "profitability_goal": (
+                profitability_targets.get("primary_lever")
+                if isinstance(profitability_targets, dict)
+                else {}
+            ),
+            "profitability_gaps": (
+                profitability_targets.get("gaps") if isinstance(profitability_targets, dict) else {}
+            ),
             "phase_guardrails": {
                 "labor_pct_target_low": LABOR_PCT_TARGET_LOW,
                 "labor_pct_target_high": LABOR_PCT_TARGET_HIGH,

@@ -17,6 +17,8 @@ import anthropic
 from config.database import engine
 from config.settings import settings
 from data.storage import (
+    confirm_operator_rule,
+    create_operator_rule,
     get_all_xero_mappings,
     get_bottom_line_scorecard,
     get_cogs_source_summary,
@@ -34,6 +36,7 @@ from data.storage import (
     get_item_costs,
     get_item_costs_detailed,
     get_learned_patterns,
+    get_pending_operator_rule,
     get_prediction,
     get_profitability_correlations,
     get_recent_documents,
@@ -43,8 +46,19 @@ from data.storage import (
     get_site,
     get_staffing_vs_workload,
     has_real_cogs,
+    list_operator_rules,
+    reject_operator_rule,
 )
 from analysis.accuracy import get_rolling_accuracy
+from app.operator_knowledge import (
+    build_rule_capture_response,
+    build_rule_rejected_response,
+    build_rule_saved_response,
+    is_confirmation_message,
+    is_rejection_message,
+    parse_operator_rule_message,
+    summarize_operator_rule,
+)
 
 logger = logging.getLogger("autopilot.chat")
 
@@ -95,6 +109,57 @@ def _fmt_prediction(pred: dict) -> dict:
             fd.get("forecast", {}).get("hourly") if isinstance(fd.get("forecast"), dict) else None
         ),
     }
+
+
+def _handle_operator_rule_message(site_id: str, message: str) -> str | None:
+    if is_confirmation_message(message):
+        pending_rule = get_pending_operator_rule(site_id)
+        if not pending_rule:
+            return "There is no pending operating rule to confirm."
+
+        confirmed_rule = confirm_operator_rule(
+            site_id,
+            rule_id=pending_rule["rule_id"],
+            confirmed_by="chat",
+        )
+        if not confirmed_rule:
+            return "I found a pending operating rule but could not save it. Check database access for operator_rules."
+        return build_rule_saved_response(confirmed_rule)
+
+    if is_rejection_message(message):
+        pending_rule = get_pending_operator_rule(site_id)
+        if not pending_rule:
+            return "There is no pending operating rule to discard."
+
+        rejected_rule = reject_operator_rule(
+            site_id,
+            rule_id=pending_rule["rule_id"],
+            rejected_by="chat",
+        )
+        return build_rule_rejected_response(rejected_rule or pending_rule)
+
+    proposal = parse_operator_rule_message(message)
+    if not proposal:
+        return None
+
+    stored_rule = create_operator_rule(
+        site_id=site_id,
+        rule_type=proposal["rule_type"],
+        rule_name=proposal["rule_name"],
+        payload=proposal["payload"],
+        source="chat",
+        status="proposed",
+        confidence=proposal.get("confidence"),
+        created_by="chat",
+    )
+    if not stored_rule:
+        parsed_summary = summarize_operator_rule(proposal)
+        return (
+            "I parsed an operating rule but could not persist it.\n\n"
+            f"- Parsed: {parsed_summary}\n\n"
+            "Check database access for operator_rules and try again."
+        )
+    return build_rule_capture_response(stored_rule)
 
 
 def _get_predictions_range(site_id: str, start: date, end: date) -> list[dict]:
@@ -1032,6 +1097,19 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: human-confirmed operating knowledge ---
+    try:
+        operator_rules = list_operator_rules(
+            site_id,
+            statuses=["confirmed"],
+            active_only=True,
+            limit=12,
+        )
+        if operator_rules:
+            context["operator_rules"] = operator_rules
+    except Exception:
+        pass
+
     # --- Always: intelligence summary ---
     try:
         intel_summary = get_intelligence_summary(site_id)
@@ -1453,6 +1531,11 @@ def gather_chat_context(site_id: str, question: str) -> dict:
             "consumable",
             "reorder",
             "on hand",
+            "recipe",
+            "recipes",
+            "ingredient",
+            "ingredients",
+            "uses",
         ],
     ):
         try:
@@ -1614,6 +1697,15 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         ]
     )
 
+    if "operator_rules" in context:
+        sections.append("## Confirmed Operating Rules")
+        sections.append(
+            "These are human-confirmed operating rules and recipes. Treat them as current business constraints unless the user explicitly updates them."
+        )
+        for rule in context["operator_rules"][:10]:
+            sections.append(f"- {summarize_operator_rule(rule)}")
+        sections.append("")
+
     # --- COGS status (enhanced with source breakdown) ---
     has_real = context.get("has_real_cogs", False)
     xero_connected = context.get("xero_connected", False)
@@ -1765,6 +1857,10 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         directions = trend.get("directions", {})
         actions = sc.get("actions", {})
         financial_truth = sc.get("financial_truth", {})
+        targets = sc.get("targets", {})
+        target_current = targets.get("current", {})
+        target_gaps = targets.get("gaps", {})
+        primary_lever = targets.get("primary_lever", {})
 
         sections.append("## Bottom-Line Scorecard (30d)")
         sections.append(f"- Headline: {sc.get('headline', 'N/A')}")
@@ -1804,6 +1900,81 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(
                 "- Rule: use Square for sales breakdowns and mix; use Xero financial facts for actual incoming/outgoing totals when available."
             )
+            if financial_truth.get("overhead_proxy_cents") is not None:
+                overhead_source = financial_truth.get("overhead_proxy_source", "unknown")
+                sections.append(
+                    f"- Overhead absorption proxy: ${int(financial_truth.get('overhead_proxy_cents') or 0) / 100:,.0f} "
+                    f"(source: {overhead_source})"
+                )
+        if target_current:
+            labor_target = targets.get("targets", {}).get("labor_pct_high")
+            cogs_target = targets.get("targets", {}).get("cogs_pct_high")
+            prime_target = targets.get("targets", {}).get("prime_cost_pct_high")
+            labor_target_text = f"{float(labor_target):.0f}%" if labor_target is not None else "N/A"
+            cogs_target_text = f"{float(cogs_target):.0f}%" if cogs_target is not None else "N/A"
+            prime_target_text = f"{float(prime_target):.0f}%" if prime_target is not None else "N/A"
+            current_labor_text = (
+                f"{float(target_current.get('labor_pct')):.1f}%"
+                if target_current.get("labor_pct") is not None
+                else "N/A"
+            )
+            current_cogs_text = (
+                f"{float(target_current.get('cogs_pct')):.1f}%"
+                if target_current.get("cogs_pct") is not None
+                else "N/A"
+            )
+            current_prime_text = (
+                f"{float(target_current.get('prime_cost_pct')):.1f}%"
+                if target_current.get("prime_cost_pct") is not None
+                else "N/A"
+            )
+            margin_basis_pct = (
+                f"{float(target_current.get('margin_basis_net_margin_pct')):.1f}%"
+                if target_current.get("margin_basis_net_margin_pct") is not None
+                else "N/A"
+            )
+            overhead_text = (
+                f"${int(target_current.get('operating_overhead_cents') or 0) / 100:,.0f}"
+                if target_current.get("operating_overhead_cents") is not None
+                else "N/A"
+            )
+            sections.append("### Margin Target Gap")
+            sections.append(
+                f"- Current week run-rate: labor {current_labor_text} (target <= {labor_target_text}), "
+                f"COGS {current_cogs_text} (target <= {cogs_target_text}), "
+                f"prime cost {current_prime_text} (target <= {prime_target_text})"
+            )
+            sections.append(
+                f"- Margin basis: {margin_basis_pct} from {target_current.get('margin_basis_source', 'operational_proxy')}; "
+                f"overhead absorption proxy {overhead_text}"
+            )
+            if primary_lever:
+                sections.append(
+                    f"- Primary lever: {primary_lever.get('focus', 'unknown')} — {primary_lever.get('reason', '')}"
+                )
+            labor_cut = int(target_gaps.get("weekly_labor_reduction_needed_cents") or 0)
+            cogs_cut = int(target_gaps.get("weekly_cogs_reduction_needed_cents") or 0)
+            prime_cut = int(target_gaps.get("weekly_prime_cost_reduction_needed_cents") or 0)
+            prime_revenue = int(
+                target_gaps.get("weekly_revenue_needed_for_prime_target_cents") or 0
+            )
+            overhead_absorption = int(target_gaps.get("weekly_overhead_absorption_cents") or 0)
+            if labor_cut > 0:
+                sections.append(
+                    f"- Labor gap: remove ${labor_cut / 100:,.0f}/week from labor or add revenue to absorb it."
+                )
+            if cogs_cut > 0:
+                sections.append(
+                    f"- COGS gap: recover ${cogs_cut / 100:,.0f}/week through pricing, mix, or waste control."
+                )
+            if prime_cut > 0:
+                sections.append(
+                    f"- Prime-cost gap: recover ${prime_cut / 100:,.0f}/week or add ${prime_revenue / 100:,.0f}/week revenue."
+                )
+            if overhead_absorption > 0:
+                sections.append(
+                    f"- Overhead absorption run-rate: ${overhead_absorption / 100:,.0f}/week before target margin is met."
+                )
 
         if actions:
             sections.append(
@@ -2256,6 +2427,12 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         actions = payload.get("actions") or []
         summary = payload.get("summary") or {}
         gate = (payload.get("summary") or {}).get("proven_gate") or {}
+        profitability_goal = (
+            summary.get("profitability_goal") or payload.get("profitability_goal") or {}
+        )
+        profitability_gaps = (
+            summary.get("profitability_gaps") or payload.get("profitability_gaps") or {}
+        )
         suppressed = int(gate.get("suppressed_count") or 0)
         if actions:
             sections.append("\n## Recommended Next Actions (live)")
@@ -2263,6 +2440,31 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 sections.append(
                     f"- Optimization phase: {summary.get('optimization_phase')} "
                     f"({summary.get('phase_reason', 'no reason provided')})"
+                )
+            if profitability_goal.get("focus"):
+                sections.append(
+                    f"- Profitability focus: {profitability_goal.get('focus')} "
+                    f"({profitability_goal.get('reason', 'no reason provided')})"
+                )
+            labor_gap = int(profitability_gaps.get("weekly_labor_reduction_needed_cents") or 0)
+            cogs_gap = int(profitability_gaps.get("weekly_cogs_reduction_needed_cents") or 0)
+            prime_gap = int(profitability_gaps.get("weekly_prime_cost_reduction_needed_cents") or 0)
+            revenue_gap = int(
+                profitability_gaps.get("weekly_revenue_needed_for_net_margin_target_cents") or 0
+            )
+            if labor_gap > 0 or cogs_gap > 0 or prime_gap > 0 or revenue_gap > 0:
+                sections.append(
+                    "- Active weekly gaps: "
+                    + ", ".join(
+                        part
+                        for part in [
+                            f"labor ${labor_gap / 100:,.0f}" if labor_gap > 0 else "",
+                            f"COGS ${cogs_gap / 100:,.0f}" if cogs_gap > 0 else "",
+                            f"prime cost ${prime_gap / 100:,.0f}" if prime_gap > 0 else "",
+                            f"revenue ${revenue_gap / 100:,.0f}" if revenue_gap > 0 else "",
+                        ]
+                        if part
+                    )
                 )
             if suppressed > 0:
                 blocked_types = gate.get("suppressed_action_types") or []
@@ -2282,8 +2484,10 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 gate_text = (
                     f", gate={gate_status}, samples={realized_samples}" if gate_status else ""
                 )
+                alignment = (a.get("profitability_alignment") or {}).get("reason")
+                alignment_text = f" | {alignment}" if alignment else ""
                 sections.append(
-                    f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}{gate_text}"
+                    f"- {a.get('title', a.get('action_type'))}: est {expected / 100:+,.0f}/wk{proven_text}{conf_text}{gate_text}{alignment_text}"
                 )
 
     # --- Recently persisted recommendations ---
@@ -2304,10 +2508,28 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     if "optimized_shift_range" in context:
         opt = context["optimized_shift_range"]
         summary = opt.get("summary", {})
+        profitability_context = summary.get("profitability_context") or {}
         sections.append("\n## 28-Day Shift Optimization")
         sections.append(
             f"- Days with predictions: {summary.get('days_with_predictions', 0)} / {opt.get('days', 0)}"
         )
+        if profitability_context.get("primary_lever", {}).get("focus"):
+            sections.append(
+                f"- Profitability focus: {profitability_context['primary_lever'].get('focus')} "
+                f"({profitability_context['primary_lever'].get('reason', 'no reason provided')})"
+            )
+        weekly_savings = int(profitability_context.get("estimated_weekly_labor_savings_cents") or 0)
+        weekly_target = int(
+            (profitability_context.get("gaps") or {}).get("weekly_labor_reduction_needed_cents")
+            or 0
+        )
+        if weekly_target > 0:
+            sections.append(
+                f"- Estimated weekly roster labor savings: ${weekly_savings / 100:,.0f} "
+                f"against target ${weekly_target / 100:,.0f}"
+            )
+        elif profitability_context.get("summary_note"):
+            sections.append(f"- {profitability_context.get('summary_note')}")
         templates = opt.get("weekly_templates") or []
         for t in templates:
             if t.get("status") != "ok":
@@ -2318,6 +2540,16 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(
                 f"- {t.get('day_of_week')}: {shift_count} template shifts, avg labor delta {delta_text}"
             )
+            constraint_notes = [
+                str(c.get("note") or "").strip()
+                for c in (t.get("constraints") or [])
+                if c.get("note")
+            ]
+            if constraint_notes:
+                sections.append(f"  Constraints: {'; '.join(constraint_notes[:3])}")
+            alignment_note = (t.get("profitability_alignment") or {}).get("note")
+            if alignment_note:
+                sections.append(f"  Profitability: {alignment_note}")
 
     # --- Item Margins ---
     if "item_margins" in context:
@@ -2673,16 +2905,22 @@ async def stream_chat_response(
     messages: list[dict],
     document_ids: list[str] = None,
 ) -> AsyncGenerator[str, None]:
-    if not settings.ANTHROPIC_API_KEY:
-        yield 'data: {"error": "ANTHROPIC_API_KEY not configured"}\n\n'
-        yield 'data: {"done": true}\n\n'
-        return
-
     last_user_msg = ""
     for msg in reversed(messages):
         if msg.get("role") == "user":
             last_user_msg = msg.get("content", "")
             break
+
+    operator_rule_response = _handle_operator_rule_message(site_id, last_user_msg)
+    if operator_rule_response is not None:
+        yield f'data: {json.dumps({"content": operator_rule_response})}\n\n'
+        yield 'data: {"done": true}\n\n'
+        return
+
+    if not settings.ANTHROPIC_API_KEY:
+        yield 'data: {"error": "ANTHROPIC_API_KEY not configured"}\n\n'
+        yield 'data: {"done": true}\n\n'
+        return
 
     # --- Process uploaded documents ---
     extraction_results = []

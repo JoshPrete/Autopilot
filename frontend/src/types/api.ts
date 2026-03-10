@@ -104,7 +104,41 @@ export interface ScorecardActions {
   realized_actions: number;
   avg_realized_weekly_profit_delta_cents: number | null;
   total_realized_weekly_profit_delta_cents: number | null;
-  top_proven_action_types: string[];
+  top_proven_action_types: Array<{
+    action_type: string;
+    realized_count: number;
+    avg_realized_weekly_profit_delta_cents: number | null;
+  }>;
+}
+
+export interface ScorecardFinancialTruth {
+  mode: string;
+  coverage_days: number;
+  window_days: number;
+  income_cents: number | null;
+  expense_cents: number | null;
+  net_cash_cents: number | null;
+}
+
+export interface ScorecardTargetGoal {
+  focus: string | null;
+  reason: string | null;
+}
+
+export interface ScorecardTargetGaps {
+  weekly_labor_reduction_needed_cents: number | null;
+  weekly_cogs_reduction_needed_cents: number | null;
+  weekly_prime_cost_reduction_needed_cents: number | null;
+  weekly_overhead_absorption_cents: number | null;
+  weekly_revenue_needed_for_prime_target_cents: number | null;
+  weekly_revenue_needed_for_net_margin_target_cents: number | null;
+}
+
+export interface ScorecardTargets {
+  targets: Record<string, number | null>;
+  current: Record<string, number | string | null>;
+  gaps: ScorecardTargetGaps;
+  primary_lever: ScorecardTargetGoal;
 }
 
 export interface ScorecardResponse {
@@ -114,12 +148,22 @@ export interface ScorecardResponse {
   kpis: ScorecardKPIs;
   trend: ScorecardTrend;
   actions: ScorecardActions;
+  financial_truth: ScorecardFinancialTruth;
+  targets: ScorecardTargets;
 }
 
 // Next Actions / Insights
 export interface ActionMemory {
   sample_count: number;
   avg_realized_weekly_profit_delta_cents: number | null;
+}
+
+export interface NextActionProfitabilityAlignment {
+  primary_lever: string | null;
+  bonus_cents: number;
+  focus_gap_label: string | null;
+  focus_gap_cents: number;
+  reason: string | null;
 }
 
 export interface NextAction {
@@ -132,6 +176,29 @@ export interface NextAction {
   proven_weekly_impact_cents: number | null;
   memory: ActionMemory | null;
   optimization_phase: string | null;
+  realized_samples: number;
+  profitability_alignment: NextActionProfitabilityAlignment | null;
+}
+
+export interface NextActionsSummary {
+  actions_generated: number;
+  revenue_per_labor_hour_cents: number | null;
+  labor_pct: number | null;
+  data_health_status: string | null;
+  data_health_score: number | null;
+  optimization_phase: string | null;
+  phase_reason: string | null;
+  profitability_goal: ScorecardTargetGoal;
+  profitability_gaps: ScorecardTargetGaps;
+  phase_guardrails: Record<string, number>;
+  phase_metrics: Record<string, number>;
+  impact_refresh: Record<string, unknown>;
+  proven_gate: {
+    min_realized_samples: number;
+    suppressed_count: number;
+    suppressed_action_types: string[];
+    suppressed_actions: Array<Record<string, unknown>>;
+  };
 }
 
 export interface NextActionsResponse {
@@ -140,7 +207,13 @@ export interface NextActionsResponse {
   actions: NextAction[];
   optimization_phase: string | null;
   phase_reason: string | null;
-  data_health: Record<string, unknown>;
+  profitability_goal: ScorecardTargetGoal;
+  profitability_gaps: ScorecardTargetGaps;
+  data_health: {
+    status: string | null;
+    score: number | null;
+  };
+  summary: NextActionsSummary;
 }
 
 // Admin / Data Quality

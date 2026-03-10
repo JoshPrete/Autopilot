@@ -17,8 +17,15 @@ function confidenceClass(c: number): string {
   return "conf-low";
 }
 
+function gapLabel(label: string | null | undefined, cents: number | null | undefined): string | null {
+  if (!label || !cents || cents <= 0) return null;
+  return `${label}: ${formatCents(cents)}`;
+}
+
 function ActionCard({ action }: { action: NextAction }) {
   const confCls = confidenceClass(action.confidence);
+  const alignment = action.profitability_alignment;
+  const focusGap = gapLabel(alignment?.focus_gap_label, alignment?.focus_gap_cents);
   return (
     <div className="action-card">
       <div className="action-card-header">
@@ -26,6 +33,11 @@ function ActionCard({ action }: { action: NextAction }) {
         <span className={`action-conf ${confCls}`}>{Math.round(action.confidence * 100)}% conf</span>
       </div>
       <p className="action-reason">{action.reason}</p>
+      {alignment?.reason && (
+        <div className="action-alignment">
+          <strong>Profitability fit:</strong> {alignment.reason}
+        </div>
+      )}
       <div className="action-meta">
         {action.expected_weekly_profit_uplift_cents != null && (
           <span className="action-stat">
@@ -39,6 +51,10 @@ function ActionCard({ action }: { action: NextAction }) {
         )}
         {action.optimization_phase && (
           <span className="action-phase">{action.optimization_phase}</span>
+        )}
+        {focusGap && <span className="action-gap">{focusGap}</span>}
+        {action.realized_samples > 0 && (
+          <span className="action-stat">Realized samples <strong>{action.realized_samples}</strong></span>
         )}
       </div>
     </div>
@@ -65,17 +81,49 @@ export function InsightsPage() {
   if (error) return <div className="error-banner">{error}</div>;
   if (!data) return <div className="empty">No insights available.</div>;
 
+  const summary = data.summary;
+  const goal = summary?.profitability_goal ?? data.profitability_goal;
+  const gaps = summary?.profitability_gaps ?? data.profitability_gaps;
+  const activeGaps = [
+    gapLabel("Labor gap", gaps?.weekly_labor_reduction_needed_cents),
+    gapLabel("COGS gap", gaps?.weekly_cogs_reduction_needed_cents),
+    gapLabel("Prime-cost gap", gaps?.weekly_prime_cost_reduction_needed_cents),
+    gapLabel("Revenue gap", gaps?.weekly_revenue_needed_for_net_margin_target_cents),
+  ].filter(Boolean) as string[];
+
   return (
     <div className="insights-page">
       <div className="page-header">
         <h1 className="page-title">Next Actions</h1>
-        {data.optimization_phase && (
-          <span className="page-subtitle">Phase: {data.optimization_phase}</span>
+        {summary?.optimization_phase && (
+          <span className="page-subtitle">Phase: {summary.optimization_phase}</span>
         )}
       </div>
 
-      {data.phase_reason && (
-        <p className="phase-reason">{data.phase_reason}</p>
+      {summary?.phase_reason && (
+        <p className="phase-reason">{summary.phase_reason}</p>
+      )}
+
+      {(goal?.focus || goal?.reason || activeGaps.length > 0) && (
+        <section className="profitability-focus-card">
+          <div className="profitability-focus-header">
+            <h2>Profitability Focus</h2>
+            {goal?.focus && <span className="focus-pill">{goal.focus.replace(/_/g, " ")}</span>}
+          </div>
+          {goal?.reason && <p className="profitability-focus-reason">{goal.reason}</p>}
+          {activeGaps.length > 0 && (
+            <div className="profitability-gap-list">
+              {activeGaps.map((gap) => (
+                <span key={gap} className="profitability-gap-chip">{gap}</span>
+              ))}
+            </div>
+          )}
+          {summary?.data_health_status && (
+            <div className="profitability-focus-footer">
+              Data health: <strong>{summary.data_health_status}</strong>
+            </div>
+          )}
+        </section>
       )}
 
       {data.actions.length === 0 ? (

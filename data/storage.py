@@ -10,6 +10,7 @@ site-scoped per the multi-site default principle.
 import json
 import logging
 import math
+import re
 import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -2595,6 +2596,355 @@ def list_inventory_usage_rules(site_id: str, active_only: bool = True) -> list[d
         return []
 
 
+# ============================================================
+# Operator Rules (chat-confirmed operating knowledge)
+# ============================================================
+
+
+def _ensure_operator_rules_table(conn) -> bool:
+    try:
+        conn.execute(
+            _text(
+                """
+                CREATE TABLE IF NOT EXISTS operator_rules (
+                    rule_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    site_id UUID NOT NULL REFERENCES sites(site_id),
+                    rule_type TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    payload JSONB NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'chat',
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    confidence REAL,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_by TEXT,
+                    confirmed_by TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    confirmed_at TIMESTAMPTZ,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operator_rules_site_status
+                ON operator_rules(site_id, status, active, updated_at DESC)
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operator_rules_site_type
+                ON operator_rules(site_id, rule_type, updated_at DESC)
+                """
+            )
+        )
+        return True
+    except Exception as exc:  # pragma: no cover - depends on DB privileges
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.info("operator_rules table unavailable (non-fatal): %s", exc)
+        return False
+
+
+def _row_to_operator_rule(row) -> dict:
+    payload = row.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = {}
+
+    return {
+        "rule_id": str(row["rule_id"]),
+        "site_id": str(row["site_id"]),
+        "rule_type": row["rule_type"],
+        "rule_name": row.get("rule_name") or row["rule_type"],
+        "payload": payload or {},
+        "source": row.get("source") or "chat",
+        "status": row.get("status") or "proposed",
+        "confidence": float(row["confidence"]) if row.get("confidence") is not None else None,
+        "active": bool(row.get("active", True)),
+        "created_by": row.get("created_by"),
+        "confirmed_by": row.get("confirmed_by"),
+        "created_at": str(row.get("created_at")) if row.get("created_at") else None,
+        "confirmed_at": str(row.get("confirmed_at")) if row.get("confirmed_at") else None,
+        "updated_at": str(row.get("updated_at")) if row.get("updated_at") else None,
+    }
+
+
+def create_operator_rule(
+    site_id: str,
+    rule_type: str,
+    rule_name: str,
+    payload: dict,
+    source: str = "chat",
+    status: str = "proposed",
+    confidence: float = None,
+    created_by: str = "chat",
+) -> Optional[dict]:
+    try:
+        with engine.connect() as conn:
+            if not _ensure_operator_rules_table(conn):
+                return None
+
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        INSERT INTO operator_rules
+                            (site_id, rule_type, rule_name, payload, source, status,
+                             confidence, active, created_by, updated_at)
+                        VALUES
+                            (:sid, :rtype, :rname, :payload, :source, :status,
+                             :confidence, TRUE, :created_by, NOW())
+                        RETURNING rule_id, site_id, rule_type, rule_name, payload, source, status,
+                                  confidence, active, created_by, confirmed_by,
+                                  created_at, confirmed_at, updated_at
+                        """
+                    ),
+                    {
+                        "sid": site_id,
+                        "rtype": (rule_type or "").strip(),
+                        "rname": (rule_name or rule_type or "").strip(),
+                        "payload": _json_dumps(payload or {}),
+                        "source": (source or "chat").strip() or "chat",
+                        "status": (status or "proposed").strip() or "proposed",
+                        "confidence": confidence,
+                        "created_by": created_by,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+            conn.commit()
+        return _row_to_operator_rule(row) if row else None
+    except Exception as exc:
+        logger.warning("create_operator_rule unavailable (non-fatal): %s", exc)
+        return None
+
+
+def get_pending_operator_rule(site_id: str) -> Optional[dict]:
+    try:
+        with engine.connect() as conn:
+            if not _ensure_operator_rules_table(conn):
+                return None
+
+            row = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT rule_id, site_id, rule_type, rule_name, payload, source, status,
+                               confidence, active, created_by, confirmed_by,
+                               created_at, confirmed_at, updated_at
+                        FROM operator_rules
+                        WHERE site_id = :sid
+                          AND status = 'proposed'
+                          AND active = TRUE
+                        ORDER BY updated_at DESC, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
+        return _row_to_operator_rule(row) if row else None
+    except Exception as exc:
+        logger.warning("get_pending_operator_rule unavailable (non-fatal): %s", exc)
+        return None
+
+
+def list_operator_rules(
+    site_id: str,
+    statuses: list[str] = None,
+    active_only: bool = True,
+    limit: int = 25,
+) -> list[dict]:
+    try:
+        with engine.connect() as conn:
+            if not _ensure_operator_rules_table(conn):
+                return []
+
+            rows = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT rule_id, site_id, rule_type, rule_name, payload, source, status,
+                               confidence, active, created_by, confirmed_by,
+                               created_at, confirmed_at, updated_at
+                        FROM operator_rules
+                        WHERE site_id = :sid
+                          AND (:active_only = FALSE OR active = TRUE)
+                        ORDER BY
+                            CASE status
+                                WHEN 'confirmed' THEN 0
+                                WHEN 'proposed' THEN 1
+                                ELSE 2
+                            END,
+                            updated_at DESC,
+                            created_at DESC
+                        LIMIT :lim
+                        """
+                    ),
+                    {
+                        "sid": site_id,
+                        "active_only": bool(active_only),
+                        "lim": max(1, int(limit or 25)),
+                    },
+                )
+                .mappings()
+                .all()
+            )
+        results = [_row_to_operator_rule(row) for row in rows]
+        if statuses:
+            allowed = {str(status).strip().lower() for status in statuses if str(status).strip()}
+            results = [rule for rule in results if rule["status"].lower() in allowed]
+        return results
+    except Exception as exc:
+        logger.warning("list_operator_rules unavailable (non-fatal): %s", exc)
+        return []
+
+
+def confirm_operator_rule(
+    site_id: str,
+    rule_id: str = None,
+    confirmed_by: str = "chat",
+) -> Optional[dict]:
+    try:
+        with engine.connect() as conn:
+            if not _ensure_operator_rules_table(conn):
+                return None
+
+            if rule_id:
+                target = {"sid": site_id, "rid": rule_id}
+                where_sql = "site_id = :sid AND rule_id = :rid"
+            else:
+                target_row = (
+                    conn.execute(
+                        _text(
+                            """
+                            SELECT rule_id
+                            FROM operator_rules
+                            WHERE site_id = :sid
+                              AND status = 'proposed'
+                              AND active = TRUE
+                            ORDER BY updated_at DESC, created_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"sid": site_id},
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not target_row:
+                    return None
+                target = {"sid": site_id, "rid": str(target_row["rule_id"])}
+                where_sql = "site_id = :sid AND rule_id = :rid"
+
+            row = (
+                conn.execute(
+                    _text(
+                        f"""
+                        UPDATE operator_rules
+                        SET status = 'confirmed',
+                            confirmed_by = :confirmed_by,
+                            confirmed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE {where_sql}
+                        RETURNING rule_id, site_id, rule_type, rule_name, payload, source, status,
+                                  confidence, active, created_by, confirmed_by,
+                                  created_at, confirmed_at, updated_at
+                        """
+                    ),
+                    {
+                        **target,
+                        "confirmed_by": confirmed_by,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+            conn.commit()
+        return _row_to_operator_rule(row) if row else None
+    except Exception as exc:
+        logger.warning("confirm_operator_rule unavailable (non-fatal): %s", exc)
+        return None
+
+
+def reject_operator_rule(
+    site_id: str,
+    rule_id: str = None,
+    rejected_by: str = "chat",
+) -> Optional[dict]:
+    try:
+        with engine.connect() as conn:
+            if not _ensure_operator_rules_table(conn):
+                return None
+
+            if rule_id:
+                target = {"sid": site_id, "rid": rule_id}
+                where_sql = "site_id = :sid AND rule_id = :rid"
+            else:
+                target_row = (
+                    conn.execute(
+                        _text(
+                            """
+                            SELECT rule_id
+                            FROM operator_rules
+                            WHERE site_id = :sid
+                              AND status = 'proposed'
+                              AND active = TRUE
+                            ORDER BY updated_at DESC, created_at DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"sid": site_id},
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not target_row:
+                    return None
+                target = {"sid": site_id, "rid": str(target_row["rule_id"])}
+                where_sql = "site_id = :sid AND rule_id = :rid"
+
+            row = (
+                conn.execute(
+                    _text(
+                        f"""
+                        UPDATE operator_rules
+                        SET status = 'rejected',
+                            active = FALSE,
+                            confirmed_by = :rejected_by,
+                            updated_at = NOW()
+                        WHERE {where_sql}
+                        RETURNING rule_id, site_id, rule_type, rule_name, payload, source, status,
+                                  confidence, active, created_by, confirmed_by,
+                                  created_at, confirmed_at, updated_at
+                        """
+                    ),
+                    {
+                        **target,
+                        "rejected_by": rejected_by,
+                    },
+                )
+                .mappings()
+                .first()
+            )
+            conn.commit()
+        return _row_to_operator_rule(row) if row else None
+    except Exception as exc:
+        logger.warning("reject_operator_rule unavailable (non-fatal): %s", exc)
+        return None
+
+
 def store_inventory_receipt(
     site_id: str,
     inventory_item_id: str,
@@ -2720,6 +3070,305 @@ def _terms_match(tokens: list[str], terms_csv: str, require: bool) -> bool:
     token_text = " ".join(tokens)
     matched = any(term in token_text for term in terms)
     return matched if require else (not matched)
+
+
+_WEEKDAY_TO_INDEX = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
+
+def _normalize_inventory_text(raw: str | None) -> str:
+    text = str(raw or "").strip().lower().replace("_", " ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _inventory_match_score(subject: str | None, item: dict) -> int:
+    needle = _normalize_inventory_text(subject)
+    if not needle:
+        return 0
+
+    candidates = [
+        _normalize_inventory_text(item.get("item_name")),
+        _normalize_inventory_text(item.get("score_key")),
+    ]
+    needle_tokens = set(needle.split())
+    best = 0
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate_tokens = set(candidate.split())
+        if needle == candidate:
+            best = max(best, 100)
+            continue
+        if needle in candidate or candidate in needle:
+            best = max(best, 70)
+            continue
+        overlap = needle_tokens & candidate_tokens
+        if not overlap:
+            continue
+        score = len(overlap) * 15
+        if overlap == needle_tokens:
+            score += 20
+        best = max(best, score)
+
+    return best
+
+
+def _best_inventory_item_match(items: list[dict], subject: str | None) -> Optional[dict]:
+    ranked = sorted(
+        ((item, _inventory_match_score(subject, item)) for item in items),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    if not ranked or ranked[0][1] <= 0:
+        return None
+    return ranked[0][0]
+
+
+def _build_virtual_inventory_usage_rules(
+    items: list[dict],
+    usage_rules: list[dict],
+    operator_rules: list[dict],
+) -> list[dict]:
+    explicit_pairs = {
+        (
+            str(rule.get("inventory_item_id") or ""),
+            _normalize_inventory_text(rule.get("trigger_item_name")),
+        )
+        for rule in usage_rules
+    }
+    virtual_rules: list[dict] = []
+    seen_pairs = set(explicit_pairs)
+
+    for rule in operator_rules:
+        if rule.get("rule_type") != "recipe_definition":
+            continue
+        payload = rule.get("payload") or {}
+        trigger = _normalize_inventory_text(payload.get("trigger_item_name"))
+        if not trigger:
+            continue
+        for component in payload.get("components") or []:
+            quantity = float(component.get("quantity") or 0)
+            if quantity <= 0:
+                continue
+            matched_item = _best_inventory_item_match(items, component.get("item_name"))
+            if not matched_item:
+                continue
+            pair = (str(matched_item.get("inventory_item_id") or ""), trigger)
+            if pair in seen_pairs:
+                continue
+            virtual_rules.append(
+                {
+                    "rule_id": f"recipe:{rule.get('rule_id')}:{matched_item.get('inventory_item_id')}",
+                    "inventory_item_id": str(matched_item.get("inventory_item_id") or ""),
+                    "inventory_item_name": matched_item.get("item_name"),
+                    "inventory_unit": matched_item.get("unit") or "units",
+                    "trigger_item_name": trigger,
+                    "required_modifier_terms": None,
+                    "excluded_modifier_terms": None,
+                    "units_per_sale": quantity,
+                    "priority": 500,
+                    "active": True,
+                    "updated_at": rule.get("updated_at"),
+                    "source": "recipe_definition",
+                }
+            )
+            seen_pairs.add(pair)
+
+    return virtual_rules
+
+
+def _next_weekday_on_or_after(start_day: date, weekday_idx: int) -> date:
+    delta = (weekday_idx - start_day.weekday()) % 7
+    return start_day + timedelta(days=delta)
+
+
+def _parse_schedule_time(raw_time: str | None):
+    token = str(raw_time or "").strip()
+    if not token:
+        return None
+    try:
+        return datetime.strptime(token, "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def _matched_operator_rules_for_item(item: dict, operator_rules: list[dict], rule_type: str) -> list[dict]:
+    matched: list[tuple[int, dict]] = []
+    for rule in operator_rules:
+        if rule.get("rule_type") != rule_type:
+            continue
+        payload = rule.get("payload") or {}
+        score = _inventory_match_score(payload.get("subject"), item)
+        if score <= 0:
+            continue
+        matched.append((score, rule))
+    return [rule for _score, rule in sorted(matched, key=lambda pair: pair[0], reverse=True)]
+
+
+def _resolve_inventory_schedule_context(
+    item: dict,
+    operator_rules: list[dict],
+    as_of: datetime,
+    effective_on_hand: float | None,
+    daily_usage_units: float,
+) -> dict:
+    order_rules = _matched_operator_rules_for_item(item, operator_rules, "ordering_schedule")
+    delivery_rules = _matched_operator_rules_for_item(item, operator_rules, "delivery_schedule")
+
+    candidate = None
+    today = as_of.date()
+
+    for rule in order_rules:
+        payload = rule.get("payload") or {}
+        delivery_idx = _WEEKDAY_TO_INDEX.get(str(payload.get("delivery_day") or "").lower())
+        cutoff_idx = _WEEKDAY_TO_INDEX.get(str(payload.get("cutoff_day") or "").lower())
+        cutoff_time = _parse_schedule_time(payload.get("cutoff_time"))
+        if delivery_idx is None or cutoff_idx is None or cutoff_time is None:
+            continue
+
+        for days_ahead in range(0, 15):
+            delivery_date = today + timedelta(days=days_ahead)
+            if delivery_date.weekday() != delivery_idx:
+                continue
+
+            cutoff_date = delivery_date
+            for days_back in range(0, 7):
+                probe = delivery_date - timedelta(days=days_back)
+                if probe.weekday() == cutoff_idx:
+                    cutoff_date = probe
+                    break
+
+            cutoff_dt = datetime.combine(cutoff_date, cutoff_time)
+            if as_of.date() > delivery_date:
+                continue
+
+            candidate = {
+                "schedule_source": "ordering_schedule",
+                "schedule_subject": payload.get("subject"),
+                "next_delivery_date": delivery_date.isoformat(),
+                "next_order_cutoff_at": cutoff_dt.isoformat(),
+                "cutoff_passed": as_of > cutoff_dt,
+            }
+            break
+        if candidate:
+            break
+
+    if candidate is None:
+        delivery_candidates = []
+        for rule in delivery_rules:
+            payload = rule.get("payload") or {}
+            for raw_day in payload.get("days") or []:
+                weekday_idx = _WEEKDAY_TO_INDEX.get(str(raw_day or "").lower())
+                if weekday_idx is None:
+                    continue
+                delivery_candidates.append(
+                    (
+                        _next_weekday_on_or_after(today, weekday_idx),
+                        payload.get("subject"),
+                    )
+                )
+        if delivery_candidates:
+            delivery_date, subject = sorted(delivery_candidates, key=lambda pair: pair[0])[0]
+            candidate = {
+                "schedule_source": "delivery_schedule",
+                "schedule_subject": subject,
+                "next_delivery_date": delivery_date.isoformat(),
+                "next_order_cutoff_at": None,
+                "cutoff_passed": None,
+            }
+
+    if candidate is None:
+        lead_time_days = max(0, int(item.get("lead_time_days") or 0))
+        if lead_time_days > 0:
+            next_delivery = today + timedelta(days=lead_time_days)
+            candidate = {
+                "schedule_source": "lead_time_proxy",
+                "schedule_subject": item.get("item_name"),
+                "next_delivery_date": next_delivery.isoformat(),
+                "next_order_cutoff_at": None,
+                "cutoff_passed": None,
+            }
+
+    if candidate is None:
+        return {
+            "schedule_source": None,
+            "schedule_subject": None,
+            "next_delivery_date": None,
+            "next_order_cutoff_at": None,
+            "days_until_next_delivery": None,
+            "projected_on_hand_at_next_delivery": None,
+            "stockout_before_next_delivery": False,
+            "order_timing_status": "schedule_missing",
+            "order_timing_note": "No confirmed delivery or ordering schedule for this item.",
+        }
+
+    next_delivery = date.fromisoformat(candidate["next_delivery_date"])
+    days_until_next_delivery = max(0, (next_delivery - today).days)
+    projected_on_hand = None
+    stockout_before_next_delivery = False
+    if effective_on_hand is not None:
+        projected_on_hand = float(effective_on_hand) - (daily_usage_units * days_until_next_delivery)
+        stockout_before_next_delivery = projected_on_hand <= 0
+
+    order_timing_status = "monitor"
+    order_timing_note = f"Next scheduled delivery is {candidate['next_delivery_date']}."
+
+    if candidate["schedule_source"] == "ordering_schedule":
+        cutoff_at = candidate["next_order_cutoff_at"]
+        if stockout_before_next_delivery and candidate.get("cutoff_passed"):
+            order_timing_status = "expedite"
+            order_timing_note = (
+                f"Projected to stock out before {candidate['next_delivery_date']}; "
+                "the cutoff for that delivery has already passed."
+            )
+        elif stockout_before_next_delivery:
+            order_timing_status = "order_now"
+            order_timing_note = (
+                f"Projected to stock out before {candidate['next_delivery_date']}; "
+                f"order before {cutoff_at}."
+            )
+        elif not candidate.get("cutoff_passed"):
+            order_timing_status = "before_cutoff"
+            order_timing_note = f"Order before {cutoff_at} for {candidate['next_delivery_date']} delivery."
+        else:
+            order_timing_status = "delivery_pending"
+            order_timing_note = (
+                f"Current cycle cutoff has passed; next scheduled delivery is {candidate['next_delivery_date']}."
+            )
+    elif candidate["schedule_source"] == "delivery_schedule":
+        if stockout_before_next_delivery:
+            order_timing_status = "order_now"
+            order_timing_note = (
+                f"Projected to stock out before the next delivery on {candidate['next_delivery_date']}."
+            )
+    elif candidate["schedule_source"] == "lead_time_proxy":
+        if stockout_before_next_delivery:
+            order_timing_status = "order_now"
+        else:
+            order_timing_status = "lead_time_proxy"
+        order_timing_note = (
+            f"No confirmed schedule; using lead-time proxy to {candidate['next_delivery_date']}."
+        )
+
+    return {
+        **candidate,
+        "days_until_next_delivery": days_until_next_delivery,
+        "projected_on_hand_at_next_delivery": (
+            round(float(projected_on_hand), 3) if projected_on_hand is not None else None
+        ),
+        "stockout_before_next_delivery": stockout_before_next_delivery,
+        "order_timing_status": order_timing_status,
+        "order_timing_note": order_timing_note,
+    }
 
 
 def get_inventory_alerts(
@@ -4905,9 +5554,7 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
                         .first()
                     )
             except Exception as inner_e:
-                logger.warning(
-                    "xero_financial_facts summary unavailable (non-fatal): %s", inner_e
-                )
+                logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", inner_e)
         else:
             logger.warning("xero_financial_facts summary unavailable (non-fatal): %s", e)
 
@@ -5248,7 +5895,11 @@ def apply_partial_ingest_guard(site_id: str, target_date: date) -> dict:
             metadata=diag,
         )
         if not flag_id:
-            return {"status": "skipped", "reason": "data_quality_flags_unavailable", "diagnostics": diag}
+            return {
+                "status": "skipped",
+                "reason": "data_quality_flags_unavailable",
+                "diagnostics": diag,
+            }
         return {"status": "flagged", "flag_id": flag_id, "diagnostics": diag}
 
     resolved = resolve_data_quality_flag(site_id, target_date, "partial_ingest", source="system")
@@ -5850,10 +6501,22 @@ def get_bottom_line_scorecard(
     }
 
     xero_financial = None
+    current_xero_financial = None
+    previous_xero_financial = None
     try:
         xero_financial = get_xero_financial_facts_summary(site_id, start_date, end_date)
     except Exception:
         logger.exception("Unable to compute Xero financial truth summary for scorecard")
+    try:
+        current_xero_financial = get_xero_financial_facts_summary(site_id, current_start, end_date)
+    except Exception:
+        logger.exception("Unable to compute current-window Xero financial truth for scorecard")
+    try:
+        previous_xero_financial = get_xero_financial_facts_summary(
+            site_id, previous_start, previous_end
+        )
+    except Exception:
+        logger.exception("Unable to compute previous-window Xero financial truth for scorecard")
 
     coverage_days = int((xero_financial or {}).get("days_covered") or 0)
     coverage_ratio = round(coverage_days / window_days, 3) if window_days > 0 else 0.0
@@ -5861,6 +6524,26 @@ def get_bottom_line_scorecard(
         overall["total_cogs_cents"] or 0
     )
     fallback_income = int(overall["total_revenue_cents"] or 0)
+    payroll_cents = (
+        int((xero_financial or {}).get("payroll_cents") or 0)
+        if coverage_days > 0 and (xero_financial or {}).get("payroll_cents") is not None
+        else None
+    )
+    labor_truth_cents = (
+        payroll_cents
+        if payroll_cents is not None and payroll_cents > 0
+        else int(overall["total_labor_cost_cents"] or 0)
+    )
+    overhead_proxy_cents = max(
+        0,
+        (
+            int((xero_financial or {}).get("expense_cents") or 0)
+            if coverage_days > 0
+            else fallback_expense
+        )
+        - labor_truth_cents
+        - int(overall["total_cogs_cents"] or 0),
+    )
     financial_truth = {
         "mode": "xero_factual" if coverage_days > 0 else "estimated_fallback",
         "reporting_breakdown_source": "square_orders",
@@ -5878,9 +6561,23 @@ def get_bottom_line_scorecard(
             if coverage_days > 0
             else fallback_expense
         ),
-        "payroll_cents": (
-            int((xero_financial or {}).get("payroll_cents") or 0)
-            if coverage_days > 0 and (xero_financial or {}).get("payroll_cents") is not None
+        "payroll_cents": payroll_cents,
+        "labor_truth_cents": labor_truth_cents,
+        "labor_truth_source": (
+            "xero_payroll"
+            if payroll_cents is not None and payroll_cents > 0
+            else "operational_labor_proxy"
+        ),
+        "overhead_proxy_cents": overhead_proxy_cents,
+        "overhead_proxy_source": (
+            "xero_expense_minus_labor_cogs" if coverage_days > 0 else "operational_proxy"
+        ),
+        "overhead_proxy_pct": (
+            round(
+                (overhead_proxy_cents / int((xero_financial or {}).get("income_cents") or 0)) * 100,
+                2,
+            )
+            if coverage_days > 0 and int((xero_financial or {}).get("income_cents") or 0) > 0
             else None
         ),
         "net_cash_cents": (
@@ -5902,6 +6599,19 @@ def get_bottom_line_scorecard(
         "full_days": int((xero_financial or {}).get("full_days") or 0),
         "estimated_fallback": coverage_days <= 0,
     }
+
+    try:
+        from analysis.financial_targets import build_financial_target_gap
+
+        target_gap = build_financial_target_gap(
+            current_window=current,
+            previous_window=previous,
+            current_financial_truth=current_xero_financial,
+            previous_financial_truth=previous_xero_financial,
+        )
+    except Exception:
+        logger.exception("Unable to compute target-gap summary for scorecard")
+        target_gap = {}
 
     return {
         "site_id": site_id,
@@ -5956,6 +6666,7 @@ def get_bottom_line_scorecard(
             },
         },
         "actions": action_payload,
+        "targets": target_gap,
         "financial_truth": financial_truth,
         "intelligence": {
             "insights_generated": int((insights_summary or {}).get("insights_generated") or 0),

@@ -15,3 +15,4 @@ app/static/frontend/
 # Data exports
 /data/imports/
 *.csv
+reports/

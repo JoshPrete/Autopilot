@@ -166,9 +166,17 @@ STAFFING_WU_PER_PERSON_LOW = 1.8
 LABOR_COST_PER_PERSON_PER_INTERVAL_CENTS = 650  # ~$26/hr per 15-min (fallback)
 EFFICIENCY_SCORE_TARGET = 0.85  # 85% = 15% buffer acceptable
 EFFICIENCY_SCORE_WARNING = 0.70  # Below this = critical
+LABOR_PCT_TARGET_LOW = 24.0
+LABOR_PCT_TARGET_HIGH = 28.0
 JUNIOR_HOURLY_RATE_THRESHOLD = 2100  # cents — under this = under-18 junior (Aus award proxy)
 SUPERANNUATION_RATE = 0.115  # 11.5% from 1 Jul 2025
 GST_RATE = 0.10  # Australian GST — Xero P&L is ex-GST, Square is inc-GST
+
+# Default target rails for commercial decisioning.
+# These are operator defaults, not hard truth; tune later per venue.
+COGS_PCT_TARGET_HIGH = 35.0
+PRIME_COST_PCT_TARGET_HIGH = 62.0
+NET_MARGIN_PCT_TARGET_LOW = 10.0
 
 # ------------------------------------------------------------
 # Day-of-Week Pattern Defaults (Section 5.5)

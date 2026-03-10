@@ -13,7 +13,7 @@ def test_generate_next_actions_returns_ranked_actions(monkeypatch):
         lambda *_args, **_kwargs: {
             "summary": {
                 "deputy_staff_hours": 10.0,
-                "deputy_labor_cost_cents": 30000,
+                "deputy_labor_cost_cents": 10000,
                 "revenue_per_labor_hour_cents": 6500,
                 "labor_pct": 34.2,
             },
@@ -50,6 +50,23 @@ def test_generate_next_actions_returns_ranked_actions(monkeypatch):
         lambda *_args, **_kwargs: {"status": "green", "score": 1.0},
     )
     monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {
+                "primary_lever": {
+                    "focus": "labor_efficiency",
+                    "reason": "Labor % is above target while COGS is within range.",
+                },
+                "gaps": {
+                    "weekly_labor_reduction_needed_cents": 80_000,
+                    "weekly_cogs_reduction_needed_cents": 0,
+                    "weekly_prime_cost_reduction_needed_cents": 80_000,
+                    "weekly_revenue_needed_for_net_margin_target_cents": 0,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
         "analysis.next_actions.analyze_workflow",
         lambda *_args, **_kwargs: {
             "high_impact_intervals": [
@@ -79,6 +96,11 @@ def test_generate_next_actions_returns_ranked_actions(monkeypatch):
     assert any(a["action_type"] == "ADD_STAFF_BLOCK" for a in result["actions"])
     assert any(a["action_type"] == "WORKFLOW_SHIFT_REALLOC" for a in result["actions"])
     assert "ranking_score_cents" in result["actions"][0]
+    assert result["optimization_phase"] == result["summary"]["optimization_phase"]
+    assert result["data_health"]["status"] == "green"
+    assert result["actions"][0]["profitability_alignment"]["primary_lever"] == "labor_efficiency"
+    assert result["actions"][0]["profitability_alignment"]["reason"]
+    assert result["summary"]["profitability_goal"]["focus"] == "labor_efficiency"
 
 
 def test_persist_next_actions_is_idempotent(monkeypatch):
@@ -114,7 +136,7 @@ def test_generate_next_actions_filters_low_confidence_when_data_health_red(monke
         lambda *_args, **_kwargs: {
             "summary": {
                 "deputy_staff_hours": 10.0,
-                "deputy_labor_cost_cents": 30000,
+                "deputy_labor_cost_cents": 10000,
                 "revenue_per_labor_hour_cents": 6500,
                 "labor_pct": 34.2,
             },
@@ -142,9 +164,16 @@ def test_generate_next_actions_filters_low_confidence_when_data_health_red(monke
         "analysis.next_actions.get_data_health",
         lambda *_args, **_kwargs: {"status": "red", "score": 0.2},
     )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {"primary_lever": {"focus": "labor_efficiency"}, "gaps": {}}
+        },
+    )
 
     result = generate_next_actions("site-1", target_date=date(2026, 2, 18), max_actions=8)
     assert result["summary"]["data_health_status"] == "red"
+    assert result["data_health"]["status"] == "red"
     assert result["summary"]["actions_generated"] == 0
 
 
@@ -188,6 +217,12 @@ def test_generate_next_actions_suppresses_non_positive_proven_actions(monkeypatc
     monkeypatch.setattr(
         "analysis.next_actions.get_data_health",
         lambda *_args, **_kwargs: {"status": "green", "score": 1.0},
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {"primary_lever": {"focus": "labor_efficiency"}, "gaps": {}}
+        },
     )
 
     def _memory(_sid, action_type, days=90):
@@ -256,9 +291,16 @@ def test_generate_next_actions_sets_labor_efficiency_phase_when_labor_pct_high(m
         "analysis.next_actions.get_data_health",
         lambda *_args, **_kwargs: {"status": "green", "score": 1.0},
     )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {"primary_lever": {"focus": "labor_efficiency"}, "gaps": {}}
+        },
+    )
 
     result = generate_next_actions("site-1", target_date=date(2026, 2, 18), max_actions=8)
     assert result["summary"]["optimization_phase"] == "labor_efficiency"
+    assert result["phase_reason"] == result["summary"]["phase_reason"]
     assert "above target band" in result["summary"]["phase_reason"]
 
 
@@ -319,9 +361,98 @@ def test_generate_next_actions_switches_to_revenue_growth_and_suppresses_cut_act
         "analysis.next_actions.get_data_health",
         lambda *_args, **_kwargs: {"status": "green", "score": 1.0},
     )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {
+                "primary_lever": {
+                    "focus": "revenue_growth",
+                    "reason": "Prime cost is within target but net margin is still low; grow revenue.",
+                },
+                "gaps": {
+                    "weekly_revenue_needed_for_net_margin_target_cents": 60_000,
+                    "weekly_labor_reduction_needed_cents": 0,
+                    "weekly_cogs_reduction_needed_cents": 0,
+                    "weekly_prime_cost_reduction_needed_cents": 0,
+                },
+            }
+        },
+    )
 
     result = generate_next_actions("site-1", target_date=date(2026, 2, 18), max_actions=8)
     assert result["summary"]["optimization_phase"] == "revenue_growth"
+    assert result["profitability_goal"]["focus"] == "revenue_growth"
     assert "Service-risk cap exceeded" in result["summary"]["phase_reason"]
     assert all(a["action_type"] != "CUT_STAFF_BLOCK" for a in result["actions"])
     assert any(a["action_type"] in ("ADD_STAFF_BLOCK", "PRICE_TEST_UP") for a in result["actions"])
+
+
+def test_generate_next_actions_can_prioritize_cogs_control_over_labor_cut(monkeypatch):
+    monkeypatch.setattr(
+        "analysis.next_actions.backfill_realized_impacts",
+        lambda *_args, **_kwargs: {"candidates": 0, "updated": 0},
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_daily_efficiency_snapshot",
+        lambda *_args, **_kwargs: {
+            "summary": {
+                "deputy_staff_hours": 10.0,
+                "deputy_labor_cost_cents": 10000,
+                "revenue_per_labor_hour_cents": 6500,
+                "labor_pct": 34.2,
+            },
+            "intervals": [
+                {
+                    "interval_start": "2026-02-18T14:00:00",
+                    "status": "overstaffed",
+                    "revenue_cents": 800,
+                    "workload_units": 1.2,
+                    "staff_delta": 1,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.compute_item_margins",
+        lambda *_args, **_kwargs: [
+            {"item": "Matcha", "score_key": "matcha_complex", "margin_pct": 48.0, "qty": 50},
+        ],
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.analyze_workflow",
+        lambda *_args, **_kwargs: {"high_impact_intervals": []},
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_action_type_outcome_summary",
+        lambda *_args, **_kwargs: {"adoption_rate": 0.7, "total_count": 12, "adopted_count": 8},
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_data_health",
+        lambda *_args, **_kwargs: {"status": "green", "score": 1.0},
+    )
+    monkeypatch.setattr(
+        "analysis.next_actions.get_bottom_line_scorecard",
+        lambda *_args, **_kwargs: {
+            "targets": {
+                "primary_lever": {
+                    "focus": "cogs_control",
+                    "reason": "COGS % is above target while labor is within range.",
+                },
+                "gaps": {
+                    "weekly_cogs_reduction_needed_cents": 120_000,
+                    "weekly_labor_reduction_needed_cents": 0,
+                    "weekly_prime_cost_reduction_needed_cents": 120_000,
+                    "weekly_revenue_needed_for_net_margin_target_cents": 0,
+                },
+            }
+        },
+    )
+
+    result = generate_next_actions("site-1", target_date=date(2026, 2, 18), max_actions=8)
+
+    assert result["summary"]["profitability_goal"]["focus"] == "cogs_control"
+    assert result["actions"][0]["action_type"] == "PRICE_TEST_UP"
+    assert (
+        result["actions"][0]["profitability_alignment"]["reason"]
+        == "Targets COGS control by improving gross margin against the remaining COGS gap of $1,200/wk."
+    )

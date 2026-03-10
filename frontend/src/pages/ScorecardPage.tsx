@@ -16,6 +16,11 @@ function pct(v: number | null | undefined, decimals = 1): string {
   return `${v.toFixed(decimals)}%`;
 }
 
+function gapChip(label: string, value: number | null | undefined): string | null {
+  if (value == null || value <= 0) return null;
+  return `${label}: ${cents(value)}`;
+}
+
 function delta(v: number | null | undefined, positive_is_good = true): { label: string; cls: string } {
   if (v == null) return { label: "—", cls: "" };
   const good = positive_is_good ? v >= 0 : v <= 0;
@@ -47,10 +52,22 @@ export function ScorecardPage() {
   const { kpis, trend, actions, window: win } = data;
   const dirs = trend.directions ?? {};
   const deltas = trend.deltas ?? {};
+  const targets = data.targets ?? null;
+  const current = targets?.current ?? {};
+  const targetBands = targets?.targets ?? {};
+  const gaps = targets?.gaps ?? null;
+  const primaryLever = targets?.primary_lever ?? null;
 
   const laborDelta = delta(typeof deltas.labor_pct === "number" ? deltas.labor_pct : null, false);
   const revDelta = delta(typeof deltas.revenue_cents === "number" ? deltas.revenue_cents : null, true);
   const profitDelta = delta(typeof deltas.net_profit_cents === "number" ? deltas.net_profit_cents : null, true);
+  const activeGaps = [
+    gapChip("Labor gap", gaps?.weekly_labor_reduction_needed_cents),
+    gapChip("COGS gap", gaps?.weekly_cogs_reduction_needed_cents),
+    gapChip("Prime-cost gap", gaps?.weekly_prime_cost_reduction_needed_cents),
+    gapChip("Overhead absorption", gaps?.weekly_overhead_absorption_cents),
+    gapChip("Revenue gap", gaps?.weekly_revenue_needed_for_net_margin_target_cents),
+  ].filter(Boolean) as string[];
 
   return (
     <div className="scorecard-page">
@@ -93,6 +110,65 @@ export function ScorecardPage() {
         </div>
       </section>
 
+      {(primaryLever?.focus || activeGaps.length > 0) && (
+        <section className="scorecard-section">
+          <h2>Profitability Target Gap</h2>
+          <div className="target-gap-card">
+            <div className="target-gap-header">
+              {primaryLever?.focus && (
+                <span className="focus-pill">{primaryLever.focus.replace(/_/g, " ")}</span>
+              )}
+              {primaryLever?.reason && (
+                <span className="target-gap-reason">{primaryLever.reason}</span>
+              )}
+            </div>
+            <div className="target-gap-metrics">
+              <div className="target-gap-metric">
+                <span className="target-gap-label">Labor</span>
+                <span className="target-gap-value">
+                  {pct(typeof current.labor_pct === "number" ? current.labor_pct : null)} / target ≤{" "}
+                  {pct(typeof targetBands.labor_pct_high === "number" ? targetBands.labor_pct_high : null, 0)}
+                </span>
+              </div>
+              <div className="target-gap-metric">
+                <span className="target-gap-label">COGS</span>
+                <span className="target-gap-value">
+                  {pct(typeof current.cogs_pct === "number" ? current.cogs_pct : null)} / target ≤{" "}
+                  {pct(typeof targetBands.cogs_pct_high === "number" ? targetBands.cogs_pct_high : null, 0)}
+                </span>
+              </div>
+              <div className="target-gap-metric">
+                <span className="target-gap-label">Prime Cost</span>
+                <span className="target-gap-value">
+                  {pct(typeof current.prime_cost_pct === "number" ? current.prime_cost_pct : null)} / target ≤{" "}
+                  {pct(typeof targetBands.prime_cost_pct_high === "number" ? targetBands.prime_cost_pct_high : null, 0)}
+                </span>
+              </div>
+              <div className="target-gap-metric">
+                <span className="target-gap-label">Margin Basis</span>
+                <span className="target-gap-value">
+                  {pct(typeof current.margin_basis_net_margin_pct === "number" ? current.margin_basis_net_margin_pct : null)}{" "}
+                  / {typeof current.margin_basis_source === "string" ? current.margin_basis_source : "operational_proxy"}
+                </span>
+              </div>
+              <div className="target-gap-metric">
+                <span className="target-gap-label">Overhead Proxy</span>
+                <span className="target-gap-value">
+                  {cents(typeof current.operating_overhead_cents === "number" ? current.operating_overhead_cents : null)}
+                </span>
+              </div>
+            </div>
+            {activeGaps.length > 0 && (
+              <div className="profitability-gap-list">
+                {activeGaps.map((label) => (
+                  <span key={label} className="profitability-gap-chip">{label}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="scorecard-section">
         <h2>Recommendation Impact</h2>
         <div className="rec-stats">
@@ -121,7 +197,9 @@ export function ScorecardPage() {
           <div className="proven-actions">
             <span className="proven-label">Top proven actions: </span>
             {actions.top_proven_action_types.map((t) => (
-              <span key={t} className="action-tag">{t}</span>
+              <span key={t.action_type} className="action-tag">
+                {t.action_type.replace(/_/g, " ")}
+              </span>
             ))}
           </div>
         )}

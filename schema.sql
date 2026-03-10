@@ -402,6 +402,30 @@ ON inventory_usage_rules(
 );
 
 -- ============================================================
+-- Operator Rules (chat-confirmed operating knowledge)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS operator_rules (
+    rule_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    site_id UUID NOT NULL REFERENCES sites(site_id),
+    rule_type TEXT NOT NULL,
+    rule_name TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    source TEXT NOT NULL DEFAULT 'chat',
+    status TEXT NOT NULL DEFAULT 'proposed',
+    confidence REAL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by TEXT,
+    confirmed_by TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_operator_rules_site_status
+ON operator_rules(site_id, status, active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_operator_rules_site_type
+ON operator_rules(site_id, rule_type, updated_at DESC);
+
+-- ============================================================
 -- Inventory Counts (physical count snapshots)
 -- ============================================================
 CREATE TABLE inventory_counts (

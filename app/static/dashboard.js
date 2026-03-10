@@ -410,6 +410,10 @@ function renderBottomLineScorecard(data) {
   const dirs = t.directions || {};
   const actions = data.actions || {};
   const ft = data.financial_truth || {};
+  const targets = data.targets || {};
+  const targetCurrent = targets.current || {};
+  const targetGaps = targets.gaps || {};
+  const primaryLever = targets.primary_lever || {};
 
   const fmtPct = (n) => (n == null ? "--" : `${n.toFixed(1)}%`);
   const fmtSigned = (n, suffix = "", decimals = 1) => {
@@ -457,6 +461,10 @@ function renderBottomLineScorecard(data) {
         <div class="roi-value">${fmtMoney(ft.expense_cents)}</div>
       </div>
       <div class="roi-item">
+        <div class="roi-label">Overhead Proxy</div>
+        <div class="roi-value">${fmtMoney(ft.overhead_proxy_cents)}</div>
+      </div>
+      <div class="roi-item">
         <div class="roi-label">Actual Net Cash (Xero)</div>
         <div class="roi-value">${fmtMoney(ft.net_cash_cents)}</div>
       </div>
@@ -499,6 +507,30 @@ function renderBottomLineScorecard(data) {
       <span class="staffing-chip">Total realized weekly profit: ${fmtMoney(actions.total_realized_weekly_profit_delta_cents)}</span>
     </div>
   `;
+
+  if (targetCurrent.revenue_cents != null) {
+    html += `
+      <h3 class="efficiency-subhead">Margin Target Gap</h3>
+      <div class="efficiency-summary">
+        <span class="staffing-chip">Primary lever: ${primaryLever.focus || "--"}</span>
+        <span class="staffing-chip">Labor: ${fmtPct(targetCurrent.labor_pct)} / target <= ${targets.targets?.labor_pct_high != null ? `${targets.targets.labor_pct_high.toFixed(0)}%` : "--"}</span>
+        <span class="staffing-chip">COGS: ${fmtPct(targetCurrent.cogs_pct)} / target <= ${targets.targets?.cogs_pct_high != null ? `${targets.targets.cogs_pct_high.toFixed(0)}%` : "--"}</span>
+        <span class="staffing-chip">Prime cost: ${fmtPct(targetCurrent.prime_cost_pct)} / target <= ${targets.targets?.prime_cost_pct_high != null ? `${targets.targets.prime_cost_pct_high.toFixed(0)}%` : "--"}</span>
+        <span class="staffing-chip">Margin basis: ${fmtPct(targetCurrent.margin_basis_net_margin_pct)} (${targetCurrent.margin_basis_source || "operational_proxy"})</span>
+      </div>
+      <div class="efficiency-summary">
+        <span class="staffing-chip">Labor reduction needed: ${fmtMoney(targetGaps.weekly_labor_reduction_needed_cents)}</span>
+        <span class="staffing-chip">COGS reduction needed: ${fmtMoney(targetGaps.weekly_cogs_reduction_needed_cents)}</span>
+        <span class="staffing-chip">Prime-cost reduction needed: ${fmtMoney(targetGaps.weekly_prime_cost_reduction_needed_cents)}</span>
+        <span class="staffing-chip">Overhead absorption: ${fmtMoney(targetGaps.weekly_overhead_absorption_cents)}</span>
+        <span class="staffing-chip">Revenue needed for prime target: ${fmtMoney(targetGaps.weekly_revenue_needed_for_prime_target_cents)}</span>
+        <span class="staffing-chip">Revenue needed for margin target: ${fmtMoney(targetGaps.weekly_revenue_needed_for_net_margin_target_cents)}</span>
+      </div>
+      <div class="roi-headline" style="font-size:0.95rem; margin-top:0.75rem;">
+        ${primaryLever.reason || ""}
+      </div>
+    `;
+  }
 
   const top = Array.isArray(actions.top_proven_action_types) ? actions.top_proven_action_types : [];
   if (top.length === 0) {
@@ -605,6 +637,11 @@ function fmtSignedMoney(cents) {
   if (cents == null) return "--";
   const sign = cents > 0 ? "+" : "";
   return `${sign}$${Math.round(cents / 100).toLocaleString()}`;
+}
+
+function renderGapChip(label, cents) {
+  if (cents == null || cents <= 0) return "";
+  return `<span class="staffing-chip">${label}: ${fmtMoney(cents)}</span>`;
 }
 
 function renderDailyEfficiency(data) {
@@ -715,6 +752,8 @@ function renderNextActions(data) {
 
   const summary = data.summary || {};
   const gate = summary.proven_gate || {};
+  const goal = summary.profitability_goal || data.profitability_goal || {};
+  const gaps = summary.profitability_gaps || data.profitability_gaps || {};
   let html = `
     <div class="efficiency-summary">
       <span class="staffing-chip">Generated: ${summary.actions_generated ?? data.actions.length}</span>
@@ -723,11 +762,25 @@ function renderNextActions(data) {
       <span class="staffing-chip">Data health: ${summary.data_health_status || "--"}</span>
     </div>
     ${summary.phase_reason ? `<div class="no-data">${summary.phase_reason}</div>` : ""}
-    <div class="next-actions-list">
   `;
+  if (goal.focus || goal.reason) {
+    html += `
+      <div class="efficiency-summary">
+        <span class="staffing-chip">Profitability focus: ${(goal.focus || "--").replace(/_/g, " ")}</span>
+        ${renderGapChip("Labor gap", gaps.weekly_labor_reduction_needed_cents)}
+        ${renderGapChip("COGS gap", gaps.weekly_cogs_reduction_needed_cents)}
+        ${renderGapChip("Prime-cost gap", gaps.weekly_prime_cost_reduction_needed_cents)}
+        ${renderGapChip("Revenue gap", gaps.weekly_revenue_needed_for_net_margin_target_cents)}
+      </div>
+      ${goal.reason ? `<div class="no-data">${goal.reason}</div>` : ""}
+    `;
+  }
+
+  html += `<div class="next-actions-list">`;
   for (const action of data.actions) {
     const conf = action.confidence != null ? `${Math.round(action.confidence * 100)}%` : "--";
     const uplift = fmtMoney(action.expected_weekly_profit_uplift_cents);
+    const alignment = action.profitability_alignment || {};
     html += `
       <div class="next-action-card">
         <div class="next-action-head">
@@ -735,10 +788,12 @@ function renderNextActions(data) {
           <span class="status-pill status-balanced">${conf} confidence</span>
         </div>
         <div class="next-action-reason">${action.reason || "--"}</div>
+        ${alignment.reason ? `<div class="next-action-reason"><strong>Profitability fit:</strong> ${alignment.reason}</div>` : ""}
         <div class="next-action-metrics">
           <span class="staffing-chip">Type: ${action.action_type || "--"}</span>
           <span class="staffing-chip">Est. weekly impact: ${uplift}</span>
           <span class="staffing-chip">Realized samples: ${action.realized_samples ?? 0}</span>
+          ${alignment.focus_gap_label && alignment.focus_gap_cents > 0 ? `<span class="staffing-chip">${alignment.focus_gap_label}: ${fmtMoney(alignment.focus_gap_cents)}</span>` : ""}
           ${action.window_start ? `<span class="staffing-chip">Window: ${fmtTime(action.window_start)}</span>` : ""}
           ${action.item ? `<span class="staffing-chip">Item: ${action.item}</span>` : ""}
         </div>
@@ -757,6 +812,9 @@ function renderRosterPlan(data) {
   }
 
   const summary = data.summary || {};
+  const profitability = data.profitability_context || summary.profitability_context || {};
+  const profitabilityGaps = profitability.gaps || {};
+  const profitabilityPrimary = profitability.primary_lever || {};
   const rows = data.days_plan || [];
   let html = `
     <div class="staffing-summary">
@@ -764,9 +822,22 @@ function renderRosterPlan(data) {
       <span class="staffing-chip">Days without predictions: ${summary.days_without_predictions ?? "--"}</span>
       <span class="staffing-chip">Window: ${data.start_date || "--"} (+${data.days || "--"}d)</span>
     </div>
+  `;
+  if (profitabilityPrimary.focus || profitability.summary_note) {
+    html += `
+      <div class="staffing-summary">
+        <span class="staffing-chip">Profit focus: ${(profitabilityPrimary.focus || "--").replace(/_/g, " ")}</span>
+        <span class="staffing-chip">Weekly labor savings est: ${fmtMoney(profitability.estimated_weekly_labor_savings_cents)}</span>
+        ${profitabilityGaps.weekly_labor_reduction_needed_cents > 0 ? `<span class="staffing-chip">Labor target: ${fmtMoney(profitabilityGaps.weekly_labor_reduction_needed_cents)}</span>` : ""}
+        ${profitabilityGaps.weekly_revenue_needed_for_net_margin_target_cents > 0 ? `<span class="staffing-chip">Revenue gap: ${fmtMoney(profitabilityGaps.weekly_revenue_needed_for_net_margin_target_cents)}</span>` : ""}
+      </div>
+      ${profitability.summary_note ? `<div class="no-data">${profitability.summary_note}</div>` : ""}
+    `;
+  }
+  html += `
     <table class="staffing-table">
       <thead>
-        <tr><th>Date</th><th>Mode</th><th>Shifts</th><th>Hours</th><th>Labor Delta</th><th>Roles</th><th>Status</th></tr>
+        <tr><th>Date</th><th>Mode</th><th>Shifts</th><th>Hours</th><th>Labor Delta</th><th>Roles</th><th>Notes</th><th>Status</th></tr>
       </thead>
       <tbody>
   `;
@@ -784,6 +855,7 @@ function renderRosterPlan(data) {
         <td>${row.recommended_total_hours != null ? row.recommended_total_hours : "--"}</td>
         <td>${fmtSignedMoney(row.estimated_labor_delta_cents)}</td>
         <td>${roles}</td>
+        <td>${row.notes || "--"}</td>
         <td><span class="status-pill status-${status}">${status}</span></td>
       </tr>
     `;

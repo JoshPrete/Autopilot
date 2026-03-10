@@ -22,6 +22,7 @@ def _patch_common_chat_dependencies(monkeypatch):
     monkeypatch.setattr("app.chat.get_inventory_alerts", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_inventory_items", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_inventory_usage_rules", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.chat.list_operator_rules", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._has_roster_data", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("app.chat.get_staffing_vs_workload", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._get_predictions_range", lambda *_args, **_kwargs: [])
@@ -188,9 +189,35 @@ def test_gather_chat_context_includes_inventory_alerts_for_stock_question(monkey
     assert "inventory_usage_rules" in context
 
 
+def test_gather_chat_context_includes_confirmed_operator_rules(monkeypatch):
+    _patch_common_chat_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        "app.chat.list_operator_rules",
+        lambda *_args, **_kwargs: [
+            {
+                "rule_type": "delivery_schedule",
+                "rule_name": "Milk delivery schedule",
+                "payload": {"subject": "Milk", "days": ["monday", "wednesday", "friday"]},
+                "status": "confirmed",
+            }
+        ],
+    )
+
+    context = gather_chat_context("site-1", "What business rules do you know?")
+
+    assert "operator_rules" in context
+    assert context["operator_rules"][0]["rule_type"] == "delivery_schedule"
+
+
 def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections():
     context = {
         "data_freshness": "2026-02-19",
+        "operator_rules": [
+            {
+                "rule_type": "delivery_schedule",
+                "payload": {"subject": "Milk", "days": ["monday", "wednesday", "friday"]},
+            }
+        ],
         "has_real_cogs": True,
         "xero_connected": True,
         "cogs_snapshot": {"total_items": 10, "real_items": 9, "xero_items": 8, "document_items": 1},
@@ -212,7 +239,22 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
         },
         "next_actions_live": {
             "summary": {
-                "proven_gate": {"suppressed_count": 1, "suppressed_action_types": ["PRICE_TEST_UP"]}
+                "optimization_phase": "labor_efficiency",
+                "phase_reason": "Labor % remains above target.",
+                "profitability_goal": {
+                    "focus": "labor_efficiency",
+                    "reason": "Labor % is above target while COGS is within range.",
+                },
+                "profitability_gaps": {
+                    "weekly_labor_reduction_needed_cents": 5400,
+                    "weekly_cogs_reduction_needed_cents": 0,
+                    "weekly_prime_cost_reduction_needed_cents": 0,
+                    "weekly_revenue_needed_for_net_margin_target_cents": 0,
+                },
+                "proven_gate": {
+                    "suppressed_count": 1,
+                    "suppressed_action_types": ["PRICE_TEST_UP"],
+                },
             },
             "actions": [
                 {
@@ -222,6 +264,9 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
                     "confidence": 0.77,
                     "proven_gate_status": "positive_realized_impact",
                     "realized_samples": 3,
+                    "profitability_alignment": {
+                        "reason": "Protects profitability by avoiding service loss in peak intervals while labor remains the primary constraint."
+                    },
                 }
             ],
         },
@@ -234,13 +279,26 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
         ],
         "optimized_shift_range": {
             "days": 28,
-            "summary": {"days_with_predictions": 28},
+            "summary": {
+                "days_with_predictions": 28,
+                "profitability_context": {
+                    "primary_lever": {
+                        "focus": "labor_efficiency",
+                        "reason": "Labor % is above target while COGS is within range.",
+                    },
+                    "gaps": {"weekly_labor_reduction_needed_cents": 5400},
+                    "estimated_weekly_labor_savings_cents": 4200,
+                },
+            },
             "weekly_templates": [
                 {
                     "day_of_week": "Mon",
                     "status": "ok",
                     "template_shifts": [1, 2],
                     "avg_estimated_labor_delta_cents": -1200,
+                    "profitability_alignment": {
+                        "note": "Contributes about $12 toward the weekly labor reduction target of $54."
+                    },
                 }
             ],
         },
@@ -277,6 +335,28 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
                     }
                 ],
             },
+            "targets": {
+                "targets": {
+                    "labor_pct_high": 28.0,
+                    "cogs_pct_high": 35.0,
+                    "prime_cost_pct_high": 62.0,
+                },
+                "current": {
+                    "labor_pct": 30.2,
+                    "cogs_pct": 27.4,
+                    "prime_cost_pct": 57.6,
+                },
+                "gaps": {
+                    "weekly_labor_reduction_needed_cents": 5400,
+                    "weekly_cogs_reduction_needed_cents": 0,
+                    "weekly_prime_cost_reduction_needed_cents": 0,
+                    "weekly_revenue_needed_for_prime_target_cents": 0,
+                },
+                "primary_lever": {
+                    "focus": "labor_efficiency",
+                    "reason": "Labor % is above target while COGS is within range.",
+                },
+            },
             "financial_truth": {
                 "mode": "xero_factual",
                 "coverage_days": 28,
@@ -290,15 +370,27 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
 
     prompt = build_system_prompt("Clubhouse", context)
 
+    assert "Confirmed Operating Rules" in prompt
+    assert "Milk: delivery on Monday, Wednesday, Friday" in prompt
     assert "COGS STATUS" in prompt
     assert "Daily Efficiency Snapshot" in prompt
     assert "Bottom-Line Scorecard (30d)" in prompt
     assert "Financial truth source" in prompt
+    assert "Margin Target Gap" in prompt
+    assert "Primary lever: labor_efficiency" in prompt
     assert "Rule: use Square for sales breakdowns" in prompt
     assert "Proven Action Types" in prompt
     assert "Recommended Next Actions (live)" in prompt
+    assert "Profitability focus: labor_efficiency" in prompt
+    assert "Active weekly gaps: labor $54" in prompt
+    assert "Protects profitability by avoiding service loss in peak intervals" in prompt
     assert "Recent Recommendation Memory" in prompt
     assert "28-Day Shift Optimization" in prompt
+    assert "Estimated weekly roster labor savings: $42 against target $54" in prompt
+    assert (
+        "Profitability: Contributes about $12 toward the weekly labor reduction target of $54."
+        in prompt
+    )
 
 
 def test_build_system_prompt_handles_string_xero_mapping_confidence():

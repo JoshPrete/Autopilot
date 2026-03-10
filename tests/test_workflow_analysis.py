@@ -91,7 +91,19 @@ def test_generate_roster_change_plan_assigns_roles(monkeypatch):
     monkeypatch.setattr(
         "analysis.workflow.optimize_shifts_range",
         lambda *_args, **_kwargs: {
-            "summary": {"days_with_predictions": 2, "days_without_predictions": 0},
+            "summary": {
+                "days_with_predictions": 2,
+                "days_without_predictions": 0,
+                "profitability_context": {
+                    "primary_lever": {
+                        "focus": "labor_efficiency",
+                        "reason": "Labor % is above target while COGS is within range.",
+                    },
+                    "gaps": {"weekly_labor_reduction_needed_cents": 5_400},
+                    "estimated_weekly_labor_savings_cents": 4_200,
+                    "summary_note": "Roster plan is targeting about $42/week of labor savings against a current target of $54/week.",
+                },
+            },
             "weekly_templates": [
                 {
                     "day_of_week": "Mon",
@@ -107,6 +119,17 @@ def test_generate_roster_change_plan_assigns_roles(monkeypatch):
                     "target_date": "2026-02-23",  # Monday
                     "status": "ok",
                     "recommended_shifts": [{"shift_label": "L1-1"}, {"shift_label": "L1-2"}],
+                    "constraints": [
+                        {
+                            "note": "Open: minimum 2 staff, senior coverage required",
+                            "daypart": "open",
+                            "requires_senior": True,
+                        }
+                    ],
+                    "profitability_alignment": {
+                        "focus": "labor_efficiency",
+                        "note": "Contributes about $12 toward the weekly labor reduction target of $54.",
+                    },
                     "summary": {
                         "recommended_shift_count": 2,
                         "recommended_total_hours": 8.0,
@@ -124,9 +147,14 @@ def test_generate_roster_change_plan_assigns_roles(monkeypatch):
 
     plan = generate_roster_change_plan("site-1", start_date=date(2026, 2, 23), days=14)
     assert plan["summary"]["days_with_predictions"] == 2
+    assert plan["profitability_context"]["primary_lever"]["focus"] == "labor_efficiency"
     assert len(plan["days_plan"]) == 2
     d0 = plan["days_plan"][0]
     assert d0["workflow_mode"] == "2p"
     assert len(d0["role_assignments"]) == 2
+    assert d0["role_assignments"][0]["senior_required"] is True
+    assert d0["profitability_alignment"]["focus"] == "labor_efficiency"
+    assert "weekly labor reduction target" in d0["notes"]
+    assert "Constraints:" in d0["notes"]
     d1 = plan["days_plan"][1]
     assert d1["status"] == "no_prediction"
