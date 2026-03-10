@@ -41,6 +41,18 @@ from intelligence.revenue_predictor import predict_revenue
 from intelligence.rush_detector import detect_rush_windows
 
 
+def _load_confirmed_rules(site_id: str | None, offline: bool) -> list[dict]:
+    """Load confirmed operator rules from DB; returns [] in offline mode."""
+    if offline or not site_id or not os.getenv("DATABASE_URL"):
+        return []
+    try:
+        from data.storage import list_operator_rules
+        return list_operator_rules(site_id, statuses=["confirmed"], active_only=True, limit=100)
+    except Exception as exc:
+        _log("data", f"operator rules unavailable ({exc}) — skipping")
+        return []
+
+
 # ── Layer 1: Data ─────────────────────────────────────────────────────────────
 
 def ingest_data(site_id: str | None, run_date: date, offline: bool) -> dict:
@@ -150,10 +162,15 @@ def run_intelligence(data: dict, forecast_date: date) -> dict:
 
 # ── Layer 3: Decisions ────────────────────────────────────────────────────────
 
-def run_decisions(signals: dict) -> list[str]:
-    """Convert signals into operator actions."""
-    actions = generate_actions(signals)
-    _log("decisions", f"{len(actions)} actions generated")
+def run_decisions(
+    signals: dict,
+    confirmed_rules: list[dict] | None = None,
+    forecast_date: date | None = None,
+) -> list[str]:
+    """Convert signals + confirmed operator rules into operator actions."""
+    actions = generate_actions(signals, confirmed_rules=confirmed_rules, forecast_date=forecast_date)
+    rule_count = len(confirmed_rules) if confirmed_rules else 0
+    _log("decisions", f"{len(actions)} actions generated ({rule_count} operator rules applied)")
     return actions
 
 
@@ -191,8 +208,9 @@ def run_pipeline(
     reports_dir = reports_dir or PROJECT_ROOT / "reports"
 
     data = ingest_data(site_id, run_date, offline)
+    confirmed_rules = _load_confirmed_rules(data.get("site_id"), offline)
     signals = run_intelligence(data, forecast_date)
-    actions = run_decisions(signals)
+    actions = run_decisions(signals, confirmed_rules=confirmed_rules, forecast_date=forecast_date)
     path = run_delivery(
         signals, actions, forecast_date, reports_dir,
         site_name=data.get("site_name", "Clubhouse"),

@@ -10,26 +10,36 @@ Each rule fires independently — they do not block each other.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+
+from decisions.rule_interpreter import apply_rules
 
 
-def generate_actions(signals: dict) -> list[str]:
+def generate_actions(
+    signals: dict,
+    confirmed_rules: list[dict] | None = None,
+    forecast_date: date | None = None,
+) -> list[str]:
     """
-    Convert signals into 3–5 operator actions for tomorrow.
+    Convert signals into operator actions for tomorrow.
+
+    Confirmed operator rules are prepended (highest priority) before
+    signal-driven actions.  Total capped at 7.
 
     Args:
-        signals: output dict from the intelligence layer, containing:
-            predicted_drinks (int)
-            predicted_cents (int)
-            rush_windows (list[dict])
-            labor_risk ("green" / "amber" / "red")
-            wage_pct (float)
-            staff_count (int)
-            total_hours (float)
+        signals: output dict from the intelligence layer
+        confirmed_rules: confirmed operator rules from the knowledge layer
+        forecast_date: the date being planned for (needed to filter rule actions)
 
     Returns:
-        list of 3–5 action strings, ordered by priority
+        ordered list of action strings
     """
+    # ── Rule-driven actions (highest priority) ────────────────────────────────
+    rule_actions: list[str] = []
+    if confirmed_rules and forecast_date:
+        rule_actions = apply_rules(confirmed_rules, forecast_date)
+
+    # ── Signal-driven actions ─────────────────────────────────────────────────
     actions: list[str] = []
 
     rush_windows = signals.get("rush_windows", [])
@@ -108,13 +118,15 @@ def generate_actions(signals: dict) -> list[str]:
     elif wage_pct > 28:
         actions.append("Watch labour % after 11:30 — cut if pace slows")
 
-    # ── Ensure minimum 3 actions ──────────────────────────────────────────────
+    # ── Ensure minimum 3 signal actions ──────────────────────────────────────
     if len(actions) < 3:
         actions.append("Run equipment check 30 min before open — confirm grinder settings")
     if len(actions) < 3:
         actions.append("Confirm all mise en place staged the evening before")
 
-    return actions[:5]
+    # Rule actions prepended — they represent confirmed business knowledge
+    combined = rule_actions + actions
+    return combined[:7]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
