@@ -13,6 +13,15 @@ export interface TomorrowPlanForecast {
   total_predicted_drinks: number;
   total_predicted_workload: number;
   event_multiplier: number;
+  predicted_revenue_cents: number;
+}
+
+export interface TomorrowPlanLabor {
+  scheduled_labor_cents: number;
+  wage_pct: number;
+  labor_risk: "green" | "amber" | "red";
+  staff_count: number;
+  total_hours: number;
 }
 
 export interface Weather {
@@ -52,7 +61,9 @@ export interface HourlyEntry {
 export interface TomorrowPlanResponse {
   meta: TomorrowPlanMeta;
   forecast: TomorrowPlanForecast;
+  labor: TomorrowPlanLabor;
   weather: Weather;
+  actions: string[];
   rush_windows: RushWindow[];
   hourly: HourlyEntry[];
 }

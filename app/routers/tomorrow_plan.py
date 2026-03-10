@@ -7,8 +7,11 @@ from fastapi.responses import HTMLResponse
 
 from app.dependencies import get_validated_site
 from data.prediction_utils import normalize_prediction_record
-from data.storage import get_prediction
+from data.storage import get_prediction, get_rosters_for_date, list_operator_rules
+from decisions.action_engine import generate_actions
 from delivery.tomorrow_plan import generate_tomorrow_plan, generate_tomorrow_plan_html
+from intelligence.labor_analysis import analyze_labor
+from intelligence.revenue_predictor import predict_revenue
 from models.recommendations import generate_pre_rush_checklist
 
 router = APIRouter(prefix="/api/sites/{site_id}/tomorrow-plan", tags=["tomorrow-plan"])
@@ -119,6 +122,59 @@ def tomorrow_plan_json(
             }
         )
 
+    site_id = site["site_id"]
+    predicted_drinks = (
+        forecast.get("total_predicted_drinks") or prediction.get("total_predicted_drinks") or 0
+    )
+
+    # ── Revenue forecast (intelligence layer) ─────────────────────────────────
+    revenue_signals: dict = {}
+    try:
+        from data.storage import get_daily_profitability
+        history = get_daily_profitability(site_id, plan_date - timedelta(days=28), plan_date)
+        normalized_history = [
+            {
+                "date": r.get("profit_date") or plan_date,
+                "revenue_cents": int(r.get("revenue_cents") or 0),
+                "drink_count": int(r.get("drink_count") or 0),
+                "labor_cents": int(r.get("labor_cost_cents") or 0),
+            }
+            for r in (history or [])
+        ]
+        if normalized_history:
+            revenue_signals = predict_revenue(normalized_history, plan_date)
+    except Exception:
+        pass
+
+    predicted_cents = revenue_signals.get("predicted_cents") or 0
+
+    # ── Labor analysis ────────────────────────────────────────────────────────
+    labor: dict = {"scheduled_labor_cents": 0, "wage_pct": 0.0, "labor_risk": "green",
+                   "staff_count": 0, "total_hours": 0.0}
+    try:
+        roster = get_rosters_for_date(site_id, plan_date)
+        labor = analyze_labor(roster, predicted_cents)
+    except Exception:
+        pass
+
+    # ── Actions (decisions layer with confirmed rules) ─────────────────────────
+    actions: list[str] = []
+    try:
+        confirmed_rules = list_operator_rules(site_id, statuses=["confirmed"], active_only=True, limit=100)
+        signals = {
+            "predicted_drinks": predicted_drinks,
+            "predicted_cents": predicted_cents,
+            "rush_windows": [
+                {"start": rw.get("start"), "end": rw.get("end"),
+                 "predicted_drinks": rw.get("predicted_drinks"), "band": "peak"}
+                for rw in rush_windows
+            ],
+            **labor,
+        }
+        actions = generate_actions(signals, confirmed_rules=confirmed_rules, forecast_date=plan_date)
+    except Exception:
+        pass
+
     return {
         "meta": {
             "prediction_id": prediction.get("prediction_id"),
@@ -131,11 +187,18 @@ def tomorrow_plan_json(
             "staff_scheduled": forecast.get("staff_scheduled") or prediction.get("staff_scheduled"),
         },
         "forecast": {
-            "total_predicted_drinks": forecast.get("total_predicted_drinks")
-            or prediction.get("total_predicted_drinks"),
+            "total_predicted_drinks": predicted_drinks,
             "total_predicted_workload": forecast.get("total_predicted_workload")
             or prediction.get("total_predicted_workload"),
             "event_multiplier": prediction.get("event_multiplier", 1.0),
+            "predicted_revenue_cents": predicted_cents,
+        },
+        "labor": {
+            "scheduled_labor_cents": labor["scheduled_labor_cents"],
+            "wage_pct": labor["wage_pct"],
+            "labor_risk": labor["labor_risk"],
+            "staff_count": labor["staff_count"],
+            "total_hours": labor["total_hours"],
         },
         "weather": {
             "temp_c": weather.get("temp_c"),
@@ -143,6 +206,7 @@ def tomorrow_plan_json(
             "rain_probability": weather.get("rain_probability"),
             "humidity": weather.get("humidity"),
         },
+        "actions": actions,
         "rush_windows": rush_response,
         "hourly": hourly_response,
     }

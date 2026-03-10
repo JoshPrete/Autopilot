@@ -71,10 +71,12 @@ def _build_db_row(rush_windows=None, confidence=0.87, forecast_date=None):
     }
 
 
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
 @patch("app.routers.tomorrow_plan.get_prediction")
 @patch("app.dependencies.get_site")
-def test_json_endpoint_returns_structured_response(mock_get_site, mock_get_pred):
-    """Endpoint returns all top-level keys: meta, forecast, weather, rush_windows, hourly."""
+def test_json_endpoint_returns_structured_response(mock_get_site, mock_get_pred, _r, _rules):
+    """Endpoint returns all top-level keys including new labor and actions fields."""
     mock_get_site.side_effect = _mock_site
     mock_get_pred.return_value = _build_db_row()
 
@@ -84,12 +86,16 @@ def test_json_endpoint_returns_structured_response(mock_get_site, mock_get_pred)
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert set(data.keys()) == {"meta", "forecast", "weather", "rush_windows", "hourly"}
+    assert {"meta", "forecast", "labor", "weather", "actions", "rush_windows", "hourly"}.issubset(
+        set(data.keys())
+    )
 
 
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
 @patch("app.routers.tomorrow_plan.get_prediction")
 @patch("app.dependencies.get_site")
-def test_json_meta_fields(mock_get_site, mock_get_pred):
+def test_json_meta_fields(mock_get_site, mock_get_pred, _r, _rules):
     """Meta section contains expected fields."""
     mock_get_site.side_effect = _mock_site
     mock_get_pred.return_value = _build_db_row()
@@ -107,9 +113,11 @@ def test_json_meta_fields(mock_get_site, mock_get_pred):
     assert meta["staff_scheduled"] == 3
 
 
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
 @patch("app.routers.tomorrow_plan.get_prediction")
 @patch("app.dependencies.get_site")
-def test_json_rush_windows_have_checklist(mock_get_site, mock_get_pred):
+def test_json_rush_windows_have_checklist(mock_get_site, mock_get_pred, _r, _rules):
     """Each rush window includes pre_rush_checklist."""
     mock_get_site.side_effect = _mock_site
     mock_get_pred.return_value = _build_db_row()
@@ -140,9 +148,11 @@ def test_json_404_when_no_prediction(mock_get_site, mock_get_pred):
     assert resp.status_code == 404
 
 
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
 @patch("app.routers.tomorrow_plan.get_prediction")
 @patch("app.dependencies.get_site")
-def test_json_confidence_labels(mock_get_site, mock_get_pred):
+def test_json_confidence_labels(mock_get_site, mock_get_pred, _r, _rules):
     """Confidence score maps to correct label."""
     mock_get_site.side_effect = _mock_site
 
@@ -155,9 +165,11 @@ def test_json_confidence_labels(mock_get_site, mock_get_pred):
         assert resp.json()["meta"]["confidence_label"] == expected_label
 
 
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
 @patch("app.routers.tomorrow_plan.get_prediction")
 @patch("app.dependencies.get_site")
-def test_json_weather_section(mock_get_site, mock_get_pred):
+def test_json_weather_section(mock_get_site, mock_get_pred, _r, _rules):
     """Weather section surfaces key fields."""
     mock_get_site.side_effect = _mock_site
     mock_get_pred.return_value = _build_db_row()
@@ -171,3 +183,38 @@ def test_json_weather_section(mock_get_site, mock_get_pred):
     assert weather["description"] == "sunny"
     assert weather["rain_probability"] == 0
     assert weather["humidity"] == 65
+
+
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
+@patch("app.routers.tomorrow_plan.get_prediction")
+@patch("app.dependencies.get_site")
+def test_json_labor_section_present(mock_get_site, mock_get_pred, _r, _rules):
+    """Labor section is returned with expected keys."""
+    mock_get_site.side_effect = _mock_site
+    mock_get_pred.return_value = _build_db_row()
+
+    tomorrow = date.today() + timedelta(days=1)
+    resp = client.get(
+        f"/api/sites/{TEST_SITE_ID}/tomorrow-plan/json?target_date={tomorrow.isoformat()}"
+    )
+    labor = resp.json()["labor"]
+    assert "wage_pct" in labor
+    assert "labor_risk" in labor
+    assert labor["labor_risk"] in ("green", "amber", "red")
+
+
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
+@patch("app.routers.tomorrow_plan.get_prediction")
+@patch("app.dependencies.get_site")
+def test_json_actions_returned(mock_get_site, mock_get_pred, _r, _rules):
+    """Actions list is returned (may be empty when no signals trigger them)."""
+    mock_get_site.side_effect = _mock_site
+    mock_get_pred.return_value = _build_db_row()
+
+    tomorrow = date.today() + timedelta(days=1)
+    resp = client.get(
+        f"/api/sites/{TEST_SITE_ID}/tomorrow-plan/json?target_date={tomorrow.isoformat()}"
+    )
+    assert isinstance(resp.json()["actions"], list)
