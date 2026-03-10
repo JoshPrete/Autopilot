@@ -2087,15 +2087,26 @@ def build_system_prompt(site_name: str, context: dict) -> str:
                 days_text = (
                     f"{days_remaining:.1f}d" if isinstance(days_remaining, (int, float)) else "n/a"
                 )
+                next_delivery = a.get("next_delivery_date") or "n/a"
+                timing_note = a.get("order_timing_note")
+                purchase_note = a.get("recommended_order_note")
+                projected = a.get("projected_on_hand_at_next_delivery")
+                projected_text = (
+                    f"{projected:.1f} {unit}" if isinstance(projected, (int, float)) else "n/a"
+                )
                 sections.append(
                     f"- {a.get('item_name', '?')}: status={a.get('status', '?')}, "
                     f"on_hand={on_hand_text}, reorder_point={rp_text}, "
-                    f"days_remaining={days_text}"
+                    f"days_remaining={days_text}, next_delivery={next_delivery}, "
+                    f"projected_on_delivery={projected_text}"
                 )
+                if timing_note:
+                    sections.append(f"  timing: {timing_note}")
+                if purchase_note:
+                    sections.append(f"  purchase: {purchase_note}")
 
             sections.append(
-                "- Usage is computed from order_items using inventory usage rules "
-                "(including modifier-based milk variants)."
+                "- Usage is computed from order_items using inventory usage rules and confirmed recipe definitions."
             )
         sections.append("")
 

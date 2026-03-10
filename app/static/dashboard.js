@@ -937,6 +937,37 @@ function renderInventoryAlerts(data) {
 
   const unitFmt = (n, unit) => (n == null ? "--" : `${Number(n).toFixed(1)} ${unit || "units"}`);
   const daysFmt = (n) => (n == null ? "--" : `${Number(n).toFixed(1)}d`);
+  const scheduleFmt = (a) => {
+    const delivery = a.next_delivery_date || "--";
+    const cutoff = a.next_order_cutoff_at ? `Cutoff ${a.next_order_cutoff_at}` : null;
+    return cutoff ? `${delivery}<div class="mini-meta">${cutoff}</div>` : delivery;
+  };
+  const timingFmt = (a) => {
+    const projected = a.projected_on_hand_at_next_delivery == null
+      ? null
+      : `Proj ${Number(a.projected_on_hand_at_next_delivery).toFixed(1)} ${a.unit || "units"}`;
+    const note = a.order_timing_note || "--";
+    return projected ? `${note}<div class="mini-meta">${projected}</div>` : note;
+  };
+  const orderQtyFmt = (a) => {
+    if (a.recommended_order_count != null && a.order_unit_name) {
+      const label = a.recommended_order_count === 1 || String(a.order_unit_name).endsWith("s")
+        ? a.order_unit_name
+        : `${a.order_unit_name}s`;
+      const baseUnits = a.recommended_order_quantity_units == null
+        ? null
+        : `${Number(a.recommended_order_quantity_units).toFixed(1)} ${a.unit || "units"}`;
+      const source = a.order_profile_source ? `Source ${a.order_profile_source}` : null;
+      const meta = [baseUnits, source].filter(Boolean).join(" · ");
+      return meta
+        ? `${a.recommended_order_count} ${label}<div class="mini-meta">${meta}</div>`
+        : `${a.recommended_order_count} ${label}`;
+    }
+    if (a.recommended_order_note) {
+      return `${unitFmt(a.recommended_reorder_units, a.unit)}<div class="mini-meta">${a.recommended_order_note}</div>`;
+    }
+    return unitFmt(a.recommended_reorder_units, a.unit);
+  };
 
   html += `
     <table class="staffing-table">
@@ -947,7 +978,9 @@ function renderInventoryAlerts(data) {
           <th>On Hand</th>
           <th>Reorder Point</th>
           <th>Days Remaining</th>
-          <th>Reorder Qty</th>
+          <th>Next Delivery</th>
+          <th>Order Timing</th>
+          <th>Order Qty</th>
         </tr>
       </thead>
       <tbody>
@@ -958,7 +991,9 @@ function renderInventoryAlerts(data) {
             <td>${unitFmt(a.effective_on_hand, a.unit)}</td>
             <td>${unitFmt(a.reorder_point, a.unit)}</td>
             <td>${daysFmt(a.days_remaining)}</td>
-            <td>${unitFmt(a.recommended_reorder_units, a.unit)}</td>
+            <td>${scheduleFmt(a)}</td>
+            <td>${timingFmt(a)}</td>
+            <td>${orderQtyFmt(a)}</td>
           </tr>
         `).join("")}
       </tbody>

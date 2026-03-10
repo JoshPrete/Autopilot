@@ -3201,7 +3201,9 @@ def _parse_schedule_time(raw_time: str | None):
         return None
 
 
-def _matched_operator_rules_for_item(item: dict, operator_rules: list[dict], rule_type: str) -> list[dict]:
+def _matched_operator_rules_for_item(
+    item: dict, operator_rules: list[dict], rule_type: str
+) -> list[dict]:
     matched: list[tuple[int, dict]] = []
     for rule in operator_rules:
         if rule.get("rule_type") != rule_type:
@@ -3316,7 +3318,9 @@ def _resolve_inventory_schedule_context(
     projected_on_hand = None
     stockout_before_next_delivery = False
     if effective_on_hand is not None:
-        projected_on_hand = float(effective_on_hand) - (daily_usage_units * days_until_next_delivery)
+        projected_on_hand = float(effective_on_hand) - (
+            daily_usage_units * days_until_next_delivery
+        )
         stockout_before_next_delivery = projected_on_hand <= 0
 
     order_timing_status = "monitor"
@@ -3338,18 +3342,16 @@ def _resolve_inventory_schedule_context(
             )
         elif not candidate.get("cutoff_passed"):
             order_timing_status = "before_cutoff"
-            order_timing_note = f"Order before {cutoff_at} for {candidate['next_delivery_date']} delivery."
+            order_timing_note = (
+                f"Order before {cutoff_at} for {candidate['next_delivery_date']} delivery."
+            )
         else:
             order_timing_status = "delivery_pending"
-            order_timing_note = (
-                f"Current cycle cutoff has passed; next scheduled delivery is {candidate['next_delivery_date']}."
-            )
+            order_timing_note = f"Current cycle cutoff has passed; next scheduled delivery is {candidate['next_delivery_date']}."
     elif candidate["schedule_source"] == "delivery_schedule":
         if stockout_before_next_delivery:
             order_timing_status = "order_now"
-            order_timing_note = (
-                f"Projected to stock out before the next delivery on {candidate['next_delivery_date']}."
-            )
+            order_timing_note = f"Projected to stock out before the next delivery on {candidate['next_delivery_date']}."
     elif candidate["schedule_source"] == "lead_time_proxy":
         if stockout_before_next_delivery:
             order_timing_status = "order_now"
@@ -3368,6 +3370,207 @@ def _resolve_inventory_schedule_context(
         "stockout_before_next_delivery": stockout_before_next_delivery,
         "order_timing_status": order_timing_status,
         "order_timing_note": order_timing_note,
+    }
+
+
+def _coerce_positive_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _coerce_positive_int(value, default: int = 1) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(default, number)
+
+
+def _pluralize_order_unit(order_unit_name: str | None, count: int | None) -> str:
+    base = str(order_unit_name or "pack").strip() or "pack"
+    if count == 1 or base.endswith("s"):
+        return base
+    return f"{base}s"
+
+
+def _get_xero_pack_profiles(site_id: str, items: list[dict]) -> dict[str, dict]:
+    score_keys = {
+        str(item.get("score_key") or "").strip()
+        for item in items
+        if str(item.get("score_key") or "").strip()
+    }
+    if not score_keys:
+        return {}
+
+    try:
+        with engine.connect() as conn:
+            if not _xero_table_exists(conn, "xero_line_mappings"):
+                return {}
+
+            rows = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT score_key, units_per_pack, source, status, confidence,
+                               approved_at, updated_at, created_at
+                        FROM xero_line_mappings
+                        WHERE site_id = :sid
+                          AND status = 'approved'
+                          AND score_key IS NOT NULL
+                          AND COALESCE(units_per_pack, 1) > 1
+                        ORDER BY score_key ASC,
+                                 approved_at DESC NULLS LAST,
+                                 updated_at DESC NULLS LAST,
+                                 created_at DESC
+                        """
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .all()
+            )
+    except Exception as exc:
+        logger.info("Xero pack profile lookup unavailable (non-fatal): %s", exc)
+        return {}
+
+    profiles: dict[str, dict] = {}
+    for row in rows:
+        score_key = str(row.get("score_key") or "").strip()
+        if score_key not in score_keys or score_key in profiles:
+            continue
+        profiles[score_key] = {
+            "units_per_order": max(1.0, float(row.get("units_per_pack") or 1)),
+            "source": "xero_mapping",
+            "order_unit_name": "pack",
+        }
+    return profiles
+
+
+def _resolve_inventory_order_profile(item: dict, xero_pack_profiles: dict[str, dict]) -> dict:
+    metadata = item.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    units_per_order = _coerce_positive_float(
+        metadata.get("units_per_order")
+        or metadata.get("order_pack_units")
+        or metadata.get("pack_size_units")
+        or metadata.get("units_per_pack")
+    )
+    order_unit_name = (
+        str(
+            metadata.get("order_unit_name")
+            or metadata.get("pack_label")
+            or metadata.get("purchase_unit")
+            or ""
+        ).strip()
+        or None
+    )
+    supplier_name = (
+        str(metadata.get("supplier_name") or metadata.get("preferred_supplier") or "").strip()
+        or None
+    )
+    minimum_order_units = _coerce_positive_int(
+        metadata.get("minimum_order_units")
+        or metadata.get("minimum_order_quantity")
+        or metadata.get("minimum_order_packs")
+        or 1,
+        default=1,
+    )
+    order_multiple_units = _coerce_positive_int(
+        metadata.get("order_multiple_units")
+        or metadata.get("order_multiple")
+        or metadata.get("order_multiple_packs")
+        or 1,
+        default=1,
+    )
+    profile_source = "metadata" if units_per_order else None
+
+    if units_per_order is None:
+        score_key = str(item.get("score_key") or "").strip()
+        xero_profile = xero_pack_profiles.get(score_key)
+        if xero_profile:
+            units_per_order = _coerce_positive_float(xero_profile.get("units_per_order"))
+            order_unit_name = order_unit_name or xero_profile.get("order_unit_name") or "pack"
+            profile_source = xero_profile.get("source") or "xero_mapping"
+
+    return {
+        "units_per_order": units_per_order,
+        "order_unit_name": order_unit_name or "pack",
+        "minimum_order_units": minimum_order_units,
+        "order_multiple_units": order_multiple_units,
+        "supplier_name": supplier_name,
+        "order_profile_source": profile_source,
+    }
+
+
+def _build_inventory_purchase_recommendation(
+    item: dict,
+    recommended_reorder_units: float | None,
+    order_profile: dict,
+) -> dict:
+    units_per_order = _coerce_positive_float(order_profile.get("units_per_order"))
+    order_unit_name = order_profile.get("order_unit_name") or "pack"
+    supplier_name = order_profile.get("supplier_name")
+
+    if recommended_reorder_units is None or recommended_reorder_units <= 0:
+        return {
+            "recommended_order_count": None,
+            "recommended_order_quantity_units": None,
+            "recommended_order_note": None,
+            "order_unit_name": order_unit_name,
+            "units_per_order": units_per_order,
+            "minimum_order_units": order_profile.get("minimum_order_units"),
+            "order_multiple_units": order_profile.get("order_multiple_units"),
+            "supplier_name": supplier_name,
+            "order_profile_source": order_profile.get("order_profile_source"),
+        }
+
+    if not units_per_order:
+        unit = item.get("unit") or "units"
+        note = f"Order {float(recommended_reorder_units):.1f} {unit}."
+        if supplier_name:
+            note = f"{note[:-1]} from {supplier_name}."
+        return {
+            "recommended_order_count": None,
+            "recommended_order_quantity_units": round(float(recommended_reorder_units), 3),
+            "recommended_order_note": note,
+            "order_unit_name": None,
+            "units_per_order": None,
+            "minimum_order_units": order_profile.get("minimum_order_units"),
+            "order_multiple_units": order_profile.get("order_multiple_units"),
+            "supplier_name": supplier_name,
+            "order_profile_source": order_profile.get("order_profile_source"),
+        }
+
+    order_count = math.ceil(float(recommended_reorder_units) / units_per_order)
+    order_count = max(
+        order_count, _coerce_positive_int(order_profile.get("minimum_order_units"), 1)
+    )
+    multiple = _coerce_positive_int(order_profile.get("order_multiple_units"), 1)
+    if order_count % multiple:
+        order_count = int(math.ceil(order_count / multiple) * multiple)
+
+    recommended_order_quantity_units = order_count * units_per_order
+    order_label = _pluralize_order_unit(order_unit_name, order_count)
+    unit = item.get("unit") or "units"
+    note = f"Order {order_count} {order_label} " f"({recommended_order_quantity_units:.1f} {unit})."
+    if supplier_name:
+        note = f"{note[:-1]} from {supplier_name}."
+
+    return {
+        "recommended_order_count": int(order_count),
+        "recommended_order_quantity_units": round(float(recommended_order_quantity_units), 3),
+        "recommended_order_note": note,
+        "order_unit_name": order_unit_name,
+        "units_per_order": round(float(units_per_order), 3),
+        "minimum_order_units": _coerce_positive_int(order_profile.get("minimum_order_units"), 1),
+        "order_multiple_units": multiple,
+        "supplier_name": supplier_name,
+        "order_profile_source": order_profile.get("order_profile_source"),
     }
 
 
@@ -3391,6 +3594,13 @@ def get_inventory_alerts(
 
     now = datetime.utcnow()
     default_start = now - timedelta(days=max(1, int(lookback_days or 21)))
+    operator_rules = list_operator_rules(
+        site_id,
+        statuses=["confirmed"],
+        active_only=True,
+        limit=200,
+    )
+    xero_pack_profiles = _get_xero_pack_profiles(site_id, items)
 
     item_by_id = {it["inventory_item_id"]: it for it in items}
     item_start: dict[str, datetime] = {}
@@ -3442,7 +3652,10 @@ def get_inventory_alerts(
 
     # Usage since earliest relevant start (computed from rules + orders).
     usage_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
+    usage_rule_sources: dict[str, set[str]] = {item_id: set() for item_id in item_by_id}
     rules = list_inventory_usage_rules(site_id, active_only=True)
+    if operator_rules:
+        rules = rules + _build_virtual_inventory_usage_rules(items, rules, operator_rules)
     if rules:
         rules_by_trigger: dict[str, list[dict]] = {}
         for rule in rules:
@@ -3500,6 +3713,7 @@ def get_inventory_alerts(
                         continue
 
                     usage_by_item[item_id] += qty * float(rule.get("units_per_sale") or 0)
+                    usage_rule_sources[item_id].add(rule.get("source") or "inventory_usage_rule")
 
     # Build positions and alert payloads.
     alerts = []
@@ -3524,6 +3738,13 @@ def get_inventory_alerts(
             if effective_on_hand is not None and daily_usage_units > 0
             else None
         )
+        schedule_context = _resolve_inventory_schedule_context(
+            item=item,
+            operator_rules=operator_rules,
+            as_of=now,
+            effective_on_hand=effective_on_hand,
+            daily_usage_units=daily_usage_units,
+        )
 
         if base_count is None:
             status = "needs_count"
@@ -3541,11 +3762,26 @@ def get_inventory_alerts(
             status = "ok"
             severity = "info"
 
+        if status not in {"needs_count", "out_of_stock"} and schedule_context.get(
+            "stockout_before_next_delivery"
+        ):
+            status = "stockout_before_delivery"
+            severity = "warning"
+
         target_level = float(par_level) if par_level is not None else max(reorder_point, 0.0)
+        reorder_basis = effective_on_hand
+        if schedule_context.get("projected_on_hand_at_next_delivery") is not None:
+            reorder_basis = float(schedule_context["projected_on_hand_at_next_delivery"])
         recommended_reorder_units = (
-            max(0.0, target_level - float(effective_on_hand))
-            if effective_on_hand is not None and target_level > 0
+            max(0.0, target_level - float(reorder_basis))
+            if reorder_basis is not None and target_level > 0
             else None
+        )
+        order_profile = _resolve_inventory_order_profile(item, xero_pack_profiles)
+        purchase_recommendation = _build_inventory_purchase_recommendation(
+            item=item,
+            recommended_reorder_units=recommended_reorder_units,
+            order_profile=order_profile,
         )
 
         payload = {
@@ -3576,6 +3812,30 @@ def get_inventory_alerts(
             "last_counted_at": item.get("last_counted_at"),
             "window_start": start_dt.isoformat(),
             "window_days": days_observed,
+            "usage_rule_sources": sorted(usage_rule_sources.get(item_id) or []),
+            "schedule_source": schedule_context.get("schedule_source"),
+            "schedule_subject": schedule_context.get("schedule_subject"),
+            "matched_schedule_subject": schedule_context.get("schedule_subject"),
+            "next_delivery_date": schedule_context.get("next_delivery_date"),
+            "next_order_cutoff_at": schedule_context.get("next_order_cutoff_at"),
+            "days_until_next_delivery": schedule_context.get("days_until_next_delivery"),
+            "projected_on_hand_at_next_delivery": schedule_context.get(
+                "projected_on_hand_at_next_delivery"
+            ),
+            "stockout_before_next_delivery": schedule_context.get("stockout_before_next_delivery"),
+            "order_timing_status": schedule_context.get("order_timing_status"),
+            "order_timing_note": schedule_context.get("order_timing_note"),
+            "units_per_order": purchase_recommendation.get("units_per_order"),
+            "order_unit_name": purchase_recommendation.get("order_unit_name"),
+            "minimum_order_units": purchase_recommendation.get("minimum_order_units"),
+            "order_multiple_units": purchase_recommendation.get("order_multiple_units"),
+            "supplier_name": purchase_recommendation.get("supplier_name"),
+            "order_profile_source": purchase_recommendation.get("order_profile_source"),
+            "recommended_order_count": purchase_recommendation.get("recommended_order_count"),
+            "recommended_order_quantity_units": purchase_recommendation.get(
+                "recommended_order_quantity_units"
+            ),
+            "recommended_order_note": purchase_recommendation.get("recommended_order_note"),
         }
         if include_ok or status != "ok":
             alerts.append(payload)
@@ -3584,7 +3844,15 @@ def get_inventory_alerts(
     alerts.sort(
         key=lambda a: (
             severity_rank.get(a.get("severity"), 9),
-            a.get("days_remaining") if a.get("days_remaining") is not None else 9999,
+            (
+                a.get("days_remaining")
+                if a.get("days_remaining") is not None
+                else (
+                    a.get("days_until_next_delivery")
+                    if a.get("days_until_next_delivery") is not None
+                    else 9999
+                )
+            ),
             a.get("item_name") or "",
         )
     )

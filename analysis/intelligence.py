@@ -1159,7 +1159,11 @@ def detect_inventory_signals(site_id: str, cycle_date: date, lookback_days: int 
         days_remaining = alert.get("days_remaining")
         reorder_units = alert.get("recommended_reorder_units")
 
-        if status in ("out_of_stock", "low_stock"):
+        if status == "stockout_before_delivery":
+            severity = "warning"
+            next_delivery = alert.get("next_delivery_date") or "next delivery"
+            title = f"{item_name} will stock out before {next_delivery}"
+        elif status in ("out_of_stock", "low_stock"):
             severity = "warning"
             title = (
                 f"{item_name} out of stock"
@@ -1191,7 +1195,15 @@ def detect_inventory_signals(site_id: str, cycle_date: date, lookback_days: int 
                     "effective_on_hand": on_hand,
                     "reorder_point": reorder_point,
                     "recommended_reorder_units": reorder_units,
+                    "recommended_order_count": alert.get("recommended_order_count"),
+                    "order_unit_name": alert.get("order_unit_name"),
+                    "recommended_order_note": alert.get("recommended_order_note"),
                     "days_remaining": days_remaining,
+                    "next_delivery_date": alert.get("next_delivery_date"),
+                    "next_order_cutoff_at": alert.get("next_order_cutoff_at"),
+                    "stockout_before_next_delivery": alert.get("stockout_before_next_delivery"),
+                    "order_timing_status": alert.get("order_timing_status"),
+                    "order_timing_note": alert.get("order_timing_note"),
                     "window_days": alert.get("window_days"),
                 },
                 "severity": severity,
