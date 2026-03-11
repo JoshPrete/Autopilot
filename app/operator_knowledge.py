@@ -84,6 +84,8 @@ def parse_operator_rule_message(message: str) -> dict | None:
         _parse_staffing_constraint,
         _parse_ordering_schedule,
         _parse_delivery_schedule,
+        _parse_purchase_profile,
+        _parse_workflow_rule,
         _parse_storage_rule,
         _parse_recipe_definition,
     ):
@@ -146,6 +148,26 @@ def summarize_operator_rule(rule: dict) -> str:
             parts.append(f"do not leave {payload['disallow_role_alone']} alone")
         detail = ", ".join(parts) if parts else "staffing constraint"
         return f"{day}{daypart_text}: {detail}"
+
+    if rule_type == "purchase_profile":
+        subject = payload.get("subject") or "Item"
+        pack_size = payload.get("pack_size")
+        pack_unit = payload.get("pack_unit") or "units"
+        supplier_name = payload.get("supplier_name")
+        order_str = f"{pack_size} {pack_unit}" if pack_size else pack_unit
+        if supplier_name:
+            return f"{subject}: {order_str} from {supplier_name}"
+        return f"{subject}: ordered in {order_str}"
+
+    if rule_type == "workflow_rule":
+        trigger = payload.get("trigger_condition") or ""
+        action = payload.get("action") or "action"
+        role_source = payload.get("role_source")
+        subject = payload.get("subject")
+        label = role_source or subject or "Workflow"
+        if trigger:
+            return f"{label}: {action} when {trigger}"
+        return f"{label}: {action}"
 
     return (rule or {}).get("rule_name") or "Unlabelled operator rule"
 
@@ -328,7 +350,171 @@ def _parse_storage_rule(message: str) -> dict | None:
     }
 
 
+def _parse_purchase_profile(message: str) -> dict | None:
+    # _PACK_RE extracts pack_size + pack_unit from fragments like:
+    #   "12 cartons", "12-pack cartons", "2L bottles" (unit=l), "10L bag-in-box" (unit=l)
+    _PACK_RE = re.compile(
+        r"(?P<pack_size>\d+)"
+        r"(?:(?P<lunit>[Ll])\s+\w[\w\-]*"   # "2L bottles" → lunit=l
+        r"|(?:[\-\s]pack)?\s+(?P<pack_unit>[a-zA-Z][\w\-]*))",  # "12-pack cartons" / "12 cartons"
+        re.IGNORECASE,
+    )
+
+    patterns = [
+        # "we buy oat milk from Dairyco in 12-pack cartons"
+        re.compile(
+            r"^(?:we\s+)?(?:buy|order|get|source|purchase)\s+(?P<subject>.+?)\s+from\s+"
+            r"(?P<supplier>.+?)\s+in\s+(?P<pack_fragment>\d+[\w\s\-]+)",
+            re.IGNORECASE,
+        ),
+        # "oat milk comes in 12-pack cartons from Dairyco"
+        re.compile(
+            r"^(?P<subject>.+?)\s+(?:comes?\s+in|arrives?\s+in|is\s+ordered\s+in)\s+"
+            r"(?P<pack_fragment>\d+[\w\s\-]+?)(?:\s+from\s+(?P<supplier>.+))?$",
+            re.IGNORECASE,
+        ),
+        # "minimum order for oat milk is 3 cartons"
+        re.compile(
+            r"^minimum\s+(?:order|buy)\s+(?:for\s+)?(?P<subject>.+?)\s+is\s+"
+            r"(?P<pack_fragment>\d+\s+[a-zA-Z]+)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        match = pattern.search(message)
+        if not match:
+            continue
+
+        groups = match.groupdict()
+        subject = _clean_subject(groups.get("subject") or "")
+        supplier_raw = groups.get("supplier")
+        supplier_name = _clean_subject(supplier_raw) if supplier_raw else None
+        pack_fragment = (groups.get("pack_fragment") or "").strip()
+
+        pm = _PACK_RE.search(pack_fragment)
+        if not pm:
+            continue
+
+        try:
+            pack_size = int(pm.group("pack_size"))
+        except (TypeError, ValueError):
+            continue
+
+        pack_unit = (pm.group("lunit") or pm.group("pack_unit") or "units").strip().lower()
+
+        if not subject or not pack_size:
+            continue
+
+        return {
+            "rule_type": "purchase_profile",
+            "rule_name": f"{subject} purchase profile",
+            "confidence": 0.92,
+            "payload": {
+                "subject": subject,
+                "supplier_name": supplier_name,
+                "pack_size": pack_size,
+                "pack_unit": pack_unit,
+                "min_order_qty": None,
+            },
+        }
+
+    return None
+
+
+def _parse_workflow_rule(message: str) -> dict | None:
+    patterns = [
+        # "barista hands off to runner when queue hits 4 drinks"
+        re.compile(
+            r"^(?P<role_source>.+?)\s+(?:hands?\s+off|passes?|signals?)\s+to\s+(?P<role_target>.+?)\s+"
+            r"(?:when|after|at)\s+(?P<trigger_condition>.+)$",
+            re.IGNORECASE,
+        ),
+        # "call backup bar when orders reach 6" / "get a second barista when queue hits 5"
+        re.compile(
+            r"^(?:call|get|signal|bring\s+in)\s+(?P<role_target>.+?)\s+when\s+"
+            r"(?:queue|orders?)\s+(?:hits?|reach(?:es)?|gets?\s+to)\s+(?P<threshold>\d+)",
+            re.IGNORECASE,
+        ),
+        # "cold brew is prepped the night before during close"
+        re.compile(
+            r"^(?P<subject>.+?)\s+is\s+prepped\s+"
+            r"(?P<timing>the\s+night\s+before|before\s+open(?:ing)?|during\s+close|at\s+close|before\s+service)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        match = pattern.search(message)
+        if not match:
+            continue
+
+        groups = match.groupdict()
+        role_source = _clean_subject(groups.get("role_source")).lower() if groups.get("role_source") else None
+        role_target = _clean_subject(groups.get("role_target")).lower() if groups.get("role_target") else None
+        subject = (groups.get("subject") or "").strip().lower() or None
+        timing = (groups.get("timing") or "").strip().lower() or None
+        threshold = groups.get("threshold")
+        trigger_raw = (groups.get("trigger_condition") or "").strip()
+
+        if threshold:
+            trigger_condition = f"queue >= {threshold}"
+            action = f"call {role_target}" if role_target else "call for backup"
+        elif timing:
+            trigger_condition = f"prep_timing: {timing}"
+            action = f"prep {subject}" if subject else "prep item"
+        else:
+            trigger_condition = trigger_raw or None
+            action = f"handoff to {role_target}" if role_target else "action"
+
+        if not trigger_condition and not action:
+            continue
+
+        label = role_source or subject or "Workflow"
+        return {
+            "rule_type": "workflow_rule",
+            "rule_name": f"{label} workflow rule",
+            "confidence": 0.88,
+            "payload": {
+                "trigger_condition": trigger_condition,
+                "action": action,
+                "role_source": role_source,
+                "role_target": role_target,
+                "subject": subject,
+                "timing": timing,
+            },
+        }
+
+    return None
+
+
 def _parse_recipe_definition(message: str) -> dict | None:
+    # Family-level: "all iced lattes use 60g ice"
+    all_match = re.search(
+        r"^all\s+(?P<trigger>.+?)\s+use\s+(?P<components>.+)$",
+        message,
+        re.IGNORECASE,
+    )
+    if all_match:
+        trigger_raw = (all_match.group("trigger") or "").strip(" .")
+        # Singularise trailing plural: "lattes" → "latte", "flat whites" → "flat white"
+        if trigger_raw.endswith("s") and not trigger_raw.endswith("ss"):
+            trigger_raw = trigger_raw[:-1]
+        components_raw = (all_match.group("components") or "").strip(" .")
+        components = _parse_recipe_components(components_raw)
+        if trigger_raw and components:
+            return {
+                "rule_type": "recipe_definition",
+                "rule_name": f"{trigger_raw} recipe definition (family rule)",
+                "confidence": 0.88,
+                "payload": {
+                    "trigger_item_name": trigger_raw,
+                    "sale_profile": build_sale_profile_payload(trigger_raw),
+                    "components": components,
+                    "is_family_rule": True,
+                },
+            }
+
     match = re.search(
         r"^(?:a|an|the)\s+(?P<trigger>.+?)\s+uses\s+(?P<components>.+)$",
         message,
@@ -344,13 +530,7 @@ def _parse_recipe_definition(message: str) -> dict | None:
     if not trigger_item_name or not components_raw:
         return None
 
-    components = []
-    parts = re.split(r",|\band\b", components_raw, flags=re.IGNORECASE)
-    for part in parts:
-        component = _parse_recipe_component(part)
-        if component:
-            components.append(component)
-
+    components = _parse_recipe_components(components_raw)
     if not components:
         return None
 
@@ -364,6 +544,16 @@ def _parse_recipe_definition(message: str) -> dict | None:
             "components": components,
         },
     }
+
+
+def _parse_recipe_components(components_raw: str) -> list[dict]:
+    components = []
+    parts = re.split(r",|\band\b", components_raw, flags=re.IGNORECASE)
+    for part in parts:
+        component = _parse_recipe_component(part)
+        if component:
+            components.append(component)
+    return components
 
 
 def _parse_recipe_component(raw_component: str) -> dict | None:
@@ -445,6 +635,8 @@ def _rule_type_label(rule_type: str | None) -> str:
         "storage_rule": "Storage rule",
         "recipe_definition": "Recipe definition",
         "staffing_constraint": "Staffing constraint",
+        "purchase_profile": "Purchase profile",
+        "workflow_rule": "Workflow rule",
     }
     return labels.get(rule_type or "", "Operator rule")
 
