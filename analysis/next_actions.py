@@ -17,6 +17,7 @@ from data.storage import (
     get_bottom_line_scorecard,
     get_data_health,
     get_daily_efficiency_snapshot,
+    get_rec_id_for_action_key,
     recommendation_exists_for_action_key,
     store_recommendation,
 )
@@ -679,11 +680,12 @@ def persist_next_actions(
 ) -> dict:
     """
     Persist actions to recommendations table (idempotent by action_key/day).
+    Returns action_key → rec_id mapping for all actions.
     """
     target_date = target_date or date.today()
     stored = 0
     skipped = 0
-    rec_ids: list[str] = []
+    action_rec_map: dict[str, str] = {}  # action_key → rec_id
     now = datetime.utcnow()
 
     for action in actions:
@@ -692,6 +694,10 @@ def persist_next_actions(
         if action_key and recommendation_exists_for_action_key(
             site_id, action_type, action_key, target_date
         ):
+            # Already stored — look up the existing rec_id
+            existing = get_rec_id_for_action_key(site_id, action_type, action_key, target_date)
+            if existing and action_key:
+                action_rec_map[action_key] = existing
             skipped += 1
             continue
         rec_id = store_recommendation(
@@ -702,8 +708,9 @@ def persist_next_actions(
             owner_role="MANAGER",
             action_details=action,
         )
-        rec_ids.append(rec_id)
+        if action_key:
+            action_rec_map[action_key] = rec_id
         stored += 1
 
     logger.info("Persisted next actions for %s: stored=%d skipped=%d", site_id, stored, skipped)
-    return {"stored": stored, "skipped": skipped, "rec_ids": rec_ids}
+    return {"stored": stored, "skipped": skipped, "action_rec_map": action_rec_map}

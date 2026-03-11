@@ -859,6 +859,31 @@ def recommendation_exists_for_action_key(
         return exists is not None
 
 
+def get_rec_id_for_action_key(
+    site_id: str,
+    action_type: str,
+    action_key: str,
+    target_date: date,
+) -> Optional[str]:
+    """Return the rec_id for an existing persisted action, or None."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            _text(
+                """
+                SELECT rec_id
+                FROM recommendations
+                WHERE site_id = :sid
+                  AND action_type = :atype
+                  AND DATE(action_timing) = :d
+                  AND action_details->>'action_key' = :akey
+                LIMIT 1
+                """
+            ),
+            {"sid": site_id, "atype": action_type, "d": target_date, "akey": action_key},
+        ).first()
+        return str(row[0]) if row else None
+
+
 def get_action_type_outcome_summary(site_id: str, action_type: str, days: int = 90) -> dict:
     """Summarize adoption outcomes for a recommendation action_type."""
     with engine.connect() as conn:
@@ -3373,6 +3398,249 @@ def _resolve_inventory_schedule_context(
     }
 
 
+def _build_inventory_usage_summary(
+    site_id: str,
+    items: list[dict],
+    item_start: dict[str, datetime],
+    as_of: datetime,
+    operator_rules: list[dict],
+) -> dict:
+    item_by_id = {str(item.get("inventory_item_id")): item for item in items}
+    usage_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
+    usage_rule_sources: dict[str, set[str]] = {item_id: set() for item_id in item_by_id}
+    usage_drivers: dict[str, dict[str, dict]] = {item_id: {} for item_id in item_by_id}
+    usage_by_weekday: dict[str, dict[str, float]] = {item_id: {} for item_id in item_by_id}
+
+    if not item_by_id:
+        return {
+            "usage_by_item": usage_by_item,
+            "usage_rule_sources": usage_rule_sources,
+            "top_usage_triggers_by_item": {},
+            "weekday_pattern_by_item": {},
+        }
+
+    global_start = min(item_start.values()) if item_start else as_of
+    rules = list_inventory_usage_rules(site_id, active_only=True)
+    if operator_rules:
+        rules = rules + _build_virtual_inventory_usage_rules(items, rules, operator_rules)
+
+    if not rules:
+        return {
+            "usage_by_item": usage_by_item,
+            "usage_rule_sources": usage_rule_sources,
+            "top_usage_triggers_by_item": {},
+            "weekday_pattern_by_item": {},
+        }
+
+    rules_by_trigger: dict[str, list[dict]] = {}
+    for rule in rules:
+        trigger = (rule.get("trigger_item_name") or "").strip().lower()
+        if not trigger:
+            continue
+        rules_by_trigger.setdefault(trigger, []).append(rule)
+
+    if not rules_by_trigger:
+        return {
+            "usage_by_item": usage_by_item,
+            "usage_rule_sources": usage_rule_sources,
+            "top_usage_triggers_by_item": {},
+            "weekday_pattern_by_item": {},
+        }
+
+    try:
+        with engine.connect() as conn:
+            order_rows = (
+                conn.execute(
+                    _text(
+                        """
+                        SELECT item_name, quantity, modifiers, created_at
+                        FROM order_items
+                        WHERE site_id = :sid
+                          AND created_at >= :start_at
+                          AND created_at <= :end_at
+                        """
+                    ),
+                    {"sid": site_id, "start_at": global_start, "end_at": as_of},
+                )
+                .mappings()
+                .all()
+            )
+    except Exception as exc:
+        logger.warning("Inventory usage order query unavailable (non-fatal): %s", exc)
+        order_rows = []
+
+    for row in order_rows:
+        trigger_name = (row.get("item_name") or "").strip()
+        trigger_key = trigger_name.lower()
+        if not trigger_key:
+            continue
+        candidates = rules_by_trigger.get(trigger_key) or []
+        if not candidates:
+            continue
+
+        created_at = _to_naive_utc(row.get("created_at")) or as_of
+        qty = max(0, int(row.get("quantity") or 0))
+        if qty <= 0:
+            continue
+        tokens = _parse_modifier_tokens(row.get("modifiers"))
+        weekday_name = created_at.strftime("%A")
+
+        for rule in candidates:
+            item_id = str(rule.get("inventory_item_id") or "")
+            if item_id not in item_by_id:
+                continue
+            if created_at < item_start[item_id]:
+                continue
+            if not _terms_match(tokens, rule.get("required_modifier_terms"), require=True):
+                continue
+            if not _terms_match(tokens, rule.get("excluded_modifier_terms"), require=False):
+                continue
+
+            consumed_units = qty * float(rule.get("units_per_sale") or 0)
+            source = rule.get("source") or "inventory_usage_rule"
+            usage_by_item[item_id] += consumed_units
+            usage_rule_sources[item_id].add(source)
+            usage_by_weekday[item_id][weekday_name] = (
+                float(usage_by_weekday[item_id].get(weekday_name) or 0) + consumed_units
+            )
+
+            driver = usage_drivers[item_id].setdefault(
+                trigger_key,
+                {
+                    "trigger_item_name": trigger_name or rule.get("trigger_item_name"),
+                    "sales_qty": 0,
+                    "inventory_units_consumed": 0.0,
+                    "rule_sources": set(),
+                },
+            )
+            driver["sales_qty"] += qty
+            driver["inventory_units_consumed"] += consumed_units
+            driver["rule_sources"].add(source)
+
+    top_usage_triggers_by_item: dict[str, list[dict]] = {}
+    weekday_pattern_by_item: dict[str, list[dict]] = {}
+
+    for item_id, drivers in usage_drivers.items():
+        total_consumed = float(usage_by_item.get(item_id) or 0)
+        if drivers:
+            ranked = sorted(
+                drivers.values(),
+                key=lambda entry: (
+                    float(entry.get("inventory_units_consumed") or 0),
+                    int(entry.get("sales_qty") or 0),
+                ),
+                reverse=True,
+            )
+            top_usage_triggers_by_item[item_id] = [
+                {
+                    "trigger_item_name": entry.get("trigger_item_name"),
+                    "sales_qty": int(entry.get("sales_qty") or 0),
+                    "inventory_units_consumed": round(
+                        float(entry.get("inventory_units_consumed") or 0), 3
+                    ),
+                    "share_pct": (
+                        round(
+                            float(entry.get("inventory_units_consumed") or 0)
+                            / total_consumed
+                            * 100,
+                            1,
+                        )
+                        if total_consumed > 0
+                        else 0.0
+                    ),
+                    "rule_sources": sorted(entry.get("rule_sources") or []),
+                }
+                for entry in ranked[:5]
+            ]
+        else:
+            top_usage_triggers_by_item[item_id] = []
+
+        weekday_ranked = sorted(
+            usage_by_weekday[item_id].items(),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        weekday_pattern_by_item[item_id] = [
+            {
+                "day_of_week": weekday_name,
+                "inventory_units_consumed": round(float(consumed_units), 3),
+                "share_pct": (
+                    round(float(consumed_units) / total_consumed * 100, 1)
+                    if total_consumed > 0
+                    else 0.0
+                ),
+            }
+            for weekday_name, consumed_units in weekday_ranked[:3]
+        ]
+
+    return {
+        "usage_by_item": usage_by_item,
+        "usage_rule_sources": usage_rule_sources,
+        "top_usage_triggers_by_item": top_usage_triggers_by_item,
+        "weekday_pattern_by_item": weekday_pattern_by_item,
+    }
+
+
+def get_inventory_usage_patterns(
+    site_id: str,
+    lookback_days: int = 30,
+    limit: int = 20,
+) -> list[dict]:
+    items = list_inventory_items(site_id, active_only=True)
+    if not items:
+        return []
+
+    now = datetime.utcnow()
+    window_start = now - timedelta(days=max(1, int(lookback_days or 30)))
+    operator_rules = list_operator_rules(
+        site_id,
+        statuses=["confirmed"],
+        active_only=True,
+        limit=200,
+    )
+    item_start = {str(item["inventory_item_id"]): window_start for item in items}
+    usage_summary = _build_inventory_usage_summary(
+        site_id=site_id,
+        items=items,
+        item_start=item_start,
+        as_of=now,
+        operator_rules=operator_rules,
+    )
+
+    patterns = []
+    days_observed = max(1, (now.date() - window_start.date()).days + 1)
+    for item in items:
+        item_id = str(item["inventory_item_id"])
+        total_consumed = float(usage_summary["usage_by_item"].get(item_id) or 0)
+        top_triggers = usage_summary["top_usage_triggers_by_item"].get(item_id) or []
+        if total_consumed <= 0 and not top_triggers:
+            continue
+        patterns.append(
+            {
+                "inventory_item_id": item_id,
+                "item_name": item.get("item_name"),
+                "score_key": item.get("score_key"),
+                "unit": item.get("unit") or "units",
+                "lookback_days": days_observed,
+                "total_consumed_units": round(total_consumed, 3),
+                "avg_daily_consumed_units": round(total_consumed / days_observed, 3),
+                "top_usage_triggers": top_triggers,
+                "weekday_pattern": usage_summary["weekday_pattern_by_item"].get(item_id) or [],
+                "usage_rule_sources": sorted(
+                    usage_summary["usage_rule_sources"].get(item_id) or []
+                ),
+            }
+        )
+
+    patterns.sort(
+        key=lambda entry: (
+            -float(entry.get("total_consumed_units") or 0),
+            entry.get("item_name") or "",
+        )
+    )
+    return patterns[: max(1, int(limit or 20))]
+
+
 def _coerce_positive_float(value) -> float | None:
     try:
         number = float(value)
@@ -3650,70 +3918,17 @@ def get_inventory_alerts(
     except Exception as e:
         logger.warning("Inventory receipts query unavailable (non-fatal): %s", e)
 
-    # Usage since earliest relevant start (computed from rules + orders).
-    usage_by_item: dict[str, float] = {item_id: 0.0 for item_id in item_by_id}
-    usage_rule_sources: dict[str, set[str]] = {item_id: set() for item_id in item_by_id}
-    rules = list_inventory_usage_rules(site_id, active_only=True)
-    if operator_rules:
-        rules = rules + _build_virtual_inventory_usage_rules(items, rules, operator_rules)
-    if rules:
-        rules_by_trigger: dict[str, list[dict]] = {}
-        for rule in rules:
-            trigger = (rule.get("trigger_item_name") or "").strip().lower()
-            if not trigger:
-                continue
-            rules_by_trigger.setdefault(trigger, []).append(rule)
-
-        if rules_by_trigger:
-            try:
-                with engine.connect() as conn:
-                    order_rows = (
-                        conn.execute(
-                            _text(
-                                """
-                            SELECT item_name, quantity, modifiers, created_at
-                            FROM order_items
-                            WHERE site_id = :sid
-                              AND created_at >= :start_at
-                              AND created_at <= :end_at
-                            """
-                            ),
-                            {"sid": site_id, "start_at": global_start, "end_at": now},
-                        )
-                        .mappings()
-                        .all()
-                    )
-            except Exception as e:
-                logger.warning("Inventory usage order query unavailable (non-fatal): %s", e)
-                order_rows = []
-
-            for row in order_rows:
-                trigger_key = (row.get("item_name") or "").strip().lower()
-                if not trigger_key:
-                    continue
-                candidates = rules_by_trigger.get(trigger_key) or []
-                if not candidates:
-                    continue
-
-                created_at = _to_naive_utc(row.get("created_at")) or now
-                qty = max(0, int(row.get("quantity") or 0))
-                if qty <= 0:
-                    continue
-                tokens = _parse_modifier_tokens(row.get("modifiers"))
-
-                for rule in candidates:
-                    item_id = rule.get("inventory_item_id")
-                    if item_id not in item_by_id:
-                        continue
-                    if created_at < item_start[item_id]:
-                        continue
-                    if not _terms_match(tokens, rule.get("required_modifier_terms"), require=True):
-                        continue
-                    if not _terms_match(tokens, rule.get("excluded_modifier_terms"), require=False):
-                        continue
-
-                    usage_by_item[item_id] += qty * float(rule.get("units_per_sale") or 0)
-                    usage_rule_sources[item_id].add(rule.get("source") or "inventory_usage_rule")
+    usage_summary = _build_inventory_usage_summary(
+        site_id=site_id,
+        items=items,
+        item_start=item_start,
+        as_of=now,
+        operator_rules=operator_rules,
+    )
+    usage_by_item = usage_summary["usage_by_item"]
+    usage_rule_sources = usage_summary["usage_rule_sources"]
+    top_usage_triggers_by_item = usage_summary["top_usage_triggers_by_item"]
+    weekday_pattern_by_item = usage_summary["weekday_pattern_by_item"]
 
     # Build positions and alert payloads.
     alerts = []
@@ -3813,6 +4028,8 @@ def get_inventory_alerts(
             "window_start": start_dt.isoformat(),
             "window_days": days_observed,
             "usage_rule_sources": sorted(usage_rule_sources.get(item_id) or []),
+            "top_usage_triggers": top_usage_triggers_by_item.get(item_id) or [],
+            "weekday_usage_pattern": weekday_pattern_by_item.get(item_id) or [],
             "schedule_source": schedule_context.get("schedule_source"),
             "schedule_subject": schedule_context.get("schedule_subject"),
             "matched_schedule_subject": schedule_context.get("schedule_subject"),

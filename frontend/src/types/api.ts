@@ -180,6 +180,7 @@ export interface NextActionProfitabilityAlignment {
 export interface NextAction {
   action_key: string;
   action_type: string;
+  rec_id: string | null;
   title: string;
   reason: string;
   confidence: number;

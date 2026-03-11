@@ -2195,3 +2195,60 @@ body {
   color: #1a1a2e;
   font-weight: 600;
 }
+
+/* ── Recommendation Feedback ────────────────────────────────── */
+
+.action-card-done {
+  opacity: 0.65;
+}
+
+.action-feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid #f0f0f0;
+}
+
+.btn-adopted {
+  background: #2e7d32;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-adopted:hover { background: #1b5e20; }
+
+.btn-skipped {
+  background: white;
+  color: #888;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-skipped:hover { background: #f5f5f5; }
+
+.feedback-saving {
+  font-size: 0.78rem;
+  color: #aaa;
+}
+
+.feedback-tag {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 10px;
+}
+
+.feedback-adopted { background: #e8f5e9; color: #2e7d32; }
+.feedback-skipped { background: #f5f5f5; color: #999; }
+.feedback-error   { background: #ffebee; color: #c62828; }

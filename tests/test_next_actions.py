@@ -116,6 +116,10 @@ def test_persist_next_actions_is_idempotent(monkeypatch):
         lambda _sid, _atype, akey, _d: exists.get(akey, False),
     )
     monkeypatch.setattr(
+        "analysis.next_actions.get_rec_id_for_action_key",
+        lambda _sid, _atype, akey, _d: f"existing-rec-{akey}",
+    )
+    monkeypatch.setattr(
         "analysis.next_actions.store_recommendation",
         lambda **kwargs: stored.append(kwargs) or "rec-1",
     )
@@ -124,6 +128,9 @@ def test_persist_next_actions_is_idempotent(monkeypatch):
     assert result["stored"] == 1
     assert result["skipped"] == 1
     assert len(stored) == 1
+    assert "action_rec_map" in result
+    assert result["action_rec_map"]["k1"] == "existing-rec-k1"  # skipped, looked up
+    assert result["action_rec_map"]["k2"] == "rec-1"            # newly stored
 
 
 def test_generate_next_actions_filters_low_confidence_when_data_health_red(monkeypatch):

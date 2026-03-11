@@ -3,6 +3,8 @@ import { apiFetch } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import type { NextActionsResponse, NextAction } from "../types/api";
 
+type FeedbackState = "idle" | "busy" | "done_adopted" | "done_skipped" | "error";
+
 function formatCents(v: number | null | undefined): string {
   if (v == null) return "—";
   const abs = Math.abs(v);
@@ -22,12 +24,28 @@ function gapLabel(label: string | null | undefined, cents: number | null | undef
   return `${label}: ${formatCents(cents)}`;
 }
 
-function ActionCard({ action }: { action: NextAction }) {
+function ActionCard({ action, siteId }: { action: NextAction; siteId: string }) {
+  const [feedback, setFeedback] = useState<FeedbackState>("idle");
   const confCls = confidenceClass(action.confidence);
   const alignment = action.profitability_alignment;
   const focusGap = gapLabel(alignment?.focus_gap_label, alignment?.focus_gap_cents);
+
+  async function sendFeedback(adopted: boolean) {
+    if (!action.rec_id || feedback === "busy") return;
+    setFeedback("busy");
+    try {
+      await apiFetch(
+        `/api/sites/${siteId}/analysis/recommendations/feedback?rec_id=${action.rec_id}&adopted=${adopted}`,
+        { method: "POST" }
+      );
+      setFeedback(adopted ? "done_adopted" : "done_skipped");
+    } catch {
+      setFeedback("error");
+    }
+  }
+
   return (
-    <div className="action-card">
+    <div className={`action-card ${feedback.startsWith("done") ? "action-card-done" : ""}`}>
       <div className="action-card-header">
         <span className="action-title">{action.title}</span>
         <span className={`action-conf ${confCls}`}>{Math.round(action.confidence * 100)}% conf</span>
@@ -57,6 +75,21 @@ function ActionCard({ action }: { action: NextAction }) {
           <span className="action-stat">Realized samples <strong>{action.realized_samples}</strong></span>
         )}
       </div>
+
+      {action.rec_id && (
+        <div className="action-feedback">
+          {feedback === "idle" && (
+            <>
+              <button className="btn-adopted" onClick={() => sendFeedback(true)}>Done</button>
+              <button className="btn-skipped" onClick={() => sendFeedback(false)}>Skipped</button>
+            </>
+          )}
+          {feedback === "busy" && <span className="feedback-saving">Saving…</span>}
+          {feedback === "done_adopted" && <span className="feedback-tag feedback-adopted">✓ Done</span>}
+          {feedback === "done_skipped" && <span className="feedback-tag feedback-skipped">Skipped</span>}
+          {feedback === "error" && <span className="feedback-tag feedback-error">Failed — try again</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -131,7 +164,7 @@ export function InsightsPage() {
       ) : (
         <div className="action-list">
           {data.actions.map((a) => (
-            <ActionCard key={a.action_key} action={a} />
+            <ActionCard key={a.action_key} action={a} siteId={user!.site_id} />
           ))}
         </div>
       )}

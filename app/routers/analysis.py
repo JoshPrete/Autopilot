@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from datetime import date
 from typing import Optional
 
-from app.auth import require_role
+from app.auth import get_current_user, require_role
 from app.dependencies import get_validated_site
 from app.schemas import (
     InventoryCountRequest,
@@ -30,6 +30,7 @@ from data.storage import (
     get_data_health,
     get_daily_efficiency_snapshot,
     get_inventory_alerts,
+    get_inventory_usage_patterns,
     list_inventory_items,
     list_inventory_usage_rules,
     get_pipeline_health,
@@ -261,6 +262,25 @@ def inventory_alerts(
     }
 
 
+@router.get("/inventory/patterns")
+def inventory_patterns(
+    site: dict = Depends(get_validated_site),
+    lookback_days: int = Query(default=30, ge=7, le=180),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    patterns = get_inventory_usage_patterns(
+        site_id=site["site_id"],
+        lookback_days=lookback_days,
+        limit=limit,
+    )
+    return {
+        "site_id": site["site_id"],
+        "lookback_days": lookback_days,
+        "patterns_total": len(patterns),
+        "patterns": patterns,
+    }
+
+
 @router.get("/pipeline-runs")
 def pipeline_runs(
     site: dict = Depends(get_validated_site),
@@ -417,21 +437,48 @@ def workflow_roster_plan(
 def next_actions(
     site: dict = Depends(get_validated_site),
     target_date: Optional[date] = Query(default=None),
-    persist: bool = Query(default=False),
+    persist: bool = Query(default=True),
     max_actions: int = Query(default=8, ge=1, le=20),
 ):
+    td = target_date or date.today()
     payload = generate_next_actions(
         site_id=site["site_id"],
-        target_date=target_date or date.today(),
+        target_date=td,
         max_actions=max_actions,
     )
-    if persist and payload.get("actions"):
-        payload["persistence"] = persist_next_actions(
+    # Always persist so each action gets a stable rec_id for feedback buttons
+    if payload.get("actions"):
+        persistence = persist_next_actions(
             site_id=site["site_id"],
             actions=payload["actions"],
-            target_date=target_date or date.today(),
+            target_date=td,
         )
+        action_rec_map = persistence.get("action_rec_map", {})
+        for action in payload["actions"]:
+            action["rec_id"] = action_rec_map.get(action.get("action_key"))
+        payload["persistence"] = persistence
     return payload
+
+
+@router.post("/recommendations/feedback")
+def recommendation_feedback(
+    site: dict = Depends(get_validated_site),
+    user: dict = Depends(get_current_user),
+    rec_id: str = Query(...),
+    adopted: bool = Query(...),
+    notes: str = Query(default=None),
+):
+    """Record whether a recommendation was acted on."""
+    from data.storage import store_adoption_log
+    log_id = store_adoption_log(
+        site_id=site["site_id"],
+        log_date=date.today(),
+        rec_id=rec_id,
+        manager_name=user.get("name") or user.get("sub"),
+        adopted=adopted,
+        notes=notes,
+    )
+    return {"log_id": log_id, "rec_id": rec_id, "adopted": adopted}
 
 
 @router.post("/recommendations/refresh-realized-impact")
