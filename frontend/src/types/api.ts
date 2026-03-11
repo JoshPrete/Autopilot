@@ -228,6 +228,23 @@ export interface NextActionsResponse {
   summary: NextActionsSummary;
 }
 
+// Chat Agenda
+export interface ChatAgendaItem {
+  agenda_type: string;
+  priority: "high" | "medium" | "low";
+  title: string;
+  question: string;
+  why_it_matters: string;
+  decision_unlocked?: string;
+  source_gap_type?: string;
+}
+
+export interface ChatAgendaResponse {
+  site_id: string;
+  agenda: ChatAgendaItem[];
+  opener: string | null;
+}
+
 // Admin / Data Quality
 export interface DataQualityFlag {
   flag_id: string;

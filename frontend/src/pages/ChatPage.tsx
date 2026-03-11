@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
-import { getToken } from "../api/client";
+import { getToken, apiFetch } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import type { ChatAgendaItem, ChatAgendaResponse } from "../types/api";
 
 interface Message {
   role: "user" | "assistant";
@@ -10,11 +11,29 @@ interface Message {
 export function ChatPage() {
   const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [agenda, setAgenda] = useState<ChatAgendaItem[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Load curiosity agenda on mount and pre-seed an opener if available
+  useEffect(() => {
+    if (!user) return;
+    apiFetch<ChatAgendaResponse>(`/api/sites/${user.site_id}/chat/agenda`)
+      .then((data) => {
+        if (data.opener) {
+          setMessages([{ role: "assistant", content: data.opener }]);
+        }
+        if (data.agenda?.length > 1) {
+          setAgenda(data.agenda.slice(1, 4));
+        }
+      })
+      .catch(() => {
+        // silently ignore — chat still works without agenda
+      });
+  }, [user]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -98,6 +117,8 @@ export function ChatPage() {
     abortRef.current?.abort();
   }
 
+  const showChips = agenda.length > 0 && messages.length <= 1 && !streaming;
+
   return (
     <div className="chat-page">
       <h1 className="page-title">Chat</h1>
@@ -118,6 +139,20 @@ export function ChatPage() {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+
+      {showChips && (
+        <div className="agenda-chips">
+          {agenda.map((item, i) => (
+            <button
+              key={i}
+              className="agenda-chip"
+              onClick={() => setInput(item.question)}
+            >
+              {item.question}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="chat-input-row">
         <textarea

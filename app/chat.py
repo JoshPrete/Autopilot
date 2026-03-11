@@ -14,6 +14,7 @@ from typing import AsyncGenerator
 
 import anthropic
 
+from analysis.curiosity import build_curiosity_agenda
 from analysis.knowledge_gaps import detect_knowledge_gaps
 from config.database import engine
 from config.settings import settings
@@ -1125,6 +1126,22 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: learning agenda for chat curiosity ---
+    try:
+        curiosity_agenda = build_curiosity_agenda(
+            site_id,
+            top_items=context.get("top_items"),
+            inventory_alerts=context.get("inventory_alerts"),
+            inventory_usage_patterns=context.get("inventory_usage_patterns"),
+            operator_rules=context.get("operator_rules"),
+            bottom_line_scorecard=context.get("bottom_line_scorecard"),
+            limit=5,
+        )
+        if curiosity_agenda:
+            context["curiosity_agenda"] = curiosity_agenda
+    except Exception:
+        pass
+
     # --- Always: intelligence summary ---
     try:
         intel_summary = get_intelligence_summary(site_id)
@@ -1717,6 +1734,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             "- If a high-priority knowledge gap below materially changes the answer, ask one precise follow-up question before giving a confident recommendation",
             "- Ask at most one clarifying question unless the user explicitly asks for a diagnostic walkthrough",
             "- When you ask a clarifying question, explain exactly what decision it is blocking",
+            "- Use the curiosity agenda below to decide what the system should learn next about recipes, workflow, purchasing, and profitability levers",
+            "- When the user's question is broad or strategic, you may answer first and then ask one high-value curiosity question that will improve future recommendations",
+            "- Prefer curiosity questions that can be turned into structured operating knowledge, recipes, or staffing rules",
             "",
         ]
     )
@@ -1742,6 +1762,24 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             )
             sections.append(f"  why: {gap.get('why_it_matters', 'Missing business logic.')}")
             sections.append(f"  ask: {gap.get('question', 'What is the missing rule?')}")
+        sections.append("")
+
+    if "curiosity_agenda" in context:
+        sections.append("## Curiosity Agenda")
+        sections.append(
+            "These are the best next questions to ask so the system learns how the business works and improves profitability recommendations over time."
+        )
+        for item in context["curiosity_agenda"][:5]:
+            sections.append(
+                f"- [{str(item.get('priority') or 'medium').upper()}] {item.get('title', 'Learning opportunity')}"
+            )
+            sections.append(
+                f"  why: {item.get('why_it_matters', 'This will improve future recommendations.')}"
+            )
+            sections.append(
+                f"  unlocks: {item.get('decision_unlocked', 'Better business guidance.')}"
+            )
+            sections.append(f"  ask: {item.get('question', 'What should I learn next?')}")
         sections.append("")
 
     # --- COGS status (enhanced with source breakdown) ---

@@ -1,6 +1,7 @@
 """
-Clubhouse Autopilot - Chat API Endpoint
+Clubhouse Autopilot - Chat API Endpoints
 POST /api/sites/{site_id}/chat/message → SSE streaming response
+GET  /api/sites/{site_id}/chat/agenda  → curiosity agenda + opener question
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -12,6 +13,31 @@ from app.limiter import limiter
 from app.schemas import ChatRequest
 
 router = APIRouter(prefix="/api/sites/{site_id}/chat", tags=["chat"])
+
+
+@router.get("/agenda")
+def get_chat_agenda(site: dict = Depends(get_validated_site)) -> dict:
+    """
+    Return the current curiosity agenda for this site.
+
+    Used by the chat UI to pre-load a proactive opener question and
+    suggestion chips without requiring the user to send the first message.
+    """
+    from analysis.curiosity import build_curiosity_agenda
+
+    site_id = site["site_id"]
+    agenda = build_curiosity_agenda(site_id, limit=6)
+
+    opener: str | None = None
+    if agenda:
+        top = agenda[0]
+        opener = top.get("question") or top.get("title")
+
+    return {
+        "site_id": site_id,
+        "agenda": agenda,
+        "opener": opener,
+    }
 
 
 @router.post("/message")

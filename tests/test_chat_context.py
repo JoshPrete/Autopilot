@@ -25,6 +25,7 @@ def _patch_common_chat_dependencies(monkeypatch):
     monkeypatch.setattr("app.chat.list_inventory_usage_rules", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_operator_rules", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.detect_knowledge_gaps", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.chat.build_curiosity_agenda", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._has_roster_data", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("app.chat.get_staffing_vs_workload", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._get_predictions_range", lambda *_args, **_kwargs: [])
@@ -255,6 +256,28 @@ def test_gather_chat_context_includes_knowledge_gaps(monkeypatch):
     assert context["knowledge_gaps"][0]["gap_type"] == "missing_recipe"
 
 
+def test_gather_chat_context_includes_curiosity_agenda(monkeypatch):
+    _patch_common_chat_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        "app.chat.build_curiosity_agenda",
+        lambda *_args, **_kwargs: [
+            {
+                "agenda_type": "workflow_learning",
+                "priority": "high",
+                "title": "Missing workflow staffing rules",
+                "question": "Which role can flex off first during quiet periods?",
+                "why_it_matters": "Labor is above target but workflow constraints are missing.",
+                "decision_unlocked": "Sharper roster recommendations",
+            }
+        ],
+    )
+
+    context = gather_chat_context("site-1", "How can we improve profitability?")
+
+    assert "curiosity_agenda" in context
+    assert context["curiosity_agenda"][0]["agenda_type"] == "workflow_learning"
+
+
 def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections():
     context = {
         "data_freshness": "2026-02-19",
@@ -270,6 +293,15 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
                 "title": "Missing delivery schedule for oat milk",
                 "question": "What days do you order or receive oat milk?",
                 "why_it_matters": "Oat milk is actively consumed but has no delivery schedule.",
+            }
+        ],
+        "curiosity_agenda": [
+            {
+                "priority": "high",
+                "title": "Missing workflow staffing rules",
+                "question": "Which role can flex off first during quiet periods?",
+                "why_it_matters": "Labor is above target but workflow constraints are missing.",
+                "decision_unlocked": "Sharper roster recommendations",
             }
         ],
         "has_real_cogs": True,
@@ -428,6 +460,8 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
     assert "Milk: delivery on Monday, Wednesday, Friday" in prompt
     assert "High-Priority Knowledge Gaps" in prompt
     assert "What days do you order or receive oat milk?" in prompt
+    assert "Curiosity Agenda" in prompt
+    assert "Which role can flex off first during quiet periods?" in prompt
     assert "COGS STATUS" in prompt
     assert "Daily Efficiency Snapshot" in prompt
     assert "Bottom-Line Scorecard (30d)" in prompt

@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
+from analysis.sale_understanding import build_sale_profile_payload
+
 WEEKDAY_ORDER = [
     "monday",
     "tuesday",
@@ -358,6 +360,7 @@ def _parse_recipe_definition(message: str) -> dict | None:
         "confidence": 0.9,
         "payload": {
             "trigger_item_name": trigger_item_name,
+            "sale_profile": build_sale_profile_payload(trigger_item_name),
             "components": components,
         },
     }

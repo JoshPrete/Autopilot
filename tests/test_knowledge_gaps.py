@@ -16,6 +16,35 @@ def test_detect_knowledge_gaps_flags_missing_recipe_for_top_seller():
     assert "12oz coffee" in gaps[0]["question"]
 
 
+def test_detect_knowledge_gaps_flags_missing_variant_detail_when_family_exists():
+    gaps = detect_knowledge_gaps(
+        "site-1",
+        lookback_days=30,
+        top_items=[{"item": "12oz latte", "count": 62, "avg_workload": 3.1}],
+        inventory_alerts=[],
+        operator_rules=[
+            {
+                "rule_type": "recipe_definition",
+                "payload": {
+                    "trigger_item_name": "latte",
+                    "sale_profile": {
+                        "family": "latte",
+                        "size_label": None,
+                        "size_oz": None,
+                        "serve_temperature": "hot",
+                        "service_mode": None,
+                    },
+                },
+            }
+        ],
+        usage_rules=[],
+    )
+
+    assert gaps
+    assert gaps[0]["gap_type"] == "missing_recipe_variant"
+    assert "same stock recipe" in gaps[0]["question"]
+
+
 def test_detect_knowledge_gaps_flags_missing_schedule_before_purchase_profile():
     gaps = detect_knowledge_gaps(
         "site-1",

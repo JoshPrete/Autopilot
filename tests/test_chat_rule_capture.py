@@ -14,6 +14,8 @@ def test_parse_recipe_definition_into_structured_payload():
     assert proposal is not None
     assert proposal["rule_type"] == "recipe_definition"
     assert proposal["payload"]["trigger_item_name"] == "12oz latte"
+    assert proposal["payload"]["sale_profile"]["family"] == "latte"
+    assert proposal["payload"]["sale_profile"]["size_label"] == "12oz"
     assert proposal["payload"]["components"][2] == {
         "item_name": "beans",
         "quantity": 20.0,

@@ -8,11 +8,11 @@ facts that materially weakens recommendations.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date, timedelta
 
 from sqlalchemy import text
 
+from analysis.sale_understanding import classify_recipe_coverage, normalize_sale_label
 from config.database import engine
 from data.storage import (
     get_inventory_alerts,
@@ -24,12 +24,6 @@ logger = logging.getLogger("autopilot.knowledge_gaps")
 
 TOP_ITEM_RECIPE_THRESHOLD = 20
 MAX_GAPS = 5
-
-
-def _normalize_label(raw: str | None) -> str:
-    text_value = str(raw or "").strip().lower().replace("_", " ")
-    text_value = re.sub(r"[^a-z0-9]+", " ", text_value)
-    return " ".join(text_value.split())
 
 
 def _get_top_items(site_id: str, days: int = 30, limit: int = 15) -> list[dict]:
@@ -59,25 +53,6 @@ def _get_top_items(site_id: str, days: int = 30, limit: int = 15) -> list[dict]:
         }
         for row in rows
     ]
-
-
-def _collect_modeled_triggers(operator_rules: list[dict], usage_rules: list[dict]) -> set[str]:
-    triggers: set[str] = set()
-
-    for rule in usage_rules:
-        normalized = _normalize_label(rule.get("trigger_item_name"))
-        if normalized:
-            triggers.add(normalized)
-
-    for rule in operator_rules:
-        if rule.get("rule_type") != "recipe_definition":
-            continue
-        payload = rule.get("payload") or {}
-        normalized = _normalize_label(payload.get("trigger_item_name"))
-        if normalized:
-            triggers.add(normalized)
-
-    return triggers
 
 
 def detect_knowledge_gaps(
@@ -132,7 +107,6 @@ def detect_knowledge_gaps(
             logger.info("inventory alerts unavailable for knowledge gaps: %s", exc)
             inventory_alerts = []
 
-    modeled_triggers = _collect_modeled_triggers(operator_rules, usage_rules)
     gaps: list[dict] = []
     seen_keys: set[str] = set()
 
@@ -145,34 +119,68 @@ def detect_knowledge_gaps(
 
     for item in top_items:
         item_name = item.get("item")
-        normalized = _normalize_label(item_name)
+        normalized = normalize_sale_label(item_name)
         sales_count = int(item.get("count") or 0)
         if not normalized or sales_count < TOP_ITEM_RECIPE_THRESHOLD:
             continue
-        if normalized in modeled_triggers:
-            continue
-        add_gap(
-            {
-                "key": f"missing_recipe:{normalized}",
-                "gap_type": "missing_recipe",
-                "priority": "high",
-                "title": f"Missing stock recipe for {item_name}",
-                "question": f"What does {item_name} consume from stock?",
-                "why_it_matters": (
-                    f"{item_name} sold {sales_count} times in the last {lookback_days} days, "
-                    "but there is no confirmed recipe or usage rule linking it to stock."
-                ),
-                "evidence": {
-                    "item_name": item_name,
-                    "sales_count": sales_count,
-                    "avg_workload": float(item.get("avg_workload") or 0),
-                },
-            }
+        coverage = classify_recipe_coverage(
+            item_name,
+            operator_rules=operator_rules,
+            usage_rules=usage_rules,
         )
+        coverage_status = coverage.get("status") or "uncovered"
+        if coverage_status in {"exact_match", "variant_match"}:
+            continue
+        if coverage_status == "family_only":
+            add_gap(
+                {
+                    "key": f"missing_recipe_variant:{normalized}",
+                    "gap_type": "missing_recipe_variant",
+                    "priority": "high",
+                    "title": f"Missing variant detail for {item_name}",
+                    "question": (
+                        f"Does {item_name} use the same stock recipe as your base "
+                        f"{coverage.get('sale_profile', {}).get('family') or item_name}?"
+                    ),
+                    "why_it_matters": (
+                        f"{item_name} sold {sales_count} times in the last {lookback_days} days, "
+                        f"and the system only has family-level coverage via "
+                        f"{coverage.get('matched_trigger') or 'a generic rule'}. "
+                        "It still does not know the exact size or service variant."
+                    ),
+                    "evidence": {
+                        "item_name": item_name,
+                        "sales_count": sales_count,
+                        "avg_workload": float(item.get("avg_workload") or 0),
+                        "matched_trigger": coverage.get("matched_trigger"),
+                        "coverage_status": coverage_status,
+                    },
+                }
+            )
+        else:
+            add_gap(
+                {
+                    "key": f"missing_recipe:{normalized}",
+                    "gap_type": "missing_recipe",
+                    "priority": "high",
+                    "title": f"Missing stock recipe for {item_name}",
+                    "question": f"What does {item_name} consume from stock?",
+                    "why_it_matters": (
+                        f"{item_name} sold {sales_count} times in the last {lookback_days} days, "
+                        "but there is no confirmed recipe or usage rule linking it to stock."
+                    ),
+                    "evidence": {
+                        "item_name": item_name,
+                        "sales_count": sales_count,
+                        "avg_workload": float(item.get("avg_workload") or 0),
+                        "coverage_status": coverage_status,
+                    },
+                }
+            )
 
     for alert in inventory_alerts:
         item_name = alert.get("item_name") or "Inventory item"
-        normalized_item = _normalize_label(item_name)
+        normalized_item = normalize_sale_label(item_name)
         daily_usage = float(alert.get("daily_usage_units") or 0)
         status = str(alert.get("status") or "").strip()
 
