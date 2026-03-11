@@ -4,6 +4,7 @@ from data.storage import (
     _build_virtual_inventory_usage_rules,
     _resolve_inventory_schedule_context,
     get_inventory_alerts,
+    get_inventory_usage_patterns,
 )
 
 
@@ -199,6 +200,8 @@ def test_get_inventory_alerts_applies_recipe_rules_and_schedule_context(monkeypa
     assert alert["stockout_before_next_delivery"] is True
     assert alert["projected_on_hand_at_next_delivery"] < 0
     assert alert["recommended_reorder_units"] > 1000
+    assert alert["top_usage_triggers"][0]["trigger_item_name"] == "12oz latte"
+    assert alert["top_usage_triggers"][0]["inventory_units_consumed"] == 500.0
 
 
 def test_get_inventory_alerts_converts_shortfall_into_order_units(monkeypatch):
@@ -242,3 +245,77 @@ def test_get_inventory_alerts_converts_shortfall_into_order_units(monkeypatch):
     assert alert["order_unit_name"] == "case"
     assert alert["order_profile_source"] == "metadata"
     assert "Bidfood" in alert["recommended_order_note"]
+
+
+def test_get_inventory_usage_patterns_correlates_products_to_stock(monkeypatch):
+    monkeypatch.setattr("data.storage.datetime", _FixedDatetime)
+    monkeypatch.setattr(
+        "data.storage.list_inventory_items",
+        lambda *_args, **_kwargs: [
+            {
+                "inventory_item_id": "inv-cup",
+                "item_name": "12oz cups",
+                "score_key": "cup_12oz",
+                "unit": "each",
+                "metadata": {},
+            },
+            {
+                "inventory_item_id": "inv-lid",
+                "item_name": "90mm lids",
+                "score_key": "lid_90mm",
+                "unit": "each",
+                "metadata": {},
+            },
+        ],
+    )
+    monkeypatch.setattr("data.storage.list_inventory_usage_rules", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "data.storage.list_operator_rules",
+        lambda *_args, **_kwargs: [
+            {
+                "rule_id": "rule-coffee",
+                "rule_type": "recipe_definition",
+                "status": "confirmed",
+                "payload": {
+                    "trigger_item_name": "12oz coffee",
+                    "components": [
+                        {"item_name": "12oz cups", "quantity": 1, "unit": "each"},
+                        {"item_name": "90mm lids", "quantity": 1, "unit": "each"},
+                    ],
+                },
+                "updated_at": "2026-02-17T09:00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "data.storage.engine",
+        _DummyEngine(
+            [
+                [
+                    {
+                        "item_name": "12oz coffee",
+                        "quantity": 36,
+                        "modifiers": "",
+                        "created_at": datetime(2026, 2, 16, 8, 0, 0),
+                    },
+                    {
+                        "item_name": "12oz coffee",
+                        "quantity": 18,
+                        "modifiers": "",
+                        "created_at": datetime(2026, 2, 17, 8, 0, 0),
+                    },
+                ]
+            ]
+        ),
+    )
+
+    patterns = get_inventory_usage_patterns("site-1", lookback_days=30, limit=10)
+
+    assert len(patterns) == 2
+    cups = next(pattern for pattern in patterns if pattern["item_name"] == "12oz cups")
+    lids = next(pattern for pattern in patterns if pattern["item_name"] == "90mm lids")
+    assert cups["total_consumed_units"] == 54.0
+    assert lids["total_consumed_units"] == 54.0
+    assert cups["top_usage_triggers"][0]["trigger_item_name"] == "12oz coffee"
+    assert cups["top_usage_triggers"][0]["sales_qty"] == 54
+    assert cups["top_usage_triggers"][0]["share_pct"] == 100.0

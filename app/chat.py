@@ -14,6 +14,7 @@ from typing import AsyncGenerator
 
 import anthropic
 
+from analysis.knowledge_gaps import detect_knowledge_gaps
 from config.database import engine
 from config.settings import settings
 from data.storage import (
@@ -31,6 +32,7 @@ from data.storage import (
     get_events_range,
     get_intelligence_summary,
     get_inventory_alerts,
+    get_inventory_usage_patterns,
     list_inventory_items,
     list_inventory_usage_rules,
     get_item_costs,
@@ -1110,6 +1112,19 @@ def gather_chat_context(site_id: str, question: str) -> dict:
     except Exception:
         pass
 
+    # --- Always: high-priority knowledge gaps for chat curiosity ---
+    try:
+        knowledge_gaps = detect_knowledge_gaps(
+            site_id,
+            top_items=context.get("top_items"),
+            inventory_alerts=None,
+            operator_rules=context.get("operator_rules"),
+        )
+        if knowledge_gaps:
+            context["knowledge_gaps"] = knowledge_gaps
+    except Exception:
+        pass
+
     # --- Always: intelligence summary ---
     try:
         intel_summary = get_intelligence_summary(site_id)
@@ -1544,6 +1559,12 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         except Exception:
             context["inventory_alerts"] = []
         try:
+            patterns = get_inventory_usage_patterns(site_id, lookback_days=30, limit=10)
+            if patterns:
+                context["inventory_usage_patterns"] = patterns
+        except Exception:
+            pass
+        try:
             context["inventory_items"] = list_inventory_items(site_id, active_only=True)
         except Exception:
             pass
@@ -1693,6 +1714,9 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             "- For recommendations, cite the specific metric(s) used (for example labor %, rev/labor-hour, understaffed intervals, margin %)",
             "- If data is missing/empty, say that explicitly and provide the next check to run",
             "- Keep responses focused. Don't pad with generic advice unless asked",
+            "- If a high-priority knowledge gap below materially changes the answer, ask one precise follow-up question before giving a confident recommendation",
+            "- Ask at most one clarifying question unless the user explicitly asks for a diagnostic walkthrough",
+            "- When you ask a clarifying question, explain exactly what decision it is blocking",
             "",
         ]
     )
@@ -1704,6 +1728,20 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         )
         for rule in context["operator_rules"][:10]:
             sections.append(f"- {summarize_operator_rule(rule)}")
+        sections.append("")
+
+    if "knowledge_gaps" in context:
+        sections.append("## High-Priority Knowledge Gaps")
+        sections.append(
+            "These are the most important missing pieces of business logic. "
+            "If one of these gaps materially affects the user's question, ask the suggested question before making a confident recommendation."
+        )
+        for gap in context["knowledge_gaps"][:5]:
+            sections.append(
+                f"- [{str(gap.get('priority') or 'medium').upper()}] {gap.get('title', 'Knowledge gap')}"
+            )
+            sections.append(f"  why: {gap.get('why_it_matters', 'Missing business logic.')}")
+            sections.append(f"  ask: {gap.get('question', 'What is the missing rule?')}")
         sections.append("")
 
     # --- COGS status (enhanced with source breakdown) ---
@@ -2108,6 +2146,44 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             sections.append(
                 "- Usage is computed from order_items using inventory usage rules and confirmed recipe definitions."
             )
+        sections.append("")
+
+    if "inventory_usage_patterns" in context:
+        patterns = context.get("inventory_usage_patterns") or []
+        sections.append("## Inventory Usage Patterns")
+        if not patterns:
+            sections.append("- No inventory usage patterns available yet.")
+        else:
+            for pattern in patterns[:8]:
+                unit = pattern.get("unit") or "units"
+                total = pattern.get("total_consumed_units")
+                daily = pattern.get("avg_daily_consumed_units")
+                total_text = f"{total:.1f} {unit}" if isinstance(total, (int, float)) else "n/a"
+                daily_text = f"{daily:.1f} {unit}/day" if isinstance(daily, (int, float)) else "n/a"
+                sections.append(
+                    f"- {pattern.get('item_name', '?')}: {total_text} consumed over "
+                    f"{pattern.get('lookback_days', '?')}d ({daily_text})"
+                )
+                top_triggers = pattern.get("top_usage_triggers") or []
+                if top_triggers:
+                    driver_text = ", ".join(
+                        (
+                            f"{driver.get('trigger_item_name', '?')} "
+                            f"({float(driver.get('share_pct') or 0):.1f}%)"
+                        )
+                        for driver in top_triggers[:3]
+                    )
+                    sections.append(f"  drivers: {driver_text}")
+                weekday_pattern = pattern.get("weekday_pattern") or []
+                if weekday_pattern:
+                    weekday_text = ", ".join(
+                        (
+                            f"{entry.get('day_of_week', '?')} "
+                            f"({float(entry.get('share_pct') or 0):.1f}%)"
+                        )
+                        for entry in weekday_pattern[:2]
+                    )
+                    sections.append(f"  peak days: {weekday_text}")
         sections.append("")
 
     sections.append("=== LIVE DATA ===")

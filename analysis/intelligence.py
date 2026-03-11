@@ -1199,6 +1199,8 @@ def detect_inventory_signals(site_id: str, cycle_date: date, lookback_days: int 
                     "order_unit_name": alert.get("order_unit_name"),
                     "recommended_order_note": alert.get("recommended_order_note"),
                     "days_remaining": days_remaining,
+                    "top_usage_triggers": alert.get("top_usage_triggers"),
+                    "weekday_usage_pattern": alert.get("weekday_usage_pattern"),
                     "next_delivery_date": alert.get("next_delivery_date"),
                     "next_order_cutoff_at": alert.get("next_order_cutoff_at"),
                     "stockout_before_next_delivery": alert.get("stockout_before_next_delivery"),

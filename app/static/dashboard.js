@@ -942,6 +942,17 @@ function renderInventoryAlerts(data) {
     const cutoff = a.next_order_cutoff_at ? `Cutoff ${a.next_order_cutoff_at}` : null;
     return cutoff ? `${delivery}<div class="mini-meta">${cutoff}</div>` : delivery;
   };
+  const itemFmt = (a) => {
+    const topDrivers = Array.isArray(a.top_usage_triggers) ? a.top_usage_triggers : [];
+    if (topDrivers.length === 0) {
+      return a.item_name || "--";
+    }
+    const driverText = topDrivers
+      .slice(0, 2)
+      .map((driver) => `${driver.trigger_item_name || "--"} (${Number(driver.share_pct || 0).toFixed(0)}%)`)
+      .join(", ");
+    return `${a.item_name || "--"}<div class="mini-meta">${driverText}</div>`;
+  };
   const timingFmt = (a) => {
     const projected = a.projected_on_hand_at_next_delivery == null
       ? null
@@ -986,7 +997,7 @@ function renderInventoryAlerts(data) {
       <tbody>
         ${alerts.map((a) => `
           <tr>
-            <td>${a.item_name || "--"}</td>
+            <td>${itemFmt(a)}</td>
             <td><span class="status-pill status-${a.severity === "warning" ? "red" : "yellow"}">${a.status || "--"}</span></td>
             <td>${unitFmt(a.effective_on_hand, a.unit)}</td>
             <td>${unitFmt(a.reorder_point, a.unit)}</td>

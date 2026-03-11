@@ -20,9 +20,11 @@ def _patch_common_chat_dependencies(monkeypatch):
     monkeypatch.setattr("app.chat.get_intelligence_summary", lambda *_args, **_kwargs: {})
     monkeypatch.setattr("app.chat.get_recent_insights", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.get_inventory_alerts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.chat.get_inventory_usage_patterns", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_inventory_items", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_inventory_usage_rules", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat.list_operator_rules", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.chat.detect_knowledge_gaps", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._has_roster_data", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("app.chat.get_staffing_vs_workload", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.chat._get_predictions_range", lambda *_args, **_kwargs: [])
@@ -173,6 +175,24 @@ def test_gather_chat_context_includes_inventory_alerts_for_stock_question(monkey
         ],
     )
     monkeypatch.setattr(
+        "app.chat.get_inventory_usage_patterns",
+        lambda *_args, **_kwargs: [
+            {
+                "item_name": "12oz cups",
+                "total_consumed_units": 180,
+                "avg_daily_consumed_units": 8.6,
+                "unit": "cups",
+                "lookback_days": 21,
+                "top_usage_triggers": [
+                    {
+                        "trigger_item_name": "12oz latte",
+                        "share_pct": 62.0,
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
         "app.chat.list_inventory_items",
         lambda *_args, **_kwargs: [{"item_name": "12oz cups"}],
     )
@@ -185,6 +205,11 @@ def test_gather_chat_context_includes_inventory_alerts_for_stock_question(monkey
 
     assert "inventory_alerts" in context
     assert context["inventory_alerts"][0]["item_name"] == "12oz cups"
+    assert "inventory_usage_patterns" in context
+    assert (
+        context["inventory_usage_patterns"][0]["top_usage_triggers"][0]["trigger_item_name"]
+        == "12oz latte"
+    )
     assert "inventory_items" in context
     assert "inventory_usage_rules" in context
 
@@ -209,6 +234,27 @@ def test_gather_chat_context_includes_confirmed_operator_rules(monkeypatch):
     assert context["operator_rules"][0]["rule_type"] == "delivery_schedule"
 
 
+def test_gather_chat_context_includes_knowledge_gaps(monkeypatch):
+    _patch_common_chat_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        "app.chat.detect_knowledge_gaps",
+        lambda *_args, **_kwargs: [
+            {
+                "gap_type": "missing_recipe",
+                "priority": "high",
+                "title": "Missing stock recipe for 12oz coffee",
+                "question": "What does 12oz coffee consume from stock?",
+                "why_it_matters": "12oz coffee is selling but has no stock rule.",
+            }
+        ],
+    )
+
+    context = gather_chat_context("site-1", "What logic am I missing?")
+
+    assert "knowledge_gaps" in context
+    assert context["knowledge_gaps"][0]["gap_type"] == "missing_recipe"
+
+
 def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections():
     context = {
         "data_freshness": "2026-02-19",
@@ -216,6 +262,14 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
             {
                 "rule_type": "delivery_schedule",
                 "payload": {"subject": "Milk", "days": ["monday", "wednesday", "friday"]},
+            }
+        ],
+        "knowledge_gaps": [
+            {
+                "priority": "high",
+                "title": "Missing delivery schedule for oat milk",
+                "question": "What days do you order or receive oat milk?",
+                "why_it_matters": "Oat milk is actively consumed but has no delivery schedule.",
             }
         ],
         "has_real_cogs": True,
@@ -372,6 +426,8 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
 
     assert "Confirmed Operating Rules" in prompt
     assert "Milk: delivery on Monday, Wednesday, Friday" in prompt
+    assert "High-Priority Knowledge Gaps" in prompt
+    assert "What days do you order or receive oat milk?" in prompt
     assert "COGS STATUS" in prompt
     assert "Daily Efficiency Snapshot" in prompt
     assert "Bottom-Line Scorecard (30d)" in prompt
