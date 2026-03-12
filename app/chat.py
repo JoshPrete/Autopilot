@@ -11,6 +11,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta
 from typing import AsyncGenerator
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -69,6 +70,12 @@ CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
 MAX_TOKENS = 1500
 
 
+def _today_local() -> date:
+    """Return today's date in the site's local timezone (Brisbane = UTC+10, no DST)."""
+    tz = ZoneInfo(settings.SITE_TIMEZONE)
+    return datetime.now(tz).date()
+
+
 # ============================================================
 # Context Gathering Helpers
 # ============================================================
@@ -86,6 +93,148 @@ def _safe_json(val):
         except (json.JSONDecodeError, TypeError):
             return val
     return val
+
+
+def _is_broad_learning_question(question: str) -> bool:
+    return _keyword_match(
+        question,
+        [
+            "what next",
+            "what should",
+            "how can",
+            "improve",
+            "profit",
+            "profitability",
+            "efficiency",
+            "workflow",
+            "optimi",
+            "missing",
+            "learn",
+            "understand",
+            "why",
+            "opportunit",
+        ],
+    )
+
+
+def _curiosity_item_is_capture_ready(item: dict) -> bool:
+    gap_type = str(item.get("source_gap_type") or "").strip()
+    agenda_type = str(item.get("agenda_type") or "").strip()
+    return (
+        gap_type
+        in {
+            "missing_recipe",
+            "missing_recipe_variant",
+            "missing_delivery_schedule",
+        }
+        or agenda_type == "consumption_mapping"
+    )
+
+
+def _curiosity_item_score(question: str, item: dict) -> int:
+    score = {"high": 300, "medium": 200, "low": 100}.get(str(item.get("priority") or "medium"), 100)
+    agenda_type = str(item.get("agenda_type") or "").strip()
+    gap_type = str(item.get("source_gap_type") or "").strip()
+
+    if _is_broad_learning_question(question):
+        score += 120
+
+    if _keyword_match(question, ["inventory", "stock", "recipe", "ingredient", "cogs", "sale"]):
+        if gap_type in {"missing_recipe", "missing_recipe_variant", "missing_delivery_schedule"}:
+            score += 140
+        if agenda_type == "consumption_mapping":
+            score += 160
+
+    if _keyword_match(question, ["profit", "profitability", "margin", "labor", "efficiency"]):
+        if agenda_type in {
+            "knowledge_gap",
+            "workflow_learning",
+            "consumption_mapping",
+            "labor_explanation",
+        }:
+            score += 90
+
+    if _keyword_match(question, ["xero", "expense", "supplier", "purchase", "invoice", "bill"]):
+        if agenda_type == "purchase_explanation":
+            score += 180
+
+    if _keyword_match(question, ["wage", "labor", "payroll", "why"]):
+        if agenda_type == "labor_explanation":
+            score += 160
+
+    if _keyword_match(question, ["why", "missing", "learn", "understand"]):
+        score += 70
+
+    if _curiosity_item_is_capture_ready(item):
+        score += 60
+
+    return score
+
+
+def _select_curiosity_item(question: str, context: dict) -> dict | None:
+    agenda = context.get("curiosity_agenda") or []
+    if not agenda:
+        return None
+
+    scored = sorted(
+        ((item, _curiosity_item_score(question, item)) for item in agenda),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    if not scored:
+        return None
+
+    item, score = scored[0]
+    if score < 320:
+        return None
+
+    if _curiosity_item_is_capture_ready(item):
+        return item
+
+    if _is_broad_learning_question(question) and str(item.get("priority") or "") == "high":
+        return item
+
+    return None
+
+
+def _curiosity_reply_hint(item: dict) -> str | None:
+    gap_type = str(item.get("source_gap_type") or "").strip()
+    title = str(item.get("title") or "")
+
+    if gap_type in {"missing_recipe", "missing_recipe_variant"}:
+        return "Reply in a recipe form like `12oz latte uses 1 cup, 1 lid, 20g beans, 280ml full cream milk`."
+    if gap_type == "missing_delivery_schedule":
+        return (
+            "Reply in a schedule form like `Oat milk delivery is Monday, Wednesday, Friday` "
+            "or `We place oat milk orders by 2pm Tuesday for Wednesday delivery`."
+        )
+    if str(item.get("agenda_type") or "") == "consumption_mapping" or "consume" in title.lower():
+        return "Reply in a rule form like `12oz coffee uses 1 12oz cup and 1 90mm lid`."
+    if str(item.get("agenda_type") or "") == "purchase_explanation":
+        return (
+            "Reply in plain language with what the expense is for and whether it is stock, packaging, "
+            "maintenance, marketing, or overhead."
+        )
+    if str(item.get("agenda_type") or "") == "labor_explanation":
+        return (
+            "Reply in plain language with the cause, such as training, sick cover, public-holiday rates, "
+            "soft trade, or an intentional roster choice."
+        )
+    return None
+
+
+def _build_curiosity_question_response(item: dict) -> str:
+    lines = [
+        "One thing I should learn before I give you a confident recommendation:",
+        "",
+        f"- Why this matters: {item.get('why_it_matters', 'Missing business logic reduces confidence.')}",
+        f"- This unlocks: {item.get('decision_unlocked', 'Better future recommendations.')}",
+        f"- Question: {item.get('question', 'What should I learn next?')}",
+    ]
+    hint = _curiosity_reply_hint(item)
+    if hint:
+        lines.extend(["", hint])
+    return "\n".join(lines)
 
 
 def _fmt_prediction(pred: dict) -> dict:
@@ -976,8 +1125,8 @@ def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) ->
 
 
 def gather_chat_context(site_id: str, question: str) -> dict:
-    today = date.today()
-    context = {}
+    today = _today_local()
+    context = {"today_date": today.isoformat()}
 
     # --- Always: data freshness ---
     try:
@@ -1676,7 +1825,8 @@ def gather_chat_context(site_id: str, question: str) -> dict:
 def build_system_prompt(site_name: str, context: dict) -> str:
     # --- Data freshness header ---
     freshness = context.get("data_freshness")
-    today = date.today()
+    today = _today_local()
+    today_str = today.strftime("%A %d/%m/%Y")  # e.g. "Wednesday 11/03/2026"
     freshness_line = ""
     stale_warning = ""
     if freshness:
@@ -1702,6 +1852,7 @@ def build_system_prompt(site_name: str, context: dict) -> str:
     sections = [
         f"You are the Clubhouse Autopilot assistant for **{site_name}** — a specialty coffee cafe in Nundah, Brisbane.",
         "",
+        f"**Today is: {today_str}**",
         f"**{freshness_line}**",
     ]
     if stale_warning:
@@ -3042,6 +3193,14 @@ async def stream_chat_response(
         yield 'data: {"done": true}\n\n'
         return
 
+    context = gather_chat_context(site_id, last_user_msg)
+    curiosity_item = _select_curiosity_item(last_user_msg, context)
+    if curiosity_item is not None:
+        curiosity_response = _build_curiosity_question_response(curiosity_item)
+        yield f'data: {json.dumps({"content": curiosity_response, "curiosity": curiosity_item})}\n\n'
+        yield 'data: {"done": true}\n\n'
+        return
+
     if not settings.ANTHROPIC_API_KEY:
         yield 'data: {"error": "ANTHROPIC_API_KEY not configured"}\n\n'
         yield 'data: {"done": true}\n\n'
@@ -3073,8 +3232,6 @@ async def stream_chat_response(
             except Exception as e:
                 logger.error("Document extraction failed for %s: %s", doc_id, e)
                 yield f'data: {json.dumps({"extraction_error": str(e), "document_id": doc_id})}\n\n'
-
-    context = gather_chat_context(site_id, last_user_msg)
 
     # Add extraction results to context
     if extraction_results:

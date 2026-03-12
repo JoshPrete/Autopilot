@@ -6057,10 +6057,13 @@ def get_xero_financial_facts_summary(site_id: str, start_date: date, end_date: d
 
 
 def get_data_freshness(site_id: str) -> Optional[str]:
-    """Get the most recent closed_at date from orders_raw."""
+    """Get the most recent closed_at date from orders_raw, converted to Brisbane local date."""
     with engine.connect() as conn:
         result = conn.execute(
-            _text("SELECT MAX(closed_at)::date AS latest " "FROM orders_raw WHERE site_id = :sid"),
+            _text(
+                "SELECT MAX(closed_at AT TIME ZONE 'Australia/Brisbane')::date AS latest "
+                "FROM orders_raw WHERE site_id = :sid"
+            ),
             {"sid": site_id},
         ).scalar()
         return str(result) if result else None
