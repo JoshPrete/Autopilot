@@ -115,3 +115,96 @@ async def test_stream_chat_response_confirms_pending_operator_rule(monkeypatch):
     assert payloads
     assert "Operating rule saved." in payloads[0]["content"]
     assert "future chat reasoning" in payloads[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_response_asks_curiosity_question_before_anthropic(monkeypatch):
+    monkeypatch.setattr("app.chat.settings.ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(
+        "app.chat.gather_chat_context",
+        lambda *_args, **_kwargs: {
+            "curiosity_agenda": [
+                {
+                    "agenda_type": "knowledge_gap",
+                    "priority": "high",
+                    "title": "Missing stock recipe for 12oz latte",
+                    "question": "What does 12oz latte consume from stock?",
+                    "why_it_matters": "12oz latte is selling heavily but has no stock recipe.",
+                    "decision_unlocked": "More accurate stock depletion and COGS attribution by product",
+                    "source_gap_type": "missing_recipe",
+                }
+            ]
+        },
+    )
+
+    payloads = await _collect_stream_payloads(
+        stream_chat_response(
+            site_id="site-1",
+            site_name="Clubhouse",
+            messages=[{"role": "user", "content": "How can we improve profitability?"}],
+            document_ids=[],
+        )
+    )
+
+    assert payloads
+    assert (
+        "One thing I should learn before I give you a confident recommendation:"
+        in payloads[0]["content"]
+    )
+    assert "What does 12oz latte consume from stock?" in payloads[0]["content"]
+    assert payloads[0]["curiosity"]["source_gap_type"] == "missing_recipe"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_response_returns_no_key_error_when_no_curiosity(monkeypatch):
+    monkeypatch.setattr("app.chat.settings.ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr("app.chat.gather_chat_context", lambda *_args, **_kwargs: {})
+
+    payloads = await _collect_stream_payloads(
+        stream_chat_response(
+            site_id="site-1",
+            site_name="Clubhouse",
+            messages=[{"role": "user", "content": "How is trade today?"}],
+            document_ids=[],
+        )
+    )
+
+    assert payloads
+    assert payloads[0]["error"] == "ANTHROPIC_API_KEY not configured"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_response_can_ask_labor_explanation_question(monkeypatch):
+    monkeypatch.setattr("app.chat.settings.ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(
+        "app.chat.gather_chat_context",
+        lambda *_args, **_kwargs: {
+            "curiosity_agenda": [
+                {
+                    "agenda_type": "labor_explanation",
+                    "priority": "high",
+                    "title": "Explain recent wage spike",
+                    "question": (
+                        "Wage % hit 38.5% on 2026-02-17. Was that training, sick cover, "
+                        "public-holiday rates, soft trade, or an intentional roster choice?"
+                    ),
+                    "why_it_matters": "Wage % is still above target by $182/wk.",
+                    "decision_unlocked": "Sharper labor diagnosis",
+                }
+            ]
+        },
+    )
+
+    payloads = await _collect_stream_payloads(
+        stream_chat_response(
+            site_id="site-1",
+            site_name="Clubhouse",
+            messages=[{"role": "user", "content": "How can we improve profitability?"}],
+            document_ids=[],
+        )
+    )
+
+    assert payloads
+    assert "Wage % hit 38.5% on 2026-02-17" in payloads[0]["content"]
+    assert "Reply in plain language with the cause" in payloads[0]["content"]
+    assert payloads[0]["curiosity"]["agenda_type"] == "labor_explanation"

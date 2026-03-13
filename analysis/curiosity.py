@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import re
 
+from analysis.explanation_gaps import (
+    detect_purchase_explanation_gaps,
+    detect_wage_explanation_gaps,
+)
 from data.storage import list_operator_rules
 
 from analysis.knowledge_gaps import detect_knowledge_gaps
@@ -36,6 +40,8 @@ def build_curiosity_agenda(
     operator_rules: list[dict] | None = None,
     usage_rules: list[dict] | None = None,
     bottom_line_scorecard: dict | None = None,
+    purchase_explanation_gaps: list[dict] | None = None,
+    wage_explanation_gaps: list[dict] | None = None,
     limit: int = 5,
 ) -> list[dict]:
     if operator_rules is None:
@@ -84,6 +90,49 @@ def build_curiosity_agenda(
                 or "This blocks recommendation quality.",
                 "decision_unlocked": decision_unlocked,
                 "source_gap_type": gap.get("gap_type"),
+            }
+        )
+
+    if purchase_explanation_gaps is None:
+        purchase_explanation_gaps = detect_purchase_explanation_gaps(
+            site_id,
+            operator_rules=operator_rules,
+            limit=2,
+        )
+    for gap in purchase_explanation_gaps or []:
+        add_item(
+            {
+                "agenda_type": "purchase_explanation",
+                "priority": gap.get("priority") or "medium",
+                "title": gap.get("title") or "Explain Xero purchase",
+                "question": gap.get("question") or "What is this Xero expense for?",
+                "why_it_matters": gap.get("why_it_matters")
+                or "Unexplained purchases weaken cost attribution.",
+                "decision_unlocked": gap.get("decision_unlocked")
+                or "Better purchase classification and COGS memory",
+                "reason_codes": gap.get("reason_codes") or [],
+                "evidence": gap.get("evidence") or {},
+            }
+        )
+
+    if wage_explanation_gaps is None:
+        wage_explanation_gaps = detect_wage_explanation_gaps(
+            site_id,
+            bottom_line_scorecard=bottom_line_scorecard,
+            limit=1,
+        )
+    for gap in wage_explanation_gaps or []:
+        add_item(
+            {
+                "agenda_type": "labor_explanation",
+                "priority": gap.get("priority") or "medium",
+                "title": gap.get("title") or "Explain recent wage spike",
+                "question": gap.get("question") or "Why did wages move above target?",
+                "why_it_matters": gap.get("why_it_matters")
+                or "Unexplained labor spikes weaken staffing recommendations.",
+                "decision_unlocked": gap.get("decision_unlocked")
+                or "Sharper diagnosis of labor inefficiency vs intentional spend",
+                "evidence": gap.get("evidence") or {},
             }
         )
 
