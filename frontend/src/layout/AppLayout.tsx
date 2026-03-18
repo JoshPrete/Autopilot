@@ -56,6 +56,11 @@ export function AppLayout() {
         <NavLink to="/rules" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Rules
         </NavLink>
+        {isManager && (
+          <NavLink to="/menu" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
+            Menu
+          </NavLink>
+        )}
         <NavLink to="/chat" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Chat
         </NavLink>

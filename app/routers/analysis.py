@@ -9,6 +9,7 @@ from app.schemas import (
     InventoryItemUpsertRequest,
     InventoryUsageRuleUpsertRequest,
 )
+from analysis.menu_engineering import compute_menu_matrix
 from analysis.accuracy import (
     get_rolling_accuracy,
     get_accuracy_dashboard,
@@ -42,6 +43,14 @@ from data.storage import (
 )
 
 router = APIRouter(prefix="/api/sites/{site_id}/analysis", tags=["analysis"])
+
+
+@router.get("/menu-engineering")
+def menu_engineering(
+    site: dict = Depends(get_validated_site),
+    days: int = Query(default=28, ge=7, le=90),
+):
+    return compute_menu_matrix(site_id=site["site_id"], days=days)
 
 
 @router.get("/accuracy")

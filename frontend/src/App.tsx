@@ -12,6 +12,7 @@ import { PipelinePage } from "./pages/PipelinePage";
 import { AccuracyPage } from "./pages/AccuracyPage";
 import { AdminPage } from "./pages/AdminPage";
 import { RulesPage } from "./pages/RulesPage";
+import { MenuEngineeringPage } from "./pages/MenuEngineeringPage";
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ export default function App() {
             <Route path="/accuracy" element={<AccuracyPage />} />
             <Route path="/admin" element={<AdminPage />} />
             <Route path="/rules" element={<RulesPage />} />
+            <Route path="/menu" element={<MenuEngineeringPage />} />
             <Route path="/" element={<Navigate to="/plan" replace />} />
           </Route>
         </Route>
