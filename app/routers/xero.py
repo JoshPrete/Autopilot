@@ -41,9 +41,8 @@ XERO_SCOPES = (
 )
 
 
-@router.get("/connect")
-def xero_connect(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
-    """Redirect to Xero authorization page to begin OAuth2 flow."""
+def _build_xero_authorize_url(site_id: str) -> str:
+    """Create a one-time Xero OAuth URL and persist state for callback validation."""
     if not settings.XERO_CLIENT_ID:
         raise HTTPException(status_code=500, detail="XERO_CLIENT_ID not configured")
     if not token_encryption_ready():
@@ -73,7 +72,22 @@ def xero_connect(site_id: str = Query(..., description="Site UUID"), _user: dict
 
     auth_url = f"{XERO_AUTHORIZE_URL}?{urlencode(params)}"
     logger.info("Redirecting site %s to Xero OAuth: %s", site_id, auth_url)
-    return RedirectResponse(url=auth_url)
+    return auth_url
+
+
+@router.get("/connect")
+def xero_connect(site_id: str = Query(..., description="Site UUID"), _user: dict = Depends(require_role("MANAGER"))):
+    """Redirect to Xero authorization page to begin OAuth2 flow."""
+    return RedirectResponse(url=_build_xero_authorize_url(site_id))
+
+
+@router.get("/connect-url")
+def xero_connect_url(
+    site_id: str = Query(..., description="Site UUID"),
+    _user: dict = Depends(require_role("MANAGER")),
+):
+    """Return the Xero OAuth URL so static pages can redirect after auth-bearing fetch."""
+    return {"auth_url": _build_xero_authorize_url(site_id)}
 
 
 @router.get("/callback")

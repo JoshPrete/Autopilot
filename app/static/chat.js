@@ -11,6 +11,7 @@ class ChatUI {
     this.siteId = siteId;
     this.api = `/api/sites/${siteId}/chat/message`;
     this.uploadApi = `/api/sites/${siteId}/documents/upload`;
+    this.healthApi = `/api/sites/${siteId}/analysis/data-health`;
     this.messages = []; // {role, content}
     this.streaming = false;
     this.pendingFiles = [];
@@ -22,8 +23,10 @@ class ChatUI {
     this.attachBtn = container.querySelector(".chat-attach-btn");
     this.fileInput = container.querySelector(".chat-file-input");
     this.filePreviewBar = container.querySelector(".file-preview-bar");
+    this.trustStripEl = this._ensureTrustStrip();
 
     this._bind();
+    this._loadDataTrust();
   }
 
   _bind() {
@@ -135,6 +138,96 @@ class ChatUI {
     return res.json();
   }
 
+  _ensureTrustStrip() {
+    let el = this.container.querySelector(".chat-trust-strip");
+    if (el) return el;
+
+    el = document.createElement("div");
+    el.className = "chat-trust-strip loading";
+    el.textContent = "Loading data trust...";
+
+    const header = this.container.querySelector(".chat-widget-header");
+    if (header && header.nextSibling) {
+      this.container.insertBefore(el, header.nextSibling);
+      return el;
+    }
+
+    if (this.messagesEl && this.messagesEl.parentNode) {
+      this.messagesEl.parentNode.insertBefore(el, this.messagesEl);
+      return el;
+    }
+
+    this.container.prepend(el);
+    return el;
+  }
+
+  async _loadDataTrust() {
+    if (!this.trustStripEl) return;
+    this.trustStripEl.classList.add("loading");
+    this.trustStripEl.textContent = "Loading data trust...";
+    try {
+      const res = await fetch(this.healthApi);
+      if (!res.ok) throw new Error("health fetch failed");
+      const data = await res.json();
+      this._renderDataTrust(data);
+    } catch (_err) {
+      this.trustStripEl.classList.remove("loading");
+      this.trustStripEl.innerHTML = "<span>Data trust unavailable.</span>";
+    }
+  }
+
+  _renderDataTrust(data) {
+    if (!this.trustStripEl || !data || !Array.isArray(data.components)) return;
+    const important = ["square_orders", "daily_profitability", "deputy_rosters", "xero_cogs", "xero_financial_facts"];
+    const pills = data.components
+      .filter((c) => important.includes(c.source))
+      .map((c) => {
+        const latest = c.latest_date || "--";
+        const age = c.age_days != null ? `${c.age_days}d` : "--";
+        const messages = this._healthMessages(c);
+        const note = messages.length ? `<span class="note">${this._escapeHtml(messages[0])}</span>` : "";
+        return `
+          <span class="chat-trust-pill">
+            <span class="status-pill status-${c.status || "unknown"}">${c.status || "unknown"}</span>
+            <span class="copy">
+              <span>${this._sourceLabel(c.source)}</span>
+              <span class="meta">${latest} · ${age}</span>
+              ${note}
+            </span>
+          </span>
+        `;
+      })
+      .join("");
+    const score = data.score != null ? `${Math.round(data.score * 100)}%` : "--";
+    this.trustStripEl.classList.remove("loading");
+    this.trustStripEl.innerHTML = `
+      <div class="chat-trust-overall">
+        <span>Data Trust</span>
+        <span class="status-pill status-${data.status || "unknown"}">${data.status || "unknown"}</span>
+        <span>${score}</span>
+      </div>
+      <div class="chat-trust-pills">${pills}</div>
+    `;
+  }
+
+  _sourceLabel(source) {
+    const labels = {
+      square_orders: "Square",
+      daily_profitability: "Profit",
+      deputy_rosters: "Deputy",
+      xero_cogs: "Xero COGS",
+      xero_financial_facts: "Xero Facts",
+    };
+    return labels[source] || source || "Unknown";
+  }
+
+  _healthMessages(component) {
+    const messages = [];
+    if (Array.isArray(component?.blockers)) messages.push(...component.blockers);
+    if (Array.isArray(component?.limitations)) messages.push(...component.limitations);
+    return messages.filter(Boolean);
+  }
+
   async send() {
     const text = this.inputEl.value.trim();
     const hasFiles = this.pendingFiles.length > 0;
@@ -203,6 +296,7 @@ class ChatUI {
 
     // Stream response
     let fullContent = "";
+    let latestPayload = null;
     try {
       const res = await fetch(this.api, {
         method: "POST",
@@ -274,6 +368,18 @@ class ChatUI {
               fullContent += `\n\n*Document extraction error: ${data.extraction_error}*`;
               continue;
             }
+            if (
+              "final_answer" in data ||
+              "warnings" in data ||
+              "follow_up_questions" in data ||
+              "blocked" in data
+            ) {
+              latestPayload = data;
+              fullContent = data.final_answer || data.content || "";
+              bubbleEl.innerHTML = this._renderAssistantPayload(data);
+              this._scrollToBottom();
+              continue;
+            }
             if (data.content) {
               fullContent += data.content;
               bubbleEl.innerHTML = this._renderMarkdown(fullContent);
@@ -291,7 +397,29 @@ class ChatUI {
 
     // Store assistant response
     if (fullContent) {
-      this.messages.push({ role: "assistant", content: fullContent });
+      if (latestPayload) {
+        const warningList = latestPayload.warnings || [];
+        const followUpList = latestPayload.follow_up_questions || [];
+        const hasMeta = warningList.length > 0 || followUpList.length > 0;
+        const assistantContent = latestPayload.blocked
+          ? (latestPayload.final_answer || latestPayload.content || fullContent)
+          : (
+              hasMeta
+                ? (latestPayload.draft_answer || latestPayload.final_answer || latestPayload.content || fullContent)
+                : (latestPayload.final_answer || latestPayload.content || latestPayload.draft_answer || fullContent)
+            );
+        this.messages.push({
+          role: "assistant",
+          content: assistantContent,
+          warnings: warningList,
+          follow_up_questions: followUpList,
+          follow_up_hint: latestPayload.follow_up_hint || null,
+          blocked: Boolean(latestPayload.blocked),
+          block_reason: latestPayload.block_reason || null,
+        });
+      } else {
+        this.messages.push({ role: "assistant", content: fullContent });
+      }
     }
 
     this.streaming = false;
@@ -331,6 +459,53 @@ class ChatUI {
     this.messagesEl.appendChild(el);
     this._scrollToBottom();
     return el;
+  }
+
+  _renderAssistantPayload(payload) {
+    const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+    const followUps = Array.isArray(payload?.follow_up_questions) ? payload.follow_up_questions : [];
+    const followUpHint = payload?.follow_up_hint || "";
+    const blocked = Boolean(payload?.blocked);
+    const hasMeta = warnings.length > 0 || followUps.length > 0;
+    const answer = blocked
+      ? (payload?.final_answer || payload?.content || "")
+      : (
+          hasMeta
+            ? (payload?.draft_answer || payload?.final_answer || payload?.content || "")
+            : (payload?.final_answer || payload?.content || payload?.draft_answer || "")
+        );
+
+    const parts = [];
+    if (answer) {
+      parts.push(`<div class="assistant-answer">${this._renderMarkdown(answer)}</div>`);
+    }
+    if (warnings.length) {
+      parts.push(this._renderAssistantMetaBlock("Confidence note", warnings, "warning"));
+    }
+    if (followUps.length) {
+      let followUpHtml = this._renderAssistantMetaBlock(
+        blocked ? "What needs fixing first" : "To improve this further",
+        followUps,
+        "follow-up",
+      );
+      if (followUpHint) {
+        followUpHtml += `<div class="assistant-meta-hint">${this._renderMarkdown(followUpHint)}</div>`;
+      }
+      parts.push(followUpHtml);
+    }
+    return parts.join("");
+  }
+
+  _renderAssistantMetaBlock(title, items, kind) {
+    const listItems = items
+      .map((item) => `<li>${this._escapeHtml(item)}</li>`)
+      .join("");
+    return `
+      <div class="assistant-meta-block ${kind}">
+        <div class="assistant-meta-title">${this._escapeHtml(title)}</div>
+        <ul>${listItems}</ul>
+      </div>
+    `;
   }
 
   _scrollToBottom() {

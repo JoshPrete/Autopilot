@@ -22,6 +22,62 @@
   min-height: 0;
 }
 
+.chat-trust-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.chat-trust-strip.loading {
+  color: var(--muted);
+}
+
+.chat-trust-overall {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-trust-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-trust-pill {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 6px 9px;
+  border-radius: 14px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.chat-trust-pill .copy {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-trust-pill .meta {
+  color: var(--muted);
+}
+
+.chat-trust-pill .note {
+  color: var(--danger);
+  max-width: 280px;
+  line-height: 1.35;
+}
+
 /* --- Chat Messages Area --- */
 .chat-messages {
   flex: 1;
@@ -103,6 +159,57 @@
   background: var(--panel-alt);
   color: var(--text);
   border-bottom-left-radius: 4px;
+}
+
+.assistant-answer + .assistant-meta-block,
+.assistant-answer + .assistant-meta-hint,
+.assistant-meta-block + .assistant-meta-block,
+.assistant-meta-block + .assistant-meta-hint {
+  margin-top: 12px;
+}
+
+.assistant-meta-block {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.assistant-meta-block.warning {
+  border-color: rgba(226, 177, 74, 0.25);
+  background: rgba(226, 177, 74, 0.08);
+}
+
+.assistant-meta-block.follow-up {
+  border-color: rgba(119, 217, 196, 0.2);
+  background: rgba(119, 217, 196, 0.07);
+}
+
+.assistant-meta-title {
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.assistant-meta-block ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.assistant-meta-block li:last-child {
+  margin-bottom: 0;
+}
+
+.assistant-meta-hint {
+  margin-top: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 13px;
 }
 
 /* --- Markdown inside bubbles --- */

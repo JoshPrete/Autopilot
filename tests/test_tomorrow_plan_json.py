@@ -86,7 +86,16 @@ def test_json_endpoint_returns_structured_response(mock_get_site, mock_get_pred,
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert {"meta", "forecast", "labor", "weather", "actions", "rush_windows", "hourly"}.issubset(
+    assert {
+        "meta",
+        "forecast",
+        "labor",
+        "weather",
+        "actions",
+        "rush_windows",
+        "hourly",
+        "peak_trade",
+    }.issubset(
         set(data.keys())
     )
 
@@ -218,3 +227,24 @@ def test_json_actions_returned(mock_get_site, mock_get_pred, _r, _rules):
         f"/api/sites/{TEST_SITE_ID}/tomorrow-plan/json?target_date={tomorrow.isoformat()}"
     )
     assert isinstance(resp.json()["actions"], list)
+
+
+@patch("app.routers.tomorrow_plan.list_operator_rules", return_value=[])
+@patch("app.routers.tomorrow_plan.get_rosters_for_date", return_value=[])
+@patch("app.routers.tomorrow_plan.get_prediction")
+@patch("app.dependencies.get_site")
+def test_json_peak_trade_summary_present(mock_get_site, mock_get_pred, _r, _rules):
+    """Tomorrow plan exposes a clearer busiest-period summary for the UI."""
+    mock_get_site.side_effect = _mock_site
+    mock_get_pred.return_value = _build_db_row()
+
+    tomorrow = date.today() + timedelta(days=1)
+    resp = client.get(
+        f"/api/sites/{TEST_SITE_ID}/tomorrow-plan/json?target_date={tomorrow.isoformat()}"
+    )
+    peak = resp.json()["peak_trade"]
+    assert peak["busiest_window_label"] == "8:47am - 9:32am"
+    assert peak["busiest_window_drinks"] == 52
+    assert peak["peak_hour_label"] == "9am"
+    assert peak["peak_hour_workload"] == 95.0
+    assert peak["day_shape_label"] == "front_loaded"

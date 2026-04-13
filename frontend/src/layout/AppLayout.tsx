@@ -29,10 +29,10 @@ export function AppLayout() {
       </header>
       <nav className="app-nav">
         <NavLink to="/plan" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
-          Tomorrow
+          Trade Plan
         </NavLink>
         <NavLink to="/insights" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
-          Insights
+          Opportunities
         </NavLink>
         <NavLink to="/roster" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Roster
@@ -47,12 +47,6 @@ export function AppLayout() {
             Admin
           </NavLink>
         )}
-        <NavLink to="/accuracy" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
-          Accuracy
-        </NavLink>
-        <NavLink to="/pipeline" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
-          Pipeline
-        </NavLink>
         <NavLink to="/rules" className={({ isActive }) => "nav-link" + (isActive ? " active" : "")}>
           Rules
         </NavLink>

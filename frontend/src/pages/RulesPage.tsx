@@ -68,6 +68,7 @@ function RuleCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [showRaw, setShowRaw] = useState(false);
 
   async function act(action: "confirm" | "reject") {
     setBusy(true);
@@ -107,14 +108,23 @@ function RuleCard({
         </span>
       )}
 
-      <div className="rule-payload">
-        {Object.entries(rule.payload).map(([k, v]) => (
-          <div key={k} className="rule-payload-row">
-            <span className="rule-payload-key">{k.replace(/_/g, " ")}</span>
-            <span className="rule-payload-val">{String(v)}</span>
-          </div>
-        ))}
-      </div>
+      {canManage && Object.keys(rule.payload).length > 0 && (
+        <div className="rule-payload-toggle">
+          <button className="btn-raw-toggle" onClick={() => setShowRaw((s) => !s)}>
+            {showRaw ? "Hide details" : "Show details"}
+          </button>
+          {showRaw && (
+            <div className="rule-payload">
+              {Object.entries(rule.payload).map(([k, v]) => (
+                <div key={k} className="rule-payload-row">
+                  <span className="rule-payload-key">{k.replace(/_/g, " ")}</span>
+                  <span className="rule-payload-val">{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="rule-meta">
         <span>Source: {rule.source}</span>

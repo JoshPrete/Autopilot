@@ -3,6 +3,27 @@ from app.chat import build_system_prompt, gather_chat_context
 
 def _patch_common_chat_dependencies(monkeypatch):
     monkeypatch.setattr("app.chat.get_data_freshness", lambda *_args, **_kwargs: "2026-02-19")
+    monkeypatch.setattr(
+        "app.chat.get_data_health",
+        lambda *_args, **_kwargs: {
+            "status": "green",
+            "score": 1.0,
+            "components": [
+                {
+                    "source": "square_orders",
+                    "status": "green",
+                    "latest_date": "2026-02-19",
+                    "age_days": 0,
+                },
+                {
+                    "source": "daily_profitability",
+                    "status": "green",
+                    "latest_date": "2026-02-19",
+                    "age_days": 0,
+                },
+            ],
+        },
+    )
     monkeypatch.setattr("app.chat.get_prediction", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         "app.chat.get_rolling_accuracy", lambda *_args, **_kwargs: {"days_measured": 0}
@@ -215,6 +236,129 @@ def test_gather_chat_context_includes_inventory_alerts_for_stock_question(monkey
     assert "inventory_usage_rules" in context
 
 
+def test_gather_chat_context_builds_direct_lookup_for_whos_working_tomorrow(monkeypatch):
+    _patch_common_chat_dependencies(monkeypatch)
+    monkeypatch.setattr("app.chat._today_local", lambda: __import__("datetime").date(2026, 2, 19))
+    monkeypatch.setattr(
+        "app.chat.get_data_health",
+        lambda *_args, **_kwargs: {
+            "status": "green",
+            "score": 1.0,
+            "components": [
+                {
+                    "source": "deputy_rosters",
+                    "status": "green",
+                    "latest_date": "2026-02-20",
+                    "next_14d_shifts": 14,
+                }
+            ],
+        },
+    )
+
+    def _roster(_site_id, target_date):
+        if str(target_date) == "2026-02-20":
+            return [
+                {
+                    "name": "Sarah",
+                    "start": "06:30",
+                    "end": "12:30",
+                    "hours": 6.0,
+                    "is_open": False,
+                },
+                {
+                    "name": "Tom",
+                    "start": "07:00",
+                    "end": "13:00",
+                    "hours": 6.0,
+                    "is_open": False,
+                },
+            ]
+        return []
+
+    monkeypatch.setattr("app.chat._get_roster_for_date", _roster)
+
+    context = gather_chat_context("site-1", "Who's working tomorrow?")
+
+    assert context["request_plan"]["intent"] == "direct_lookup"
+    assert context["request_plan"]["lookup_key"] == "tomorrow_roster"
+    assert context["direct_lookup"]["source_of_truth"] == "deputy_rosters"
+    assert context["direct_lookup"]["status"] == "ok"
+    assert len(context["direct_lookup"]["shifts"]) == 2
+    assert context["question_source_basis"][0]["source"] == "deputy_rosters"
+
+
+def test_gather_chat_context_refreshes_deputy_for_tomorrow_lookup_when_future_roster_missing(
+    monkeypatch,
+):
+    _patch_common_chat_dependencies(monkeypatch)
+    monkeypatch.setattr("app.chat._today_local", lambda: __import__("datetime").date(2026, 2, 19))
+
+    health_calls = {"count": 0}
+
+    def _health(*_args, **_kwargs):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            return {
+                "status": "yellow",
+                "score": 0.5,
+                "components": [
+                    {
+                        "source": "deputy_rosters",
+                        "status": "yellow",
+                        "latest_date": "2026-02-19",
+                        "next_14d_shifts": 0,
+                    }
+                ],
+            }
+        return {
+            "status": "green",
+            "score": 1.0,
+            "components": [
+                {
+                    "source": "deputy_rosters",
+                    "status": "green",
+                    "latest_date": "2026-02-20",
+                    "next_14d_shifts": 12,
+                }
+            ],
+        }
+
+    monkeypatch.setattr("app.chat.get_data_health", _health)
+
+    roster_state = {"refreshed": False}
+
+    def _roster(_site_id, target_date):
+        if str(target_date) != "2026-02-20":
+            return []
+        if not roster_state["refreshed"]:
+            return []
+        return [
+            {
+                "name": "Sarah",
+                "start": "06:30",
+                "end": "12:30",
+                "hours": 6.0,
+                "is_open": False,
+            }
+        ]
+
+    def _refresh(_site_id, run_date):
+        assert str(run_date) == "2026-02-19"
+        roster_state["refreshed"] = True
+        return {"status": "ok", "rosters": 8, "stored": 8}
+
+    monkeypatch.setattr("app.chat._get_roster_for_date", _roster)
+    monkeypatch.setattr("app.chat._refresh_deputy_rosters", _refresh)
+
+    context = gather_chat_context("site-1", "Who's working tomorrow?")
+
+    assert context["direct_lookup"]["status"] == "ok"
+    assert context["direct_lookup"]["refresh_attempted"] is True
+    assert context["direct_lookup"]["refresh_status"] == "ok"
+    assert len(context["direct_lookup"]["shifts"]) == 1
+    assert context["question_source_basis"][0]["status"] == "green"
+
+
 def test_gather_chat_context_includes_confirmed_operator_rules(monkeypatch):
     _patch_common_chat_dependencies(monkeypatch)
     monkeypatch.setattr(
@@ -278,9 +422,55 @@ def test_gather_chat_context_includes_curiosity_agenda(monkeypatch):
     assert context["curiosity_agenda"][0]["agenda_type"] == "workflow_learning"
 
 
+def test_gather_chat_context_includes_data_health(monkeypatch):
+    _patch_common_chat_dependencies(monkeypatch)
+
+    context = gather_chat_context("site-1", "How is trade today?")
+
+    assert "data_health" in context
+    assert context["data_health"]["status"] == "green"
+    assert context["data_health"]["components"][0]["source"] == "square_orders"
+    assert "question_source_basis" in context
+    assert context["question_source_basis"][0]["source"] == "square_orders"
+
+
 def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections():
     context = {
         "data_freshness": "2026-02-19",
+        "data_health": {
+            "status": "yellow",
+            "score": 0.67,
+            "components": [
+                {
+                    "source": "square_orders",
+                    "status": "yellow",
+                    "latest_date": "2026-02-18",
+                    "age_days": 1,
+                },
+                {
+                    "source": "daily_profitability",
+                    "status": "green",
+                    "latest_date": "2026-02-19",
+                    "age_days": 0,
+                },
+            ],
+        },
+        "question_source_basis": [
+            {
+                "source": "square_orders",
+                "label": "Square orders",
+                "status": "yellow",
+                "latest_date": "2026-02-18",
+                "age_days": 1,
+            },
+            {
+                "source": "daily_profitability",
+                "label": "Daily profitability",
+                "status": "green",
+                "latest_date": "2026-02-19",
+                "age_days": 0,
+            },
+        ],
         "operator_rules": [
             {
                 "rule_type": "delivery_schedule",
@@ -457,6 +647,10 @@ def test_build_system_prompt_contains_grounded_efficiency_and_actions_sections()
     prompt = build_system_prompt("Clubhouse", context)
 
     assert "Confirmed Operating Rules" in prompt
+    assert "Data Health" in prompt
+    assert "Question Source Basis" in prompt
+    assert "square_orders: YELLOW, latest 18/02/2026, 1 days old" in prompt
+    assert "Square orders: YELLOW, latest 18/02/2026, 1 days old" in prompt
     assert "Milk: delivery on Monday, Wednesday, Friday" in prompt
     assert "High-Priority Knowledge Gaps" in prompt
     assert "What days do you order or receive oat milk?" in prompt
@@ -506,3 +700,44 @@ def test_build_system_prompt_handles_string_xero_mapping_confidence():
 
     assert "Xero Supplier Mappings" in prompt
     assert "2 items mapped" in prompt
+
+
+def test_build_system_prompt_contains_direct_lookup_guidance():
+    prompt = build_system_prompt(
+        "Clubhouse",
+        {
+            "today_date": "2026-02-19",
+            "request_plan": {
+                "intent": "direct_lookup",
+                "lookup_key": "tomorrow_roster",
+                "label": "Tomorrow roster lookup",
+                "sources": ["deputy_rosters"],
+            },
+            "direct_lookup": {
+                "lookup_key": "tomorrow_roster",
+                "label": "Tomorrow roster",
+                "source_of_truth": "deputy_rosters",
+                "date": "2026-02-20",
+                "status": "ok",
+                "shifts": [
+                    {"name": "Sarah", "start": "06:30", "end": "12:30", "hours": 6.0},
+                    {"name": "Tom", "start": "07:00", "end": "13:00", "hours": 6.0},
+                ],
+            },
+            "question_source_basis": [
+                {
+                    "label": "Deputy rosters",
+                    "status": "green",
+                    "latest_date": "2026-02-20",
+                    "age_days": 0,
+                }
+            ],
+        },
+    )
+
+    assert "## Request Plan" in prompt
+    assert "Intent: DIRECT_LOOKUP" in prompt
+    assert "This is a direct factual lookup." in prompt
+    assert "## Direct Lookup" in prompt
+    assert "Source of truth: deputy_rosters" in prompt
+    assert "Sarah: 06:30 – 12:30 (6.0h)" in prompt

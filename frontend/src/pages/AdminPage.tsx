@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { apiFetch } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import type {
@@ -246,6 +247,15 @@ export function AdminPage() {
   return (
     <div className="admin-page">
       <h1 className="page-title">Admin</h1>
+
+      {/* ── Diagnostic Tools ── */}
+      <section className="admin-section">
+        <h2>Diagnostic Tools</h2>
+        <div className="admin-tool-links">
+          <Link to="/pipeline" className="admin-tool-link">Pipeline Log</Link>
+          <Link to="/accuracy" className="admin-tool-link">Forecast Accuracy</Link>
+        </div>
+      </section>
 
       {/* ── Active Flags ── */}
       <section className="admin-section">

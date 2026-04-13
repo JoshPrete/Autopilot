@@ -194,6 +194,38 @@ def scheduled_profitability():
         )
 
 
+def scheduled_freshness_recovery():
+    """Best-effort catch-up when local warehouse data falls behind the source systems."""
+    from app.freshness_recovery import recover_site_freshness
+
+    site = _resolve_site_id()
+    if not site:
+        logger.warning("Freshness recovery skipped: no site configured")
+        return
+    site_id, _ = site
+    started_at = datetime.utcnow()
+    result = None
+    error_text = None
+    try:
+        result = recover_site_freshness(site_id)
+        logger.info("Freshness recovery: %s", result)
+    except Exception as e:
+        error_text = str(e)
+        logger.exception("Freshness recovery failed")
+    finally:
+        explicit_status = None
+        if isinstance(result, dict) and result.get("status") == "partial":
+            explicit_status = "error"
+        _record_pipeline_run(
+            site_id=site_id,
+            job_name="freshness_recovery",
+            started_at=started_at,
+            result=result,
+            error_text=error_text,
+            status=explicit_status or ("error" if error_text else None),
+        )
+
+
 def scheduled_xero_sync():
     """5:25pm AEST — Sync Xero supplier bills into item COGS (if connected)."""
     from data.xero import is_xero_configured, sync_xero_bills, sync_xero_revenue
@@ -432,6 +464,12 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
     scheduler.add_job(
+        scheduled_freshness_recovery,
+        CronTrigger(hour=9, minute=10),
+        id="morning_freshness_recovery",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         scheduled_ingest,
         CronTrigger(hour=17, minute=0),
         id="daily_ingest",
@@ -453,6 +491,12 @@ async def lifespan(app: FastAPI):
         scheduled_xero_sync,
         CronTrigger(hour=17, minute=25),
         id="daily_xero_sync",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        scheduled_freshness_recovery,
+        CronTrigger(hour=17, minute=35),
+        id="evening_freshness_recovery",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -479,10 +523,18 @@ async def lifespan(app: FastAPI):
         id="weekly_roi",
         replace_existing=True,
     )
+    scheduler.add_job(
+        scheduled_freshness_recovery,
+        "date",
+        run_date=datetime.now() + timedelta(seconds=5),
+        id="startup_freshness_recovery",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info(
-        "Scheduler started: ingest@09:00+17:00, deputy@17:15, profitability@17:20, "
-        "xero@17:25, predict@18:00, intelligence@18:15, weekly_kpi@Mon08:00, weekly_roi@Mon08:05 AEST"
+        "Scheduler started: ingest@09:00+17:00, freshness_recovery@09:10+17:35+startup, "
+        "deputy@17:15, profitability@17:20, xero@17:25, predict@18:00, "
+        "intelligence@18:15, weekly_kpi@Mon08:00, weekly_roi@Mon08:05 AEST"
     )
     yield
     # Shutdown
@@ -527,12 +579,7 @@ def dashboard_alias(request: Request):
 
 @app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
 def chat_page(request: Request):
-    site_id = request.query_params.get("site_id")
-    if not site_id:
-        default_site_id = _resolve_default_site_id()
-        if default_site_id:
-            return RedirectResponse(url=f"/chat?site_id={default_site_id}", status_code=307)
-    return (_static_dir / "chat.html").read_text()
+    return RedirectResponse(url="/app/chat", status_code=307)
 
 
 @app.get("/xero/setup", response_class=HTMLResponse, include_in_schema=False)

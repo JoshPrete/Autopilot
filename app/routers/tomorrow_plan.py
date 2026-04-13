@@ -27,6 +27,133 @@ def _get_prediction_or_404(site: dict, target_date: date) -> dict:
     return prediction
 
 
+def _hour_label(hour: int | None) -> str:
+    if hour is None:
+        return "—"
+    if hour == 0:
+        return "12am"
+    if hour < 12:
+        return f"{hour}am"
+    if hour == 12:
+        return "12pm"
+    return f"{hour - 12}pm"
+
+
+def _short_time_label(value: str | None) -> str:
+    if not value:
+        return "—"
+    try:
+        from datetime import datetime as _dt
+
+        rendered = _dt.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%I:%M%p").lower()
+        return rendered.lstrip("0")
+    except Exception:
+        return str(value)
+
+
+def _summarize_trade_shape(hourly: list[dict], rush_windows: list[dict]) -> dict:
+    if not hourly:
+        return {
+            "busiest_window_label": None,
+            "busiest_window_drinks": None,
+            "peak_hour_label": None,
+            "peak_hour_workload": None,
+            "quiet_hour_label": None,
+            "quiet_hour_workload": None,
+            "rush_window_count": len(rush_windows),
+            "day_shape_label": "unknown",
+            "day_shape_title": "No day-shape forecast yet",
+            "day_shape_note": "Hourly trade shape is not available for this forecast.",
+        }
+
+    ranked_hours = sorted(
+        hourly,
+        key=lambda item: float(item.get("predicted_workload") or 0),
+        reverse=True,
+    )
+    peak_hour = ranked_hours[0]
+    quiet_hour = min(hourly, key=lambda item: float(item.get("predicted_workload") or 0))
+
+    rush_sorted = sorted(
+        rush_windows,
+        key=lambda item: (
+            int(item.get("predicted_drinks") or 0),
+            float(item.get("predicted_workload") or 0),
+        ),
+        reverse=True,
+    )
+    busiest_window = rush_sorted[0] if rush_sorted else None
+
+    peak_hour_value = float(peak_hour.get("predicted_workload") or 0)
+    quiet_hour_value = float(quiet_hour.get("predicted_workload") or 0)
+    peak_hour_num = int(peak_hour.get("hour") or 0)
+
+    day_shape_label = "steady"
+    day_shape_title = "Steady day"
+    day_shape_note = "Demand looks fairly even across the trading day."
+
+    second_peak = ranked_hours[1] if len(ranked_hours) > 1 else None
+    second_peak_hour = int(second_peak.get("hour") or 0) if second_peak else None
+    second_peak_value = float(second_peak.get("predicted_workload") or 0) if second_peak else 0.0
+    peak_to_quiet_ratio = peak_hour_value / max(quiet_hour_value, 1.0)
+
+    if (
+        second_peak
+        and abs(peak_hour_num - second_peak_hour) >= 3
+        and second_peak_value >= peak_hour_value * 0.75
+    ):
+        day_shape_label = "two_wave"
+        day_shape_title = "Two-wave day"
+        day_shape_note = (
+            f"Expect two meaningful lifts in trade, led by {_hour_label(peak_hour_num)} "
+            f"and {_hour_label(second_peak_hour)}."
+        )
+    elif peak_to_quiet_ratio < 1.5:
+        day_shape_label = "steady"
+        day_shape_title = "Steady day"
+        day_shape_note = "Trade looks relatively even, without one dominant peak hour."
+    elif peak_hour_num < 10:
+        day_shape_label = "front_loaded"
+        day_shape_title = "Front-loaded morning peak"
+        day_shape_note = (
+            f"The strongest push is early, with peak pressure around {_hour_label(peak_hour_num)}."
+        )
+    elif peak_hour_num < 13:
+        day_shape_label = "midday_led"
+        day_shape_title = "Midday-led trade"
+        day_shape_note = (
+            f"The day builds into a late-morning / lunch-style peak around {_hour_label(peak_hour_num)}."
+        )
+    else:
+        day_shape_label = "back_loaded"
+        day_shape_title = "Back-loaded trade"
+        day_shape_note = (
+            f"The heavier trade is expected later, peaking around {_hour_label(peak_hour_num)}."
+        )
+
+    busiest_window_label = None
+    busiest_window_drinks = None
+    if busiest_window:
+        busiest_window_label = (
+            f"{_short_time_label(busiest_window.get('start'))} - "
+            f"{_short_time_label(busiest_window.get('end'))}"
+        )
+        busiest_window_drinks = int(busiest_window.get("predicted_drinks") or 0)
+
+    return {
+        "busiest_window_label": busiest_window_label,
+        "busiest_window_drinks": busiest_window_drinks,
+        "peak_hour_label": _hour_label(int(peak_hour.get("hour") or 0)),
+        "peak_hour_workload": round(peak_hour_value, 1),
+        "quiet_hour_label": _hour_label(int(quiet_hour.get("hour") or 0)),
+        "quiet_hour_workload": round(quiet_hour_value, 1),
+        "rush_window_count": len(rush_windows),
+        "day_shape_label": day_shape_label,
+        "day_shape_title": day_shape_title,
+        "day_shape_note": day_shape_note,
+    }
+
+
 @router.get("/text")
 def tomorrow_plan_text(
     site: dict = Depends(get_validated_site),
@@ -116,22 +243,26 @@ def tomorrow_plan_json(
         hourly_response.append(
             {
                 "hour": hour,
-                "hour_label": f"{hour}am" if hour < 12 else (f"{hour - 12}pm" if hour > 12 else "12pm"),
+                "hour_label": _hour_label(hour),
                 "predicted_workload": h.get("predicted_workload"),
                 "is_rush": h.get("is_rush", False),
             }
         )
+    peak_trade = _summarize_trade_shape(hourly_response, rush_response)
+    peak_trade["vs_typical_pct"] = None
+    peak_trade["vs_typical_direction"] = None
 
     site_id = site["site_id"]
     predicted_drinks = (
         forecast.get("total_predicted_drinks") or prediction.get("total_predicted_drinks") or 0
     )
 
-    # ── Revenue forecast (intelligence layer) ─────────────────────────────────
+    # ── Revenue forecast + DOW baseline ───────────────────────────────────────
+    history: list = []
     revenue_signals: dict = {}
     try:
         from data.storage import get_daily_profitability
-        history = get_daily_profitability(site_id, plan_date - timedelta(days=28), plan_date)
+        history = get_daily_profitability(site_id, plan_date - timedelta(days=56), plan_date) or []
         normalized_history = [
             {
                 "date": r.get("profit_date") or plan_date,
@@ -139,7 +270,7 @@ def tomorrow_plan_json(
                 "drink_count": int(r.get("drink_count") or 0),
                 "labor_cents": int(r.get("labor_cost_cents") or 0),
             }
-            for r in (history or [])
+            for r in history
         ]
         if normalized_history:
             revenue_signals = predict_revenue(normalized_history, plan_date)
@@ -147,6 +278,39 @@ def tomorrow_plan_json(
         pass
 
     predicted_cents = revenue_signals.get("predicted_cents") or 0
+
+    # ── vs-typical-DOW comparison ──────────────────────────────────────────────
+    vs_typical_pct: float | None = None
+    vs_typical_direction: str | None = None
+    try:
+        dow = plan_date.weekday()
+        same_dow_drinks: list[int] = []
+        for r in history:
+            dc = int(r.get("drink_count") or 0)
+            pd = r.get("profit_date")
+            if dc <= 0 or pd is None:
+                continue
+            if hasattr(pd, "weekday"):
+                pd_dow = pd.weekday()
+            else:
+                from datetime import date as _date_cls
+                pd_dow = _date_cls.fromisoformat(str(pd)).weekday()
+            if pd_dow == dow:
+                same_dow_drinks.append(dc)
+        if len(same_dow_drinks) >= 3 and predicted_drinks > 0:
+            same_dow_drinks.sort()
+            baseline = same_dow_drinks[len(same_dow_drinks) // 2]
+            if baseline > 0:
+                pct = ((predicted_drinks - baseline) / baseline) * 100
+                vs_typical_pct = round(pct, 1)
+                if pct >= 10:
+                    vs_typical_direction = "busier"
+                elif pct <= -10:
+                    vs_typical_direction = "quieter"
+                else:
+                    vs_typical_direction = "similar"
+    except Exception:
+        pass
 
     # ── Labor analysis ────────────────────────────────────────────────────────
     labor: dict = {"scheduled_labor_cents": 0, "wage_pct": 0.0, "labor_risk": "green",
@@ -209,4 +373,5 @@ def tomorrow_plan_json(
         "actions": actions,
         "rush_windows": rush_response,
         "hourly": hourly_response,
+        "peak_trade": peak_trade,
     }

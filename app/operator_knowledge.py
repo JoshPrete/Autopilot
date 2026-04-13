@@ -86,6 +86,7 @@ def parse_operator_rule_message(message: str) -> dict | None:
         _parse_delivery_schedule,
         _parse_purchase_profile,
         _parse_workflow_rule,
+        _parse_item_cost,
         _parse_storage_rule,
         _parse_recipe_definition,
     ):
@@ -168,6 +169,14 @@ def summarize_operator_rule(rule: dict) -> str:
         if trigger:
             return f"{label}: {action} when {trigger}"
         return f"{label}: {action}"
+
+    if rule_type == "item_cost":
+        item_name = payload.get("item_name") or "Item"
+        cost_cents = payload.get("cost_cents")
+        if cost_cents is not None:
+            dollars = cost_cents / 100
+            return f"{item_name}: COGS ${dollars:.2f} per serve"
+        return f"{item_name}: COGS recorded"
 
     return (rule or {}).get("rule_name") or "Unlabelled operator rule"
 
@@ -488,6 +497,78 @@ def _parse_workflow_rule(message: str) -> dict | None:
     return None
 
 
+def _parse_item_cost(message: str) -> dict | None:
+    """
+    Capture operator-confirmed COGS per menu item.
+
+    Supported phrases:
+        "flat white costs $1.80"
+        "flat white costs us $1.80 to make"
+        "our flat white COGS is $1.80"
+        "the COGS for flat white is $1.80"
+        "the cost of a flat white is $2.00"
+        "making a flat white costs $1.80"
+        "a 12oz latte costs about $1.50"
+    """
+    patterns = [
+        # "making [a] X costs $Y"  — must be before generic "X costs $Y"
+        re.compile(
+            r"^making\s+(?:a\s+|an\s+)?(?P<item>.+?)\s+costs?\s+\$?(?P<price>\d+(?:\.\d{1,2})?)$",
+            re.IGNORECASE,
+        ),
+        # "the cost/COGS of [a] X is $Y"
+        re.compile(
+            r"^the\s+(?:cogs?|cost)\s+of\s+(?:a\s+|an\s+)?(?P<item>.+?)\s+is\s+\$?(?P<price>\d+(?:\.\d{1,2})?)$",
+            re.IGNORECASE,
+        ),
+        # "COGS for X is $Y"
+        re.compile(
+            r"^cogs?\s+for\s+(?P<item>.+?)\s+is\s+\$?(?P<price>\d+(?:\.\d{1,2})?)$",
+            re.IGNORECASE,
+        ),
+        # "our X COGS is $Y" / "X cost is $Y"
+        re.compile(
+            r"^(?:our\s+)?(?:the\s+)?(?P<item>.+?)\s+(?:cogs?|costs?)\s+is\s+\$?(?P<price>\d+(?:\.\d{1,2})?)$",
+            re.IGNORECASE,
+        ),
+        # "X costs [us/me/about] $Y [to make/each/per serve]"
+        re.compile(
+            r"^(?:a\s+|an\s+)?(?P<item>.+?)\s+costs?\s+(?:us|me|about)?\s*\$?(?P<price>\d+(?:\.\d{1,2})?)"
+            r"(?:\s+(?:to\s+make|each|per\s+serve|per\s+cup))?$",
+            re.IGNORECASE,
+        ),
+    ]
+
+    for pattern in patterns:
+        match = pattern.search(message)
+        if not match:
+            continue
+
+        item_name = _clean_subject(match.group("item") or "")
+        if not item_name:
+            continue
+
+        try:
+            cost_cents = round(float(match.group("price")) * 100)
+        except (TypeError, ValueError):
+            continue
+
+        if cost_cents <= 0:
+            continue
+
+        return {
+            "rule_type": "item_cost",
+            "rule_name": f"{item_name} COGS",
+            "confidence": 0.92,
+            "payload": {
+                "item_name": item_name,
+                "cost_cents": cost_cents,
+            },
+        }
+
+    return None
+
+
 def _parse_recipe_definition(message: str) -> dict | None:
     # Family-level: "all iced lattes use 60g ice"
     all_match = re.search(
@@ -602,11 +683,14 @@ def _normalize_time(raw_time: str) -> str | None:
     if not token:
         return None
     try:
-        if ":" in token:
-            value = datetime.strptime(token, "%I:%M %p")
-        else:
-            value = datetime.strptime(token, "%I %p")
-        return value.strftime("%H:%M")
+        formats = ("%I:%M %p", "%I:%M%p", "%I %p", "%I%p")
+        for fmt in formats:
+            try:
+                value = datetime.strptime(token, fmt)
+                return value.strftime("%H:%M")
+            except ValueError:
+                continue
+        return None
     except ValueError:
         return None
 
@@ -637,6 +721,7 @@ def _rule_type_label(rule_type: str | None) -> str:
         "staffing_constraint": "Staffing constraint",
         "purchase_profile": "Purchase profile",
         "workflow_rule": "Workflow rule",
+        "item_cost": "Item COGS",
     }
     return labels.get(rule_type or "", "Operator rule")
 

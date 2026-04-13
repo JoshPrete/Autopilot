@@ -58,6 +58,21 @@ export interface HourlyEntry {
   is_rush: boolean;
 }
 
+export interface TomorrowPlanPeakTrade {
+  busiest_window_label: string | null;
+  busiest_window_drinks: number | null;
+  peak_hour_label: string | null;
+  peak_hour_workload: number | null;
+  quiet_hour_label: string | null;
+  quiet_hour_workload: number | null;
+  rush_window_count: number;
+  day_shape_label: string;
+  day_shape_title: string;
+  day_shape_note: string;
+  vs_typical_pct: number | null;
+  vs_typical_direction: string | null;
+}
+
 export interface TomorrowPlanResponse {
   meta: TomorrowPlanMeta;
   forecast: TomorrowPlanForecast;
@@ -66,6 +81,7 @@ export interface TomorrowPlanResponse {
   actions: string[];
   rush_windows: RushWindow[];
   hourly: HourlyEntry[];
+  peak_trade: TomorrowPlanPeakTrade;
 }
 
 export interface AuthUser {
@@ -243,6 +259,44 @@ export interface ChatAgendaResponse {
   site_id: string;
   agenda: ChatAgendaItem[];
   opener: string | null;
+}
+
+export interface ChatMessageRule {
+  rule: string;
+  category: string;
+  [key: string]: unknown;
+}
+
+export interface ChatMessageResponse {
+  content?: string;
+  draft_answer?: string;
+  final_answer?: string;
+  warnings?: string[];
+  follow_up_questions?: string[];
+  follow_up_hint?: string | null;
+  blocked?: boolean;
+  block_reason?: string | null;
+  applied_rules?: ChatMessageRule[];
+  error?: string;
+  done?: boolean;
+}
+
+export interface DataHealthComponent {
+  source: string;
+  status: "green" | "yellow" | "red" | "unknown" | string;
+  latest_date?: string | null;
+  age_days?: number | null;
+  blockers?: string[];
+  limitations?: string[];
+  [key: string]: unknown;
+}
+
+export interface DataHealthResponse {
+  site_id: string;
+  as_of: string;
+  status: "green" | "yellow" | "red" | "unknown" | string;
+  score: number | null;
+  components: DataHealthComponent[];
 }
 
 // Admin / Data Quality

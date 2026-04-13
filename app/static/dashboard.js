@@ -30,6 +30,25 @@ function confidenceBadge(label) {
   return `<span class="badge ${cls}">${label || "unknown"}</span>`;
 }
 
+function sourceLabel(source) {
+  const labels = {
+    square_orders: "Square",
+    daily_profitability: "Profit",
+    deputy_rosters: "Deputy",
+    xero_cogs: "Xero COGS",
+    xero_financial_facts: "Xero Facts",
+    data_quality_flags: "Flags",
+  };
+  return labels[source] || source || "Unknown";
+}
+
+function healthMessages(component) {
+  const messages = [];
+  if (Array.isArray(component?.blockers)) messages.push(...component.blockers);
+  if (Array.isArray(component?.limitations)) messages.push(...component.limitations);
+  return messages.filter(Boolean);
+}
+
 function trendArrow(trend) {
   const map = {
     improving: { arrow: "\u2191", cls: "trend-improving" },
@@ -867,13 +886,50 @@ function renderRosterPlan(data) {
 
 function renderDataHealth(data) {
   const el = $("#data-health-content");
+  const strip = $("#data-trust-strip");
   if (!data || !Array.isArray(data.components)) {
     el.innerHTML = '<div class="no-data">Data health unavailable.</div>';
+    if (strip) {
+      strip.className = "data-trust-strip";
+      strip.innerHTML = '<span class="no-data">Data trust unavailable.</span>';
+    }
     return;
   }
 
   const badge = (status) => `<span class="status-pill status-${status}">${status}</span>`;
   const score = data.score != null ? `${Math.round(data.score * 100)}%` : "--";
+  const criticalSources = ["square_orders", "daily_profitability", "deputy_rosters", "xero_cogs", "xero_financial_facts"];
+  const trustPills = data.components
+    .filter((c) => criticalSources.includes(c.source))
+    .map((c) => {
+      const latest = c.latest_date || "--";
+      const age = c.age_days != null ? `${c.age_days}d` : "--";
+      const messages = healthMessages(c);
+      const note = messages.length ? `<span class="note">${messages[0]}</span>` : "";
+      return `
+        <span class="trust-pill status-${c.status || "unknown"}">
+          ${badge(c.status || "unknown")}
+          <span class="pill-copy">
+            <span class="label">${sourceLabel(c.source)}</span>
+            <span class="meta">${latest} · ${age}</span>
+            ${note}
+          </span>
+        </span>
+      `;
+    })
+    .join("");
+
+  if (strip) {
+    strip.className = "data-trust-strip";
+    strip.innerHTML = `
+      <div class="trust-overall">
+        <span class="trust-label">Data Trust</span>
+        ${badge(data.status || "unknown")}
+        <span>${score}</span>
+      </div>
+      <div class="trust-pill-row">${trustPills}</div>
+    `;
+  }
 
   let html = `
     <div class="staffing-summary">
@@ -892,8 +948,16 @@ function renderDataHealth(data) {
     let notes = "";
     if (c.source === "square_orders") notes = `today_orders=${c.today_orders ?? 0}`;
     if (c.source === "deputy_rosters") notes = `next_14d_shifts=${c.next_14d_shifts ?? 0}`;
-    if (c.source === "xero_cogs") notes = `connected=${c.connected ? "yes" : "no"}, xero_items=${c.xero_cost_items ?? 0}`;
-    if (c.source === "xero_financial_facts") notes = `connected=${c.connected ? "yes" : "no"}, days_14d=${c.days_14d ?? 0}`;
+    if (c.source === "xero_cogs") {
+      const msg = healthMessages(c);
+      notes = `connected=${c.connected ? "yes" : "no"}, xero_items=${c.xero_cost_items ?? 0}, approved=${c.approved_mappings ?? 0}, review_open=${c.review_queue_open ?? 0}`;
+      if (msg.length) notes += `, ${msg.join(" | ")}`;
+    }
+    if (c.source === "xero_financial_facts") {
+      const msg = healthMessages(c);
+      notes = `connected=${c.connected ? "yes" : "no"}, days_14d=${c.days_14d ?? 0}, reports_scope=${c.has_reports_scope ? "yes" : "no"}`;
+      if (msg.length) notes += `, ${msg.join(" | ")}`;
+    }
     if (c.source === "data_quality_flags") notes = `active_flags=${Array.isArray(c.active_flags) ? c.active_flags.length : 0}`;
     html += `
       <tr>

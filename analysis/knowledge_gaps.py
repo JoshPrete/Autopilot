@@ -16,6 +16,7 @@ from analysis.sale_understanding import classify_recipe_coverage, normalize_sale
 from config.database import engine
 from data.storage import (
     get_inventory_alerts,
+    get_item_costs_detailed,
     list_inventory_usage_rules,
     list_operator_rules,
 )
@@ -234,6 +235,70 @@ def detect_knowledge_gaps(
                         "item_name": item_name,
                         "status": status,
                         "recommended_reorder_units": alert.get("recommended_reorder_units"),
+                    },
+                }
+            )
+
+    # Item cost gaps: top-selling items whose COGS is still at the seeded default
+    try:
+        cost_records = {
+            r["score_key"]: r["source"]
+            for r in get_item_costs_detailed(site_id)
+        }
+    except Exception as exc:
+        logger.info("item_costs unavailable for knowledge gaps: %s", exc)
+        cost_records = {}
+
+    if cost_records:
+        # Gather score_keys already confirmed via operator rules
+        confirmed_cost_keys: set[str] = set()
+        for rule in (operator_rules or []):
+            if rule.get("rule_type") == "item_cost":
+                item_name = (rule.get("payload") or {}).get("item_name") or ""
+                if item_name:
+                    from data.processing import resolve_item_key as _resolve
+                    try:
+                        sk, _ = _resolve(item_name)
+                        confirmed_cost_keys.add(sk)
+                    except Exception:
+                        pass
+
+        for item in top_items:
+            item_name = item.get("item")
+            normalized = normalize_sale_label(item_name)
+            sales_count = int(item.get("count") or 0)
+            if not normalized or sales_count < TOP_ITEM_RECIPE_THRESHOLD:
+                continue
+
+            from data.processing import resolve_item_key as _resolve
+            try:
+                score_key, _ = _resolve(item_name)
+            except Exception:
+                continue
+
+            if score_key in confirmed_cost_keys:
+                continue
+
+            source = cost_records.get(score_key, "default")
+            if source != "default":
+                continue  # already has a real cost
+
+            add_gap(
+                {
+                    "key": f"missing_item_cost:{normalized}",
+                    "gap_type": "missing_item_cost",
+                    "priority": "medium",
+                    "title": f"Default COGS for {item_name}",
+                    "question": f"What does {item_name} actually cost you to make per serve?",
+                    "why_it_matters": (
+                        f"{item_name} sold {sales_count} times in the last {lookback_days} days, "
+                        "but the system is still using a default COGS estimate. "
+                        "Confirming the real cost directly improves margin calculations."
+                    ),
+                    "evidence": {
+                        "item_name": item_name,
+                        "sales_count": sales_count,
+                        "current_source": source,
                     },
                 }
             )

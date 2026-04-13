@@ -2625,8 +2625,13 @@ def list_inventory_usage_rules(site_id: str, active_only: bool = True) -> list[d
 # Operator Rules (chat-confirmed operating knowledge)
 # ============================================================
 
+_operator_rules_table_verified: bool = False
+
 
 def _ensure_operator_rules_table(conn) -> bool:
+    global _operator_rules_table_verified
+    if _operator_rules_table_verified:
+        return True
     try:
         conn.execute(
             _text(
@@ -2666,6 +2671,7 @@ def _ensure_operator_rules_table(conn) -> bool:
                 """
             )
         )
+        _operator_rules_table_verified = True
         return True
     except Exception as exc:  # pragma: no cover - depends on DB privileges
         try:
@@ -7178,6 +7184,46 @@ def _freshness_component(
     return "red", age_days
 
 
+def _build_xero_health_annotations(
+    *,
+    connected: bool,
+    scope: str | None,
+    approved_mappings: int,
+    proposed_mappings: int,
+    review_counts: dict[str, int] | None,
+) -> dict:
+    review_counts = {
+        str(k): int(v or 0) for k, v in (review_counts or {}).items() if int(v or 0) > 0
+    }
+    scope_string = str(scope or "").strip()
+    scope_set = {part.strip() for part in scope_string.split() if part.strip()}
+    has_reports_scope = "accounting.reports.read" in scope_set
+
+    review_total = int(sum(review_counts.values()))
+    blockers: list[str] = []
+    limitations: list[str] = []
+
+    if connected and not has_reports_scope:
+        limitations.append("Reconnect Xero with accounting.reports.read to enable report-based revenue reconciliation.")
+    if connected and approved_mappings <= 0 and (proposed_mappings > 0 or review_total > 0):
+        blockers.append("No approved Xero bill mappings yet, so item costs cannot update automatically.")
+    if review_total > 0:
+        top_reasons = sorted(review_counts.items(), key=lambda item: (-item[1], item[0]))[:2]
+        reason_summary = ", ".join(f"{reason.lower()}={count}" for reason, count in top_reasons)
+        blockers.append(f"{review_total} open Xero review items need attention ({reason_summary}).")
+
+    return {
+        "scope": scope_string,
+        "has_reports_scope": has_reports_scope,
+        "approved_mappings": int(approved_mappings or 0),
+        "proposed_mappings": int(proposed_mappings or 0),
+        "review_queue_open": review_total,
+        "review_queue_by_reason": review_counts,
+        "blockers": blockers,
+        "limitations": limitations,
+    }
+
+
 def get_data_health(site_id: str) -> dict:
     """
     Compute per-source data trust status and overall health score.
@@ -7270,6 +7316,81 @@ def get_data_health(site_id: str) -> dict:
             .mappings()
             .first()
         )
+
+        try:
+            xero_scope_row = (
+                conn.execute(
+                    _text(
+                        """
+                    SELECT scope
+                    FROM xero_tokens
+                    WHERE site_id = :sid
+                    LIMIT 1
+                    """
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("xero_tokens scope unavailable for data health (non-fatal): %s", e)
+            xero_scope_row = {"scope": None}
+
+        try:
+            xero_mapping_row = (
+                conn.execute(
+                    _text(
+                        """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'approved') AS approved_mappings,
+                        COUNT(*) FILTER (WHERE status = 'proposed') AS proposed_mappings
+                    FROM xero_line_mappings
+                    WHERE site_id = :sid
+                    """
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .first()
+            )
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("xero_line_mappings unavailable for data health (non-fatal): %s", e)
+            xero_mapping_row = {"approved_mappings": 0, "proposed_mappings": 0}
+
+        try:
+            _ensure_xero_review_queue_table(conn)
+            xero_review_rows = (
+                conn.execute(
+                    _text(
+                        """
+                    SELECT reason_code, COUNT(*) AS count
+                    FROM xero_review_queue
+                    WHERE site_id = :sid
+                      AND queue_status = 'open'
+                    GROUP BY reason_code
+                    """
+                    ),
+                    {"sid": site_id},
+                )
+                .mappings()
+                .all()
+            )
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("xero_review_queue unavailable for data health (non-fatal): %s", e)
+            xero_review_rows = []
 
         try:
             xero_financial_row = (
@@ -7381,6 +7502,15 @@ def get_data_health(site_id: str) -> dict:
     xero_connected = bool((xero_row or {}).get("connected"))
     xero_latest = (xero_row or {}).get("xero_latest_date")
     xero_items = int((xero_row or {}).get("xero_cost_items") or 0)
+    xero_annotations = _build_xero_health_annotations(
+        connected=xero_connected,
+        scope=(xero_scope_row or {}).get("scope"),
+        approved_mappings=int((xero_mapping_row or {}).get("approved_mappings") or 0),
+        proposed_mappings=int((xero_mapping_row or {}).get("proposed_mappings") or 0),
+        review_counts={
+            str(row["reason_code"]): int(row["count"] or 0) for row in (xero_review_rows or [])
+        },
+    )
     if not xero_connected:
         xero_status = "yellow"
         xero_age = None
@@ -7398,6 +7528,7 @@ def get_data_health(site_id: str) -> dict:
             "latest_date": str(xero_latest) if xero_latest else None,
             "age_days": xero_age,
             "xero_cost_items": xero_items,
+            **xero_annotations,
         }
     )
 
@@ -7420,6 +7551,9 @@ def get_data_health(site_id: str) -> dict:
             "latest_date": str(xero_fin_latest) if xero_fin_latest else None,
             "age_days": xero_fin_age,
             "days_14d": xero_fin_days_14d,
+            "scope": xero_annotations["scope"],
+            "has_reports_scope": xero_annotations["has_reports_scope"],
+            "limitations": xero_annotations["limitations"],
         }
     )
 

@@ -15,8 +15,18 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 
+from analysis.business_intelligence import (
+    compute_business_intelligence,
+    format_hypotheses_for_chat,
+)
 from analysis.curiosity import build_curiosity_agenda
 from analysis.knowledge_gaps import detect_knowledge_gaps
+from app.chat_pipeline import (
+    format_local_date as pipeline_format_local_date,
+    build_question_source_basis as pipeline_build_question_source_basis,
+    review_draft_answer,
+)
+from app.chat_request_planner import classify_chat_request
 from config.database import engine
 from config.settings import settings
 from data.storage import (
@@ -25,6 +35,7 @@ from data.storage import (
     get_all_xero_mappings,
     get_bottom_line_scorecard,
     get_cogs_source_summary,
+    get_data_health,
     get_daily_efficiency_snapshot,
     get_daily_profitability,
     get_data_freshness,
@@ -39,6 +50,7 @@ from data.storage import (
     list_inventory_usage_rules,
     get_item_costs,
     get_item_costs_detailed,
+    upsert_item_cost,
     get_learned_patterns,
     get_pending_operator_rule,
     get_prediction,
@@ -66,7 +78,7 @@ from app.operator_knowledge import (
 
 logger = logging.getLogger("autopilot.chat")
 
-CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1500
 
 
@@ -95,146 +107,10 @@ def _safe_json(val):
     return val
 
 
-def _is_broad_learning_question(question: str) -> bool:
-    return _keyword_match(
-        question,
-        [
-            "what next",
-            "what should",
-            "how can",
-            "improve",
-            "profit",
-            "profitability",
-            "efficiency",
-            "workflow",
-            "optimi",
-            "missing",
-            "learn",
-            "understand",
-            "why",
-            "opportunit",
-        ],
-    )
-
-
-def _curiosity_item_is_capture_ready(item: dict) -> bool:
-    gap_type = str(item.get("source_gap_type") or "").strip()
-    agenda_type = str(item.get("agenda_type") or "").strip()
-    return (
-        gap_type
-        in {
-            "missing_recipe",
-            "missing_recipe_variant",
-            "missing_delivery_schedule",
-        }
-        or agenda_type == "consumption_mapping"
-    )
-
-
-def _curiosity_item_score(question: str, item: dict) -> int:
-    score = {"high": 300, "medium": 200, "low": 100}.get(str(item.get("priority") or "medium"), 100)
-    agenda_type = str(item.get("agenda_type") or "").strip()
-    gap_type = str(item.get("source_gap_type") or "").strip()
-
-    if _is_broad_learning_question(question):
-        score += 120
-
-    if _keyword_match(question, ["inventory", "stock", "recipe", "ingredient", "cogs", "sale"]):
-        if gap_type in {"missing_recipe", "missing_recipe_variant", "missing_delivery_schedule"}:
-            score += 140
-        if agenda_type == "consumption_mapping":
-            score += 160
-
-    if _keyword_match(question, ["profit", "profitability", "margin", "labor", "efficiency"]):
-        if agenda_type in {
-            "knowledge_gap",
-            "workflow_learning",
-            "consumption_mapping",
-            "labor_explanation",
-        }:
-            score += 90
-
-    if _keyword_match(question, ["xero", "expense", "supplier", "purchase", "invoice", "bill"]):
-        if agenda_type == "purchase_explanation":
-            score += 180
-
-    if _keyword_match(question, ["wage", "labor", "payroll", "why"]):
-        if agenda_type == "labor_explanation":
-            score += 160
-
-    if _keyword_match(question, ["why", "missing", "learn", "understand"]):
-        score += 70
-
-    if _curiosity_item_is_capture_ready(item):
-        score += 60
-
-    return score
-
-
-def _select_curiosity_item(question: str, context: dict) -> dict | None:
-    agenda = context.get("curiosity_agenda") or []
-    if not agenda:
-        return None
-
-    scored = sorted(
-        ((item, _curiosity_item_score(question, item)) for item in agenda),
-        key=lambda pair: pair[1],
-        reverse=True,
-    )
-    if not scored:
-        return None
-
-    item, score = scored[0]
-    if score < 320:
-        return None
-
-    if _curiosity_item_is_capture_ready(item):
-        return item
-
-    if _is_broad_learning_question(question) and str(item.get("priority") or "") == "high":
-        return item
-
-    return None
-
-
-def _curiosity_reply_hint(item: dict) -> str | None:
-    gap_type = str(item.get("source_gap_type") or "").strip()
-    title = str(item.get("title") or "")
-
-    if gap_type in {"missing_recipe", "missing_recipe_variant"}:
-        return "Reply in a recipe form like `12oz latte uses 1 cup, 1 lid, 20g beans, 280ml full cream milk`."
-    if gap_type == "missing_delivery_schedule":
-        return (
-            "Reply in a schedule form like `Oat milk delivery is Monday, Wednesday, Friday` "
-            "or `We place oat milk orders by 2pm Tuesday for Wednesday delivery`."
-        )
-    if str(item.get("agenda_type") or "") == "consumption_mapping" or "consume" in title.lower():
-        return "Reply in a rule form like `12oz coffee uses 1 12oz cup and 1 90mm lid`."
-    if str(item.get("agenda_type") or "") == "purchase_explanation":
-        return (
-            "Reply in plain language with what the expense is for and whether it is stock, packaging, "
-            "maintenance, marketing, or overhead."
-        )
-    if str(item.get("agenda_type") or "") == "labor_explanation":
-        return (
-            "Reply in plain language with the cause, such as training, sick cover, public-holiday rates, "
-            "soft trade, or an intentional roster choice."
-        )
-    return None
-
-
-def _build_curiosity_question_response(item: dict) -> str:
-    lines = [
-        "One thing I should learn before I give you a confident recommendation:",
-        "",
-        f"- Why this matters: {item.get('why_it_matters', 'Missing business logic reduces confidence.')}",
-        f"- This unlocks: {item.get('decision_unlocked', 'Better future recommendations.')}",
-        f"- Question: {item.get('question', 'What should I learn next?')}",
-    ]
-    hint = _curiosity_reply_hint(item)
-    if hint:
-        lines.extend(["", hint])
-    return "\n".join(lines)
+def _format_local_date(raw_date: str | None) -> str:
+    return pipeline_format_local_date(raw_date)
+def _build_question_source_basis(question: str, context: dict) -> list[dict]:
+    return pipeline_build_question_source_basis(question, context)
 
 
 def _fmt_prediction(pred: dict) -> dict:
@@ -276,6 +152,27 @@ def _handle_operator_rule_message(site_id: str, message: str) -> str | None:
         )
         if not confirmed_rule:
             return "I found a pending operating rule but could not save it. Check database access for operator_rules."
+
+        # item_cost rules also propagate directly to the item_costs table
+        if confirmed_rule.get("rule_type") == "item_cost":
+            payload = confirmed_rule.get("payload") or {}
+            item_name = payload.get("item_name") or ""
+            cost_cents = payload.get("cost_cents")
+            if item_name and cost_cents is not None:
+                try:
+                    from data.processing import resolve_item_key
+                    score_key, category = resolve_item_key(item_name)
+                    upsert_item_cost(
+                        site_id=site_id,
+                        score_key=score_key,
+                        category=category,
+                        cost_cents=int(cost_cents),
+                        description=f"Operator confirmed: {item_name}",
+                        source="operator",
+                    )
+                except Exception as exc:
+                    logger.warning("item_cost propagation failed: %s", exc)
+
         return build_rule_saved_response(confirmed_rule)
 
     if is_rejection_message(message):
@@ -804,6 +701,59 @@ def _get_roster_for_date(site_id: str, target_date: date) -> list[dict]:
         return []
 
 
+def _refresh_deputy_rosters(site_id: str, run_date: date) -> dict:
+    """Best-effort on-demand Deputy sync for direct factual roster questions."""
+    try:
+        from scripts.daily_autopilot import step_deputy
+
+        return step_deputy(site_id, run_date, dry_run=False)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _get_data_health_component(data_health: dict | None, source: str) -> dict | None:
+    for component in (data_health or {}).get("components", []):
+        if isinstance(component, dict) and component.get("source") == source:
+            return component
+    return None
+
+
+def _ensure_tomorrow_roster_current(
+    site_id: str,
+    today: date,
+    *,
+    request_plan: dict,
+    data_health: dict | None,
+    tomorrow_roster: list[dict],
+) -> tuple[list[dict], dict | None]:
+    """
+    For direct tomorrow-roster lookups, refresh Deputy on demand when local
+    future coverage is missing or stale. This keeps factual roster questions
+    source-first instead of waiting for the warehouse scheduler.
+    """
+    if request_plan.get("lookup_key") != "tomorrow_roster":
+        return tomorrow_roster, None
+
+    deputy_health = _get_data_health_component(data_health, "deputy_rosters") or {}
+    needs_refresh = (
+        not tomorrow_roster
+        or deputy_health.get("status") != "green"
+        or int(deputy_health.get("next_14d_shifts") or 0) <= 0
+    )
+    if not needs_refresh:
+        return tomorrow_roster, None
+
+    refresh_result = _refresh_deputy_rosters(site_id, today)
+    refreshed_tomorrow_roster = _get_roster_for_date(site_id, today + timedelta(days=1))
+
+    return refreshed_tomorrow_roster or tomorrow_roster, {
+        "attempted": True,
+        "result": refresh_result,
+        "source": "deputy_rosters",
+        "date": (today + timedelta(days=1)).isoformat(),
+    }
+
+
 def _has_roster_data(site_id: str) -> bool:
     """Quick check if any roster data exists for this site."""
     from sqlalchemy import text
@@ -1127,12 +1077,22 @@ def _get_recent_recommendations(site_id: str, days: int = 14, limit: int = 8) ->
 def gather_chat_context(site_id: str, question: str) -> dict:
     today = _today_local()
     context = {"today_date": today.isoformat()}
+    request_plan = classify_chat_request(question)
+    context["request_plan"] = request_plan
 
     # --- Always: data freshness ---
     try:
         freshness = get_data_freshness(site_id)
         if freshness:
             context["data_freshness"] = freshness
+    except Exception:
+        pass
+
+    # --- Always: per-source data health / trust ---
+    try:
+        data_health = get_data_health(site_id)
+        if data_health:
+            context["data_health"] = data_health
     except Exception:
         pass
 
@@ -1181,10 +1141,42 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         if today_roster:
             context["today_roster"] = today_roster
         tomorrow_roster = _get_roster_for_date(site_id, today + timedelta(days=1))
+        tomorrow_roster, refresh_info = _ensure_tomorrow_roster_current(
+            site_id,
+            today,
+            request_plan=request_plan,
+            data_health=context.get("data_health"),
+            tomorrow_roster=tomorrow_roster,
+        )
+        if refresh_info:
+            context["direct_lookup_refresh"] = refresh_info
+            try:
+                refreshed_health = get_data_health(site_id)
+                if refreshed_health:
+                    context["data_health"] = refreshed_health
+            except Exception:
+                pass
         if tomorrow_roster:
             context["tomorrow_roster"] = tomorrow_roster
+        if request_plan.get("lookup_key") == "tomorrow_roster":
+            context["direct_lookup"] = {
+                "lookup_key": "tomorrow_roster",
+                "label": "Tomorrow roster",
+                "source_of_truth": "deputy_rosters",
+                "date": (today + timedelta(days=1)).isoformat(),
+                "status": "ok" if tomorrow_roster else "no_data",
+                "shifts": tomorrow_roster,
+                "refresh_attempted": bool(refresh_info),
+                "refresh_status": (
+                    (refresh_info.get("result") or {}).get("status") if refresh_info else None
+                ),
+            }
     except Exception:
         pass
+
+    question_source_basis = _build_question_source_basis(question, context)
+    if question_source_basis:
+        context["question_source_basis"] = question_source_basis
 
     # --- Always: COGS source status ---
     try:
@@ -1288,6 +1280,14 @@ def gather_chat_context(site_id: str, question: str) -> dict:
         )
         if curiosity_agenda:
             context["curiosity_agenda"] = curiosity_agenda
+    except Exception:
+        pass
+
+    # --- Always: business intelligence hypotheses ---
+    try:
+        bi = compute_business_intelligence(site_id, days=28)
+        if bi.get("hypotheses"):
+            context["business_hypotheses"] = bi["hypotheses"]
     except Exception:
         pass
 
@@ -1882,15 +1882,95 @@ def build_system_prompt(site_name: str, context: dict) -> str:
             "- For recommendations, cite the specific metric(s) used (for example labor %, rev/labor-hour, understaffed intervals, margin %)",
             "- If data is missing/empty, say that explicitly and provide the next check to run",
             "- Keep responses focused. Don't pad with generic advice unless asked",
-            "- If a high-priority knowledge gap below materially changes the answer, ask one precise follow-up question before giving a confident recommendation",
-            "- Ask at most one clarifying question unless the user explicitly asks for a diagnostic walkthrough",
-            "- When you ask a clarifying question, explain exactly what decision it is blocking",
+            "- Attempt the best grounded answer first using the available context before asking for more information",
+            "- If a high-priority knowledge gap remains, ask at most one follow-up question after the main answer unless a hard data-integrity blocker makes a reliable answer impossible",
+            "- When you ask a follow-up question, explain exactly what decision it improves",
             "- Use the curiosity agenda below to decide what the system should learn next about recipes, workflow, purchasing, and profitability levers",
-            "- When the user's question is broad or strategic, you may answer first and then ask one high-value curiosity question that will improve future recommendations",
+            "- When the user's question is broad or strategic, answer first and then ask one high-value curiosity question that will improve future recommendations",
             "- Prefer curiosity questions that can be turned into structured operating knowledge, recipes, or staffing rules",
+            "- Use source-specific data health below. Do not describe data as current if the relevant source is stale or unhealthy",
+            "- If Square orders are stale, do not present sales, trade, item, or order numbers as current",
+            "- If daily profitability is stale, do not present labor %, profit, margin, or efficiency numbers as current",
+            "- If Xero financial facts are stale, do not present incoming/outgoing cash or payroll truth as current",
             "",
         ]
     )
+
+    if "data_health" in context:
+        health = context["data_health"]
+        sections.append("## Data Health")
+        sections.append(
+            "Use this to decide whether a source is trustworthy enough for current-state answers."
+        )
+        sections.append(
+            f"- Overall status: {str(health.get('status') or 'unknown').upper()} "
+            f"(score {float(health.get('score') or 0):.2f})"
+        )
+        for component in health.get("components", [])[:8]:
+            source = str(component.get("source") or "unknown")
+            status = str(component.get("status") or "unknown").upper()
+            latest = component.get("latest_date")
+            latest_text = _format_local_date(latest) if latest else "unknown"
+            age_days = component.get("age_days")
+            age_text = f", {age_days} days old" if age_days is not None else ""
+            sections.append(f"- {source}: {status}, latest {latest_text}{age_text}")
+        sections.append("")
+
+    if "question_source_basis" in context:
+        sections.append("## Question Source Basis")
+        sections.append(
+            "For this question, anchor the answer to these specific sources and dates. "
+            "Do not imply fresher coverage than what is listed here."
+        )
+        for source in context["question_source_basis"][:6]:
+            label = source.get("label") or source.get("source") or "Unknown source"
+            status = str(source.get("status") or "unknown").upper()
+            latest = _format_local_date(source.get("latest_date"))
+            age_days = source.get("age_days")
+            age_text = f", {age_days} days old" if age_days is not None else ""
+            sections.append(f"- {label}: {status}, latest {latest}{age_text}")
+        sections.append("")
+
+    if "request_plan" in context:
+        plan = context["request_plan"]
+        sections.append("## Request Plan")
+        sections.append(f"- Intent: {str(plan.get('intent') or 'general').upper()}")
+        sections.append(f"- Label: {plan.get('label', 'General assistant reasoning')}")
+        sources = plan.get("sources") or []
+        if sources:
+            sections.append(f"- Preferred sources: {', '.join(str(source) for source in sources)}")
+        if plan.get("intent") == "direct_lookup":
+            sections.append(
+                "- This is a direct factual lookup. Answer narrowly and directly from the stated source of truth before expanding into analysis."
+            )
+        elif plan.get("intent") == "analytical":
+            sections.append(
+                "- This is an analytical question. Combine the relevant business metrics before making a recommendation."
+            )
+        elif plan.get("intent") == "strategic":
+            sections.append(
+                "- This is a strategic question. Synthesize across sources and explain the main business risk or priority clearly."
+            )
+        sections.append("")
+
+    if "direct_lookup" in context:
+        lookup = context["direct_lookup"]
+        sections.append("## Direct Lookup")
+        sections.append(
+            f"- Lookup: {lookup.get('label', 'Direct lookup')} for {lookup.get('date', 'unknown date')}"
+        )
+        sections.append(f"- Source of truth: {lookup.get('source_of_truth', 'unknown')}")
+        if lookup.get("status") == "ok":
+            sections.append("- Return this lookup directly and clearly before any broader commentary.")
+            for shift in lookup.get("shifts", [])[:20]:
+                open_tag = " (OPEN/UNFILLED)" if shift.get("is_open") else ""
+                hours = f" ({shift['hours']}h)" if shift.get("hours") else ""
+                sections.append(
+                    f"- {shift['name']}: {shift['start']} – {shift['end']}{hours}{open_tag}"
+                )
+        else:
+            sections.append("- No Deputy roster rows are currently available for that lookup.")
+        sections.append("")
 
     if "operator_rules" in context:
         sections.append("## Confirmed Operating Rules")
@@ -1905,7 +1985,7 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append("## High-Priority Knowledge Gaps")
         sections.append(
             "These are the most important missing pieces of business logic. "
-            "If one of these gaps materially affects the user's question, ask the suggested question before making a confident recommendation."
+            "Use them to qualify confidence. If one materially affects the user's question, answer with what you can first and then ask the suggested follow-up."
         )
         for gap in context["knowledge_gaps"][:5]:
             sections.append(
@@ -2226,6 +2306,19 @@ def build_system_prompt(site_name: str, context: dict) -> str:
         sections.append("")
 
     # --- Intelligence Engine ---
+    if "business_hypotheses" in context:
+        hypotheses = context["business_hypotheses"]
+        summary_text = format_hypotheses_for_chat(hypotheses)
+        if summary_text:
+            sections.append("## What We Know About This Business")
+            sections.append(
+                "These are data-derived beliefs about how this business operates. "
+                "Use them when reasoning about operational questions — treat strong/moderate "
+                "confidence items as established context, not speculation."
+            )
+            sections.append(summary_text)
+            sections.append("")
+
     if "active_insights" in context or "intelligence_summary" in context:
         sections.append("## Intelligence Engine")
         sections.append(
@@ -3171,6 +3264,34 @@ def build_system_prompt(site_name: str, context: dict) -> str:
 
 
 # ============================================================
+# LLM Draft Generation
+# ============================================================
+
+
+def _extract_anthropic_text(response) -> str:
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        if isinstance(block, dict):
+            if block.get("type") == "text" and block.get("text"):
+                parts.append(str(block.get("text")))
+            continue
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
+            parts.append(str(block.text))
+    return "".join(parts).strip()
+
+
+def _generate_draft_answer(system_prompt: str, api_messages: list[dict]) -> str:
+    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=MAX_TOKENS,
+        system=system_prompt,
+        messages=api_messages,
+    )
+    return _extract_anthropic_text(response)
+
+
+# ============================================================
 # Streaming Response
 # ============================================================
 
@@ -3194,17 +3315,6 @@ async def stream_chat_response(
         return
 
     context = gather_chat_context(site_id, last_user_msg)
-    curiosity_item = _select_curiosity_item(last_user_msg, context)
-    if curiosity_item is not None:
-        curiosity_response = _build_curiosity_question_response(curiosity_item)
-        yield f'data: {json.dumps({"content": curiosity_response, "curiosity": curiosity_item})}\n\n'
-        yield 'data: {"done": true}\n\n'
-        return
-
-    if not settings.ANTHROPIC_API_KEY:
-        yield 'data: {"error": "ANTHROPIC_API_KEY not configured"}\n\n'
-        yield 'data: {"done": true}\n\n'
-        return
 
     # --- Process uploaded documents ---
     extraction_results = []
@@ -3261,22 +3371,43 @@ async def stream_chat_response(
                 + "]",
             }
 
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    if not settings.ANTHROPIC_API_KEY:
+        final_text = "AI service unavailable: ANTHROPIC_API_KEY not configured."
+        payload = {
+            "content": final_text,
+            "error": "ANTHROPIC_API_KEY not configured",
+            "draft_answer": "",
+            "final_answer": final_text,
+            "warnings": [],
+            "follow_up_questions": [],
+            "blocked": True,
+            "block_reason": "llm_unavailable",
+            "applied_rules": [{"rule": "llm_unavailable", "category": "hard_blocker"}],
+        }
+        yield f"data: {json.dumps(payload)}\n\n"
+        yield 'data: {"done": true}\n\n'
+        return
 
     try:
-        with client.messages.stream(
-            model=CLAUDE_MODEL,
-            max_tokens=MAX_TOKENS,
-            system=system_prompt,
-            messages=api_messages,
-        ) as stream:
-            for text in stream.text_stream:
-                chunk = json.dumps({"content": text})
-                yield f"data: {chunk}\n\n"
-
+        draft_answer = _generate_draft_answer(system_prompt, api_messages)
+        review = review_draft_answer(last_user_msg, context, messages, draft_answer)
+        payload = review.to_payload()
+        payload["content"] = review.final_answer
+        yield f"data: {json.dumps(payload)}\n\n"
     except anthropic.APIError as e:
         logger.error("Claude API error: %s", e)
-        error_chunk = json.dumps({"error": f"AI service error: {str(e)}"})
-        yield f"data: {error_chunk}\n\n"
+        final_text = f"AI service error: {str(e)}"
+        payload = {
+            "content": final_text,
+            "error": final_text,
+            "draft_answer": "",
+            "final_answer": final_text,
+            "warnings": [],
+            "follow_up_questions": [],
+            "blocked": True,
+            "block_reason": "llm_api_error",
+            "applied_rules": [{"rule": "llm_api_error", "category": "hard_blocker"}],
+        }
+        yield f"data: {json.dumps(payload)}\n\n"
 
     yield 'data: {"done": true}\n\n'

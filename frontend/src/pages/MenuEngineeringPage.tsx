@@ -17,6 +17,17 @@ interface MenuItem {
   qty: number;
   avg_price_cents: number;
   cogs_cents: number;
+  cogs_source: string;
+  cogs_source_label: string;
+  cogs_detail?: string | null;
+  cogs_components: {
+    item_name: string;
+    quantity: number;
+    unit: string;
+    cost_cents: number;
+    source: string;
+    basis: string;
+  }[];
   margin_pct: number;
   total_profit_cents: number;
   quadrant: "star" | "cash_cow" | "question_mark" | "laggard";
@@ -127,6 +138,9 @@ function ItemRow({ item }: { item: MenuItem }) {
               <p className="item-recommendation">{item.recommendation}</p>
               <div className="item-meta">
                 <span>COGS: {cents(item.cogs_cents)} / unit</span>
+                <span className={`cost-basis-tag cost-basis-${item.cogs_source}`}>
+                  {item.cogs_source_label}
+                </span>
                 {item.sale_profile.family && (
                   <span>Family: {item.sale_profile.family}</span>
                 )}
@@ -137,6 +151,18 @@ function ItemRow({ item }: { item: MenuItem }) {
                   <span>Temp: {item.sale_profile.serve_temperature}</span>
                 )}
               </div>
+              {item.cogs_detail && (
+                <p className="item-cost-detail">{item.cogs_detail}</p>
+              )}
+              {!!item.cogs_components?.length && (
+                <div className="item-cost-components">
+                  {item.cogs_components.slice(0, 4).map((component) => (
+                    <span key={`${item.score_key}-${component.item_name}`} className="item-cost-chip">
+                      {component.item_name}: {cents(component.cost_cents)}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </td>
         </tr>

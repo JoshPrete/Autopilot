@@ -253,3 +253,27 @@ def test_existing_recipe_definition_unaffected():
     assert result["rule_type"] == "recipe_definition"
     assert result["payload"].get("is_family_rule") is None
     assert result["payload"]["trigger_item_name"] == "12oz latte"
+
+
+def test_ordering_schedule_accepts_compact_time_format():
+    result = parse_operator_rule_message(
+        "We place toastie orders by 2pm Tuesday for Wednesday delivery"
+    )
+    assert result is not None
+    assert result["rule_type"] == "ordering_schedule"
+    assert result["payload"] == {
+        "subject": "toastie",
+        "cutoff_day": "tuesday",
+        "cutoff_time": "14:00",
+        "delivery_day": "wednesday",
+    }
+
+
+def test_ordering_schedule_accepts_must_be_ordered_form_with_compact_time():
+    result = parse_operator_rule_message(
+        "Toasties must be ordered by 2:30pm Tuesday for Wednesday delivery"
+    )
+    assert result is not None
+    assert result["rule_type"] == "ordering_schedule"
+    assert result["payload"]["subject"] == "Toasties"
+    assert result["payload"]["cutoff_time"] == "14:30"

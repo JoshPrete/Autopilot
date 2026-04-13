@@ -79,6 +79,7 @@ def build_curiosity_agenda(
             "missing_recipe_variant": "More accurate stock depletion and margin logic by product variant",
             "missing_delivery_schedule": "Better order timing and stockout prevention",
             "missing_purchase_profile": "Usable supplier order recommendations instead of raw unit shortfalls",
+            "missing_item_cost": "Real margin calculations in menu engineering and profitability reports",
         }.get(gap.get("gap_type"), "More reliable recommendations")
         add_item(
             {
@@ -263,6 +264,67 @@ def build_curiosity_agenda(
                     "decision_unlocked": "Personalised profitability scoring and lever prioritisation",
                 }
             )
+
+    # --- Weak BI hypotheses: surface as validation questions ---
+    try:
+        from analysis.business_intelligence import compute_business_intelligence
+        bi = compute_business_intelligence(site_id, days=28)
+        weak_hypotheses = [
+            h for h in (bi.get("hypotheses") or [])
+            if h.get("confidence_label") == "weak"
+        ]
+        _hyp_templates: dict[str, tuple[str, str]] = {
+            "labour_trend": (
+                "Labour cost pattern noticed",
+                "We've noticed your labour percentage may have {direction}. Is that intentional, or worth investigating?",
+            ),
+            "avg_ticket_trend": (
+                "Average order size shifting",
+                "Your average order value appears to have {direction} recently. Is this a deliberate change?",
+            ),
+            "quiet_prep_window": (
+                "Quiet window in the day",
+                "Trade looks quieter around the early afternoon each day. How is that time being used currently?",
+            ),
+            "revenue_concentration_peak": (
+                "Revenue concentrated in one window",
+                "A large share of revenue is coming through a short window. Is your team set up to handle that pressure?",
+            ),
+            "dow_efficiency_gap": (
+                "Staff efficiency varies by day",
+                "Revenue per labour dollar looks lower on some days. Are certain days structured differently?",
+            ),
+            "modifier_alt_milk_penetration": (
+                "High alternative milk demand",
+                "Alternative milk demand looks significant. Do you have enough stock to cover it reliably?",
+            ),
+            "product_mix_shift": (
+                "Product mix is shifting",
+                "A few products are trending in different directions. Is this driven by a menu change or pricing?",
+            ),
+        }
+        for h in weak_hypotheses[:2]:
+            key = str(h.get("hypothesis_key") or "")
+            base_key = next((k for k in _hyp_templates if key.startswith(k)), None)
+            if not base_key:
+                continue
+            title, q_tmpl = _hyp_templates[base_key]
+            evidence = h.get("evidence") or {}
+            direction = str(evidence.get("direction") or "changing")
+            question = q_tmpl.format(direction=direction)
+            add_item(
+                {
+                    "agenda_type": "hypothesis_validation",
+                    "priority": "low",
+                    "title": title,
+                    "question": question,
+                    "why_it_matters": h.get("statement") or "The system has noticed a pattern but needs confirmation.",
+                    "decision_unlocked": "Stronger confidence in insights and more reliable recommendations",
+                    "source_hypothesis_key": key,
+                }
+            )
+    except Exception:
+        pass
 
     priority_rank = {"high": 0, "medium": 1, "low": 2}
     agenda.sort(

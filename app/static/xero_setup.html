@@ -54,7 +54,7 @@
         </div>
         <div id="connection-details"></div>
         <div style="margin-top:1.5rem; display:flex; gap:0.75rem;">
-          <a id="connect-btn" class="btn btn-primary" href="#">Connect Xero</a>
+          <button id="connect-btn" class="btn btn-primary" type="button" onclick="startConnect()">Connect Xero</button>
           <button id="sync-btn" class="btn btn-secondary" style="display:none" onclick="syncNow()">Sync Now</button>
         </div>
         <div id="sync-result" class="sync-result"></div>
@@ -82,9 +82,35 @@
       loadStatus();
     }
 
+    function getToken() {
+      return localStorage.getItem('autopilot_token');
+    }
+
+    async function authFetch(url, options = {}) {
+      const token = getToken();
+      if (!token) {
+        throw new Error('Not authenticated. Sign in at /app/login, then reopen Xero Setup.');
+      }
+
+      const headers = {
+        ...(options.headers || {}),
+        Authorization: `Bearer ${token}`,
+      };
+
+      const resp = await fetch(url, { ...options, headers });
+      if (resp.status === 401) {
+        throw new Error('Session expired. Sign in again at /app/login, then retry Xero Setup.');
+      }
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed: ${resp.status}`);
+      }
+      return resp;
+    }
+
     async function loadStatus() {
       try {
-        const resp = await fetch(`/api/xero/status?site_id=${siteId}`);
+        const resp = await authFetch(`/api/xero/status?site_id=${siteId}`);
         const data = await resp.json();
 
         document.getElementById('connection-loading').style.display = 'none';
@@ -99,7 +125,6 @@
           badge.textContent = 'Connected';
           badge.className = 'status-badge status-connected';
           connectBtn.textContent = 'Reconnect Xero';
-          connectBtn.href = `/api/xero/connect?site_id=${siteId}`;
           syncBtn.style.display = 'inline-block';
 
           let html = '';
@@ -118,11 +143,28 @@
           badge.textContent = 'Not Connected';
           badge.className = 'status-badge status-disconnected';
           connectBtn.textContent = 'Connect Xero';
-          connectBtn.href = `/api/xero/connect?site_id=${siteId}`;
           details.innerHTML = '<p style="color:#6e6e73">Connect your Xero account to automatically import supplier bills and keep COGS up to date.</p>';
         }
       } catch (e) {
         document.getElementById('connection-loading').textContent = 'Failed to load status: ' + e.message;
+      }
+    }
+
+    async function startConnect() {
+      const btn = document.getElementById('connect-btn');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Redirecting...';
+
+      try {
+        const resp = await authFetch(`/api/xero/connect-url?site_id=${siteId}`);
+        const data = await resp.json();
+        if (!data.auth_url) throw new Error('Missing Xero authorization URL');
+        window.location.href = data.auth_url;
+      } catch (e) {
+        showSyncResult(e.message, true);
+        btn.disabled = false;
+        btn.textContent = originalText;
       }
     }
 
@@ -132,18 +174,14 @@
       btn.textContent = 'Syncing...';
 
       try {
-        const resp = await fetch(`/api/xero/sync?site_id=${siteId}`, { method: 'POST' });
+        const resp = await authFetch(`/api/xero/sync?site_id=${siteId}`, { method: 'POST' });
         const data = await resp.json();
 
-        if (resp.ok) {
-          showSyncResult(
-            `Sync complete: ${data.bills_fetched} bills fetched, ${data.items_mapped} items mapped, ${data.costs_updated} costs updated.`,
-            false
-          );
-          loadMappings();
-        } else {
-          showSyncResult(`Sync failed: ${data.detail || 'Unknown error'}`, true);
-        }
+        showSyncResult(
+          `Sync complete: ${data.bills_fetched} bills fetched, ${data.items_mapped} items mapped, ${data.costs_updated} costs updated.`,
+          false
+        );
+        loadMappings();
       } catch (e) {
         showSyncResult('Sync failed: ' + e.message, true);
       }
@@ -154,7 +192,7 @@
 
     async function loadMappings() {
       try {
-        const resp = await fetch(`/api/xero/mappings?site_id=${siteId}`);
+        const resp = await authFetch(`/api/xero/mappings?site_id=${siteId}`);
         const data = await resp.json();
         const card = document.getElementById('mappings-card');
         const content = document.getElementById('mappings-content');

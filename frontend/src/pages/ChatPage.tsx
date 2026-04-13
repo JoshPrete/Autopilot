@@ -1,24 +1,68 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { getToken, apiFetch } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import type { ChatAgendaItem, ChatAgendaResponse } from "../types/api";
+import type {
+  ChatAgendaItem,
+  ChatAgendaResponse,
+  ChatMessageResponse,
+  DataHealthComponent,
+  DataHealthResponse,
+} from "../types/api";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  warnings?: string[];
+  follow_up_questions?: string[];
+  follow_up_hint?: string | null;
+  blocked?: boolean;
+}
+
+function pickAssistantContent(payload: ChatMessageResponse): string {
+  const warnings = payload.warnings ?? [];
+  const followUps = payload.follow_up_questions ?? [];
+  const hasMeta = warnings.length > 0 || followUps.length > 0;
+
+  if (payload.blocked) {
+    return payload.final_answer || payload.content || payload.error || "";
+  }
+
+  if (hasMeta) {
+    return payload.draft_answer || payload.final_answer || payload.content || "";
+  }
+
+  return payload.final_answer || payload.content || payload.draft_answer || "";
 }
 
 export function ChatPage() {
   const { user } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [agenda, setAgenda] = useState<ChatAgendaItem[]>([]);
+  const [dataHealth, setDataHealth] = useState<DataHealthResponse | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Load curiosity agenda on mount and pre-seed an opener if available
+  const updateAssistantMessage = useCallback((payload: ChatMessageResponse) => {
+    setMessages((prev) => {
+      const updated = [...prev];
+      const idx = updated.length - 1;
+      if (idx < 0) return prev;
+      updated[idx] = {
+        ...updated[idx],
+        role: "assistant",
+        content: pickAssistantContent(payload),
+        warnings: payload.warnings ?? [],
+        follow_up_questions: payload.follow_up_questions ?? [],
+        follow_up_hint: payload.follow_up_hint ?? null,
+        blocked: Boolean(payload.blocked),
+      };
+      return updated;
+    });
+  }, []);
+
   useEffect(() => {
     if (!user) return;
     apiFetch<ChatAgendaResponse>(`/api/sites/${user.site_id}/chat/agenda`)
@@ -31,7 +75,16 @@ export function ChatPage() {
         }
       })
       .catch(() => {
-        // silently ignore — chat still works without agenda
+        // chat still works without agenda
+      });
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    apiFetch<DataHealthResponse>(`/api/sites/${user.site_id}/analysis/data-health`)
+      .then(setDataHealth)
+      .catch(() => {
+        // chat still works without trust context
       });
   }, [user]);
 
@@ -43,13 +96,10 @@ export function ChatPage() {
     if (!input.trim() || streaming || !user) return;
     const userMsg: Message = { role: "user", content: input.trim() };
     const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
+    setMessages([...nextMessages, { role: "assistant", content: "" }]);
     setInput("");
     setError("");
     setStreaming(true);
-
-    const assistantMsg: Message = { role: "assistant", content: "" };
-    setMessages([...nextMessages, assistantMsg]);
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -70,7 +120,11 @@ export function ChatPage() {
         throw new Error(body.detail || `Request failed: ${resp.status}`);
       }
 
-      const reader = resp.body!.getReader();
+      const reader = resp.body?.getReader();
+      if (!reader) {
+        throw new Error("No response body received from chat API.");
+      }
+
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -80,18 +134,25 @@ export function ChatPage() {
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
+
         for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const chunk = line.slice(6);
-            if (chunk === "[DONE]") continue;
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[updated.length - 1] = {
-                ...updated[updated.length - 1],
-                content: updated[updated.length - 1].content + chunk,
-              };
-              return updated;
-            });
+          if (!line.startsWith("data: ")) continue;
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+
+          let payload: ChatMessageResponse;
+          try {
+            payload = JSON.parse(raw) as ChatMessageResponse;
+          } catch {
+            updateAssistantMessage({ content: raw });
+            continue;
+          }
+
+          if (payload.done) continue;
+
+          updateAssistantMessage(payload);
+          if (payload.error && !payload.final_answer && !payload.content) {
+            setError(payload.error);
           }
         }
       }
@@ -118,10 +179,40 @@ export function ChatPage() {
   }
 
   const showChips = agenda.length > 0 && messages.length <= 1 && !streaming;
+  const trustComponents = (dataHealth?.components ?? []).filter((component) =>
+    ["square_orders", "daily_profitability", "deputy_rosters", "predictions", "xero_financial_facts"].includes(component.source),
+  );
 
   return (
     <div className="chat-page">
       <h1 className="page-title">Chat</h1>
+
+      {dataHealth && (
+        <div className={`chat-trust-strip status-${dataHealth.status ?? "unknown"}`}>
+          <div className="chat-trust-overall">
+            <span>Data trust</span>
+            <span className={`chat-trust-badge status-${dataHealth.status ?? "unknown"}`}>
+              {dataHealth.status ?? "unknown"}
+            </span>
+            <span>{dataHealth.score != null ? `${Math.round(dataHealth.score * 100)}%` : "--"}</span>
+          </div>
+          <div className="chat-trust-pills">
+            {trustComponents.map((component) => (
+              <div key={component.source} className="chat-trust-pill">
+                <span className={`chat-trust-dot status-${component.status ?? "unknown"}`} />
+                <span className="chat-trust-copy">
+                  <strong>{labelForSource(component)}</strong>
+                  <span>
+                    {component.latest_date ?? "--"}
+                    {component.age_days != null ? ` · ${component.age_days}d` : ""}
+                  </span>
+                  {healthNote(component) && <span className="chat-trust-note">{healthNote(component)}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="chat-messages">
         {messages.length === 0 && (
@@ -132,7 +223,35 @@ export function ChatPage() {
         {messages.map((m, i) => (
           <div key={i} className={`chat-bubble chat-bubble-${m.role}`}>
             <div className="chat-bubble-label">{m.role === "user" ? user?.name ?? "You" : "Autopilot"}</div>
-            <div className="chat-bubble-content">{m.content}{i === messages.length - 1 && streaming && m.role === "assistant" && <span className="chat-cursor" />}</div>
+            <div className="chat-bubble-content">
+              <div className="chat-answer">
+                {m.content}
+                {i === messages.length - 1 && streaming && m.role === "assistant" && <span className="chat-cursor" />}
+              </div>
+              {m.role === "assistant" && !!m.warnings?.length && (
+                <div className="chat-meta-card chat-meta-warning">
+                  <div className="chat-meta-title">Confidence note</div>
+                  <ul>
+                    {m.warnings.map((warning, idx) => (
+                      <li key={idx}>{warning}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {m.role === "assistant" && !!m.follow_up_questions?.length && (
+                <div className="chat-meta-card chat-meta-followup">
+                  <div className="chat-meta-title">
+                    {m.blocked ? "What needs fixing first" : "To improve this further"}
+                  </div>
+                  <ul>
+                    {m.follow_up_questions.map((question, idx) => (
+                      <li key={idx}>{question}</li>
+                    ))}
+                  </ul>
+                  {m.follow_up_hint && <div className="chat-meta-hint">{m.follow_up_hint}</div>}
+                </div>
+              )}
+            </div>
           </div>
         ))}
         <div ref={bottomRef} />
@@ -172,4 +291,21 @@ export function ChatPage() {
       </div>
     </div>
   );
+}
+
+function labelForSource(component: DataHealthComponent): string {
+  const labels: Record<string, string> = {
+    square_orders: "Square",
+    daily_profitability: "Profit",
+    deputy_rosters: "Deputy",
+    predictions: "Predictions",
+    xero_financial_facts: "Xero Facts",
+  };
+  return labels[component.source] ?? component.source;
+}
+
+function healthNote(component: DataHealthComponent): string | null {
+  const blockers = Array.isArray(component.blockers) ? component.blockers : [];
+  const limitations = Array.isArray(component.limitations) ? component.limitations : [];
+  return blockers[0] ?? limitations[0] ?? null;
 }

@@ -14,7 +14,7 @@ export function RushWindowCard({ rush }: { rush: RushWindow }) {
   return (
     <div className="rush-card">
       <div className="rush-card-header">
-        <h3>Rush #{rush.window_number}</h3>
+        <h3>Peak Window #{rush.window_number}</h3>
         <span className="rush-time">
           {formatTime(rush.start)} &ndash; {formatTime(rush.end)}
         </span>

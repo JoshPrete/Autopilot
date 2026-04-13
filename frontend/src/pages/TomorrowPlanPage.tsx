@@ -77,7 +77,7 @@ export function TomorrowPlanPage() {
   if (error) return <div className="error-banner">{error}</div>;
   if (!plan) return <div className="empty">No plan available.</div>;
 
-  const { meta, forecast, labor, weather, actions, rush_windows, hourly } = plan;
+  const { meta, forecast, labor, weather, actions, rush_windows, hourly, peak_trade } = plan;
 
   return (
     <div className="plan-page">
@@ -87,6 +87,7 @@ export function TomorrowPlanPage() {
         <div className="plan-header-left">
           <h1 className="plan-day">{meta.day_name}</h1>
           <p className="plan-date">{meta.forecast_date}</p>
+          <p className="plan-subtitle">Tomorrow Trade Plan</p>
         </div>
         <div className="plan-header-right">
           {meta.confidence_label && (
@@ -127,10 +128,62 @@ export function TomorrowPlanPage() {
         )}
       </div>
 
+      {/* ── Peak Trade Summary ── */}
+      <section className="plan-section">
+        <h2 className="plan-section-title">Trade Shape</h2>
+        {peak_trade.vs_typical_direction && peak_trade.vs_typical_direction !== "similar" && (
+          <div className={`vs-typical-banner vs-typical-${peak_trade.vs_typical_direction}`}>
+            <span className="vs-typical-icon">
+              {peak_trade.vs_typical_direction === "busier" ? "↑" : "↓"}
+            </span>
+            <span className="vs-typical-text">
+              {Math.abs(peak_trade.vs_typical_pct ?? 0).toFixed(0)}%{" "}
+              {peak_trade.vs_typical_direction} than a typical {meta.day_name}
+            </span>
+          </div>
+        )}
+        {peak_trade.vs_typical_direction === "similar" && (
+          <div className="vs-typical-banner vs-typical-similar">
+            <span className="vs-typical-text">Similar to a typical {meta.day_name}</span>
+          </div>
+        )}
+        <div className="plan-summary-grid">
+          <div className="plan-summary-card">
+            <span className="summary-label">Busiest period</span>
+            <span className="summary-value">
+              {peak_trade.busiest_window_label ?? peak_trade.peak_hour_label ?? "—"}
+            </span>
+            <p className="summary-note">
+              {peak_trade.busiest_window_drinks != null
+                ? `${peak_trade.busiest_window_drinks} drinks expected through the strongest rush window.`
+                : peak_trade.peak_hour_workload != null
+                  ? `Peak hourly workload is ${peak_trade.peak_hour_workload.toFixed(1)} units.`
+                  : "Peak trade timing is not available yet."}
+            </p>
+          </div>
+          <div className="plan-summary-card">
+            <span className="summary-label">Day shape</span>
+            <span className="summary-value">{peak_trade.day_shape_title}</span>
+            <p className="summary-note">{peak_trade.day_shape_note}</p>
+          </div>
+          <div className="plan-summary-card">
+            <span className="summary-label">Peak / quiet hour</span>
+            <span className="summary-value">
+              {peak_trade.peak_hour_label ?? "—"} / {peak_trade.quiet_hour_label ?? "—"}
+            </span>
+            <p className="summary-note">
+              {peak_trade.rush_window_count > 0
+                ? `${peak_trade.rush_window_count} rush window${peak_trade.rush_window_count === 1 ? "" : "s"} detected for the day.`
+                : "No rush windows detected, so staffing can stay flatter through trade."}
+            </p>
+          </div>
+        </div>
+      </section>
+
       {/* ── Actions ── */}
       {actions.length > 0 && (
         <section className="plan-section">
-          <h2 className="plan-section-title">Actions for Tomorrow</h2>
+          <h2 className="plan-section-title">Operator Focus</h2>
           <ol className="plan-actions">
             {actions.map((action, i) => (
               <li key={i} className="plan-action-item">
@@ -145,7 +198,7 @@ export function TomorrowPlanPage() {
       {/* ── Rush Windows ── */}
       {rush_windows.length > 0 && (
         <section className="plan-section">
-          <h2 className="plan-section-title">Rush Windows</h2>
+          <h2 className="plan-section-title">Peak Trade Windows</h2>
           <div className="rush-grid">
             {rush_windows.map((rw) => (
               <RushWindowCard key={rw.window_number} rush={rw} />
@@ -157,7 +210,7 @@ export function TomorrowPlanPage() {
       {/* ── Hourly Chart ── */}
       {hourly.length > 0 && (
         <section className="plan-section">
-          <h2 className="plan-section-title">Hourly Workload</h2>
+          <h2 className="plan-section-title">Expected Day Shape by Hour</h2>
           <HourlyChart hourly={hourly} />
         </section>
       )}
