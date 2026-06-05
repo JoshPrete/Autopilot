@@ -2629,9 +2629,23 @@ _operator_rules_table_verified: bool = False
 
 
 def _ensure_operator_rules_table(conn) -> bool:
+    """Ensure the operator_rules table exists.
+
+    Two-phase approach so that an index-creation failure (e.g. the app role
+    lacks CREATE INDEX on public) does not roll back a successfully created
+    table and leave the verified flag permanently False.
+
+    Phase 1 (hard): create the table.  If this fails the table truly cannot
+    be used and we return False.
+    Phase 2 (soft): create optimisation indexes.  Failures here are logged
+    at WARNING level but do not affect the return value — the table is
+    still usable.
+    """
     global _operator_rules_table_verified
     if _operator_rules_table_verified:
         return True
+
+    # Phase 1 — table DDL (must succeed)
     try:
         conn.execute(
             _text(
@@ -2655,31 +2669,40 @@ def _ensure_operator_rules_table(conn) -> bool:
                 """
             )
         )
-        conn.execute(
-            _text(
-                """
-                CREATE INDEX IF NOT EXISTS idx_operator_rules_site_status
-                ON operator_rules(site_id, status, active, updated_at DESC)
-                """
-            )
-        )
-        conn.execute(
-            _text(
-                """
-                CREATE INDEX IF NOT EXISTS idx_operator_rules_site_type
-                ON operator_rules(site_id, rule_type, updated_at DESC)
-                """
-            )
-        )
-        _operator_rules_table_verified = True
-        return True
     except Exception as exc:  # pragma: no cover - depends on DB privileges
         try:
             conn.rollback()
         except Exception:
             pass
-        logger.info("operator_rules table unavailable (non-fatal): %s", exc)
+        logger.warning("operator_rules table could not be created: %s", exc)
         return False
+
+    # Table exists — mark verified now so subsequent requests don't retry DDL
+    _operator_rules_table_verified = True
+
+    # Phase 2 — composite indexes (best-effort, non-fatal)
+    for idx_sql in (
+        """
+        CREATE INDEX IF NOT EXISTS idx_operator_rules_site_status
+        ON operator_rules(site_id, status, active, updated_at DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_operator_rules_site_type
+        ON operator_rules(site_id, rule_type, updated_at DESC)
+        """,
+    ):
+        try:
+            conn.execute(_text(idx_sql))
+        except Exception as idx_exc:  # pragma: no cover - depends on DB privileges
+            logger.warning(
+                "operator_rules index creation skipped (non-fatal): %s", idx_exc
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+    return True
 
 
 def _row_to_operator_rule(row) -> dict:
